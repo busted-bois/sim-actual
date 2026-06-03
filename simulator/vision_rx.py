@@ -9,14 +9,11 @@ import numpy as np
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
 
-class VisionRX:
 
+class VisionRX:
     def __init__(self, data):
         self.data = data
-        self.thread = threading.Thread(
-            target=self._vision_loop,
-            daemon=False
-        )
+        self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
 
@@ -45,15 +42,12 @@ class VisionRX:
             # jpeg_size - full size of jpeg data
             # payload_size - size of this packet
             # sim_time_ns - frame's epoch timestamp in ns on the server
-            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(header_format, header)
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(
+                header_format, header
+            )
 
             if frame_id not in frames:
-                frames[frame_id] = {
-                    "chunks": {},
-                    "total": total_chunks,
-                    "size": jpeg_size,
-                    "time": sim_time_ns
-                }
+                frames[frame_id] = {"chunks": {}, "total": total_chunks, "size": jpeg_size, "time": sim_time_ns}
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
@@ -64,7 +58,13 @@ class VisionRX:
                 frame_complete = True
                 for i in range(total_chunks):
                     if i not in frames[frame_id]["chunks"]:
-                        print('Missing packet %s in frame %s' % (i, frame_id,))
+                        print(
+                            "Missing packet %s in frame %s"
+                            % (
+                                i,
+                                frame_id,
+                            )
+                        )
                         frame_complete = False
                         continue
                     jpeg_bytes.extend(frames[frame_id]["chunks"][i])

@@ -4,7 +4,7 @@
 
 import time
 
-from setup import setup_components
+from simulator.setup import setup_components
 
 # Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "127.0.0.1"
@@ -18,10 +18,10 @@ shared_data = {}
 
 # setup components
 components = setup_components(shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT)
-controller = components['controller']
-ts_loop = components['ts_loop']
-mavlink_rx = components['mavlink_rx']
-vision_rx = components['vision_rx']
+controller = components["controller"]
+ts_loop = components["ts_loop"]
+mavlink_rx = components["mavlink_rx"]
+vision_rx = components["vision_rx"]
 
 print("Arming drone...", flush=True)
 controller.arm()

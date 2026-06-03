@@ -1,15 +1,23 @@
 from pymavlink import mavutil
-from timesync import TimeSync
-from vision_rx import VisionRX
-from mavlink_rx import MAVLinkRX
-from controller import Controller
+
+from simulator.controller import Controller
+from simulator.mavlink_rx import MAVLinkRX
+from simulator.timesync import TimeSync
+from simulator.vision_rx import VisionRX
+
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
     # Start a connection listening on a UDP port
-    sim_conn = mavutil.mavlink_connection('udpin:%s:%s' % (server_ip, server_udp_port,))
+    sim_conn = mavutil.mavlink_connection(
+        "udpin:%s:%s"
+        % (
+            server_ip,
+            server_udp_port,
+        )
+    )
     print("Waiting for heartbeat...", flush=True)
     sim_conn.wait_heartbeat()
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
@@ -37,9 +45,9 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     controller = Controller(sim_conn, shared_data, system_boot_ms)
 
     return {
-        'vision_rx': vision_rx,
-        'mavlink_rx': mavlink_rx,
-        'ts_loop': ts_loop,
-        'sim_conn': sim_conn,
-        'controller': controller
+        "vision_rx": vision_rx,
+        "mavlink_rx": mavlink_rx,
+        "ts_loop": ts_loop,
+        "sim_conn": sim_conn,
+        "controller": controller,
     }

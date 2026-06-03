@@ -1,5 +1,5 @@
 # Simulator binaries (Windows-only, too large for git)
-simulator/
+_backup
 
 # Original archives
 *.zip
