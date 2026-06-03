@@ -1,0 +1,10 @@
+# Simulator binaries (Windows-only, too large for git)
+simulator/
+
+# Original archives
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/

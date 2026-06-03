@@ -1,0 +1,13 @@
+[project]
+name = "anduril-sim"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "keyboard>=0.13.5",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.6",
+    "opencv-python>=4.13.0.92",
+    "pymavlink>=2.4.49",
+]
