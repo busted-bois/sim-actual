@@ -15,27 +15,24 @@ MOTOR_FRONT_RIGHT = 1
 MOTOR_BACK_LEFT = 0
 MOTOR_BACK_RIGHT = 0
 
+
 def update_motor_control(mavlink_conn, system_boot_ms):
     motor_rpms = [MOTOR_FRONT_LEFT, MOTOR_FRONT_RIGHT, MOTOR_BACK_LEFT, MOTOR_BACK_RIGHT, 0, 0, 0, 0]
     mavlink_conn.mav.set_actuator_control_target_send(
-        int(time.time() * 1e6),
-        mavlink_conn.target_system,
-        mavlink_conn.target_component,
-        0,
-        motor_rpms
+        int(time.time() * 1e6), mavlink_conn.target_system, mavlink_conn.target_component, 0, motor_rpms
     )
+
 
 # --------------------------------------------------------------------------------------
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
-PITCH_RATE = -0.3   # rad/s (negative = pitch forward)
-ROLL_RATE  = 0.0
-YAW_RATE   = 0.0
-THRUST     = 0.6    # 0.0 - 1.0
+PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
+ROLL_RATE = 0.0
+YAW_RATE = 0.0
+THRUST = 0.6  # 0.0 - 1.0
 
-RATES_ATTITUDE_MASK = (
-    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
-)
+RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     now_ms = int(time.time() * 1000)
@@ -63,24 +60,24 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
         ROLL_RATE,
         PITCH_RATE,
         YAW_RATE,
-        THRUST
+        THRUST,
     )
+
 
 # --------------------------------------------------------------------------------------
 # POSITION CONTROLS
 # --------------------------------------------------------------------------------------
 VELOCITY_POSITION_MASK = (
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE |
-
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
+
 
 def update_position_flight_control(mavlink_conn, system_boot_ms):
     now_ms = int(time.time() * 1000)
@@ -113,18 +110,26 @@ def update_position_flight_control(mavlink_conn, system_boot_ms):
         mavlink_conn.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         VELOCITY_POSITION_MASK,
-        0.0, 0, 0.0,    # ignored position NED
-        2.0, 0.0, 0.0,  # Vel - 2 m/s forward
-        0.0, 0, 0.0,    # ignored acceleration
-        0,              # ignored yaw
-        0.0             # ignored yaw rate
+        0.0,
+        0,
+        0.0,  # ignored position NED
+        2.0,
+        0.0,
+        0.0,  # Vel - 2 m/s forward
+        0.0,
+        0,
+        0.0,  # ignored acceleration
+        0,  # ignored yaw
+        0.0,  # ignored yaw rate
     )
+
 
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
 
 CONTROL_HZ = 250
+
 
 class Controller:
     def __init__(self, sim_conn, data, system_boot_ms):
@@ -134,7 +139,7 @@ class Controller:
 
     def update(self):
         # send automated targets to sim flight controller
-        #update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
+        # update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
         # alternatively one of
         # update_position_flight_control(self.sim_conn, self.system_boot_ms)
         update_motor_control(self.sim_conn, self.system_boot_ms)
@@ -151,7 +156,12 @@ class Controller:
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
             1,  # arm
-            0, 0, 0, 0, 0, 0
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
 
     def send_sim_reset_command(self):
@@ -160,5 +170,11 @@ class Controller:
             self.sim_conn.target_component,
             MAVLINK_CMD_SIM_RESET,
             0,  # confirmation
-            0, 0, 0, 0, 0, 0, 0
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         )

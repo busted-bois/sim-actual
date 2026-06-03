@@ -5,10 +5,10 @@ import threading
 from pymavlink import mavutil
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
-ENCAPSULATED_TRACK_INFO_MSG_ID  = 2
+ENCAPSULATED_TRACK_INFO_MSG_ID = 2
+
 
 class MAVLinkRX:
-
     def __init__(self, mavlink_connection, data):
         self.mavlink_conn = mavlink_connection
         self.data = data
@@ -21,10 +21,7 @@ class MAVLinkRX:
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
         rx = cls(mavlink_connection, data)
-        rx.thread = threading.Thread(
-            target=rx.mavlink_receive_loop,
-            daemon = False
-        )
+        rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=False)
         rx.is_running = True
         rx.thread.start()
         return rx
@@ -38,11 +35,10 @@ class MAVLinkRX:
         Continuously receive MAVLink messages without blocking.
         """
         while self.is_running:
-
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                print('WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.')
+                print("WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.")
                 return
 
             if msg is None:
@@ -174,8 +170,14 @@ class MAVLinkRX:
         # race_finish_time_ns - elapsed ns on server since sim boot when race finished. None or < 0 if race is ongoing
         # active_gate_index - current index of target race gate
         # last_gate_race_time - race time in seconds when last gate was passed
-        data_type, sim_boot_time_ms, race_start_boot_time_ms, race_finish_time_ns, active_gate_index, last_gate_race_time = struct.unpack_from(
-            "<BQqqIq", raw_payload)
+        (
+            data_type,
+            sim_boot_time_ms,
+            race_start_boot_time_ms,
+            race_finish_time_ns,
+            active_gate_index,
+            last_gate_race_time,
+        ) = struct.unpack_from("<BQqqIq", raw_payload)
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
@@ -198,7 +200,7 @@ class MAVLinkRX:
     def on_track_data(self, payload):
         # header:
         #   num_gates - track gate count
-        num_gates, = struct.unpack_from("<H", payload)
+        (num_gates,) = struct.unpack_from("<H", payload)
         payload = payload[2:]
         for i in range(num_gates):
             # Gate Info
@@ -207,8 +209,18 @@ class MAVLinkRX:
             #   orientation_ned_w, orientation_ned_x, orientation_ned_y, orientation_ned_z - Orientation of gate in NED coordinates
             #   width - gate width in metres
             #   height - gate height in metres
-            gate_id, position_ned_x, position_ned_y, position_ned_z, orientation_ned_w, orientation_ned_x, orientation_ned_y, orientation_ned_z, width, height = struct.unpack_from(
-                "<Hfffffffff", payload)
+            (
+                gate_id,
+                position_ned_x,
+                position_ned_y,
+                position_ned_z,
+                orientation_ned_w,
+                orientation_ned_x,
+                orientation_ned_y,
+                orientation_ned_z,
+                width,
+                height,
+            ) = struct.unpack_from("<Hfffffffff", payload)
             payload = payload[38:]
 
     def on_actuator_output_status(self, msg):
@@ -224,5 +236,5 @@ class MAVLinkRX:
         # 1002 - Environment
         collision_id = msg.id
 
-        threat_level = msg.threat_level # 1-2 with 2 being higher impact collision
-        impact = msg.horizontal_minimum_delta # this is not a delta - it is the impulse magnitude in kg m/s
+        threat_level = msg.threat_level  # 1-2 with 2 being higher impact collision
+        impact = msg.horizontal_minimum_delta  # this is not a delta - it is the impulse magnitude in kg m/s
