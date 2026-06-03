@@ -23,3 +23,4 @@
 - Do NOT use python (.py) for anything other than actual simulator logic. Use shell scripts (ex. bash, powershell) for other tasks, ONLY AS NEEDED.
 - Makefile is the centralized calling file with scripts, NOT pyproject.toml. If needed, install it in powershell with `choco install make`. On MacOS / Linux, it should automatically work by default.
 - Before commiting any files, use the deslop skill to verify the changes and ensure we aren't going overboard.
+- All simulator code logic should be written within the simulator/ directory, and then called from main.py. The main.py should not have command-line arguments for new functionality. The new functionality added should work with the default settings, just from running `make sim` (`uv run sim`).

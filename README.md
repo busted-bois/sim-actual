@@ -4,23 +4,28 @@ Autonomous drone racing pilot for the [AI Grand Prix](https://www.theaigrandprix
 
 ## Quickstart
 
+- Requires [uv](https://docs.astral.sh/uv/)
+
+- On Windows, ensure you are using powershell, then install make with `choco install make`.
+
+
 ```bash
-uv sync
-uv run main.py
+make          # install deps
+make check    # lint + format
+make sim      # run the pilot
 ```
 
 ## Project Structure
 
 ```
-controller.py    Flight control logic
-main.py          Entry point
-mavlink_rx.py    MAVLink message receiver
-setup.py         Component initialization
-timesync.py      Time synchronization
-vision_rx.py     Vision data receiver
+docs/                   # Competition docs
+simulator/              # Simulator package
+main.py                 # Entry point
+Makefile                # Setup, lint, run targets
+pyproject.toml          # Dependencies (uv)
+uv.lock                 # Lockfile
+skills-lock.json        # Agent skills lockfile
 ```
-
-The simulator binaries live in `simulator/` (gitignored).
 
 ## More Info
 
