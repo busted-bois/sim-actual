@@ -42,12 +42,17 @@ class VisionRX:
             # jpeg_size - full size of jpeg data
             # payload_size - size of this packet
             # sim_time_ns - frame's epoch timestamp in ns on the server
-            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(
-                header_format, header
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
+                struct.unpack(header_format, header)
             )
 
             if frame_id not in frames:
-                frames[frame_id] = {"chunks": {}, "total": total_chunks, "size": jpeg_size, "time": sim_time_ns}
+                frames[frame_id] = {
+                    "chunks": {},
+                    "total": total_chunks,
+                    "size": jpeg_size,
+                    "time": sim_time_ns,
+                }
 
             frames[frame_id]["chunks"][chunk_id] = payload
 

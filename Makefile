@@ -1,4 +1,4 @@
-.PHONY: i install check sim
+.PHONY: i install check test sim
 
 i install:
 	uv sync
@@ -6,6 +6,9 @@ i install:
 check:
 	uv run ruff check --fix .
 	uv run ruff format .
+
+test:
+	uv run pytest -q
 
 sim:
 	uv run main.py

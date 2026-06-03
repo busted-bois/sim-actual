@@ -17,9 +17,22 @@ MOTOR_BACK_RIGHT = 0
 
 
 def update_motor_control(mavlink_conn, system_boot_ms):
-    motor_rpms = [MOTOR_FRONT_LEFT, MOTOR_FRONT_RIGHT, MOTOR_BACK_LEFT, MOTOR_BACK_RIGHT, 0, 0, 0, 0]
+    motor_rpms = [
+        MOTOR_FRONT_LEFT,
+        MOTOR_FRONT_RIGHT,
+        MOTOR_BACK_LEFT,
+        MOTOR_BACK_RIGHT,
+        0,
+        0,
+        0,
+        0,
+    ]
     mavlink_conn.mav.set_actuator_control_target_send(
-        int(time.time() * 1e6), mavlink_conn.target_system, mavlink_conn.target_component, 0, motor_rpms
+        int(time.time() * 1e6),
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        0,
+        motor_rpms,
     )
 
 

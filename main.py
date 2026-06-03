@@ -17,7 +17,9 @@ system_boot_ms = int(time.time() * 1000)
 shared_data = {}
 
 # setup components
-components = setup_components(shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT)
+components = setup_components(
+    shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT
+)
 controller = components["controller"]
 ts_loop = components["ts_loop"]
 mavlink_rx = components["mavlink_rx"]
