@@ -15,5 +15,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "lefthook>=2.1.9",
+    "pytest>=8.4.0",
     "ruff>=0.15.15",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
