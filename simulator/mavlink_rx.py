@@ -287,4 +287,5 @@ class MAVLinkRX:
             "id": msg.id,
             "threat_level": msg.threat_level,
             "impact": msg.horizontal_minimum_delta,
+            "received_at": time.time(),
         }

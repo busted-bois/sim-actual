@@ -87,8 +87,8 @@ def test_on_collision_stores_event():
     rx.on_collision(
         SimpleNamespace(id=1001, threat_level=2, horizontal_minimum_delta=1.25)
     )
-    assert rx.data["collision"] == {
-        "id": 1001,
-        "threat_level": 2,
-        "impact": 1.25,
-    }
+    collision = rx.data["collision"]
+    assert collision["id"] == 1001
+    assert collision["threat_level"] == 2
+    assert collision["impact"] == 1.25
+    assert "received_at" in collision
