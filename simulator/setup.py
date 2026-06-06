@@ -16,6 +16,8 @@ from simulator.mavlink_rx import MAVLinkRX
 
 from simulator.timesync import TimeSync
 
+from simulator.tracking import LocalTracker
+
 from simulator.vision_rx import VisionRX
 
 
@@ -187,6 +189,9 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
 
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
 
+    controller = Controller(sim_conn, shared_data, system_boot_ms)
+    controller.request_highres_imu()
+
     print("Setting up MAVLink rx...", flush=True)
 
     mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data)
@@ -197,7 +202,8 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
 
     vision_rx = VisionRX(shared_data)
 
-    controller = Controller(sim_conn, shared_data, system_boot_ms)
+    local_tracker = LocalTracker()
+    shared_data["_local_tracker"] = local_tracker
 
     return {
         "vision_rx": vision_rx,

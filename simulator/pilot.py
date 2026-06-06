@@ -2,7 +2,11 @@ import math
 import time
 
 from simulator.navigation import active_gate, bearing_error_ned
-from simulator.preflight import ensure_countdown_fallback, race_go_allowed
+from simulator.preflight import (
+    RaceGoLatch,
+    arm_relative_go_boot_ms,
+    race_go_allowed,
+)
 
 CONTROL_DT_S = 1.0 / 250.0
 
@@ -24,6 +28,12 @@ KI_Z = 0.035
 KD_Z = 0.12
 Z_TARGET_NED = -5.0
 
+# Sim reboot / session reset drops sim_boot_time_ms sharply.
+SIM_BOOT_RESET_DROP_MS = 500
+
+# Fallback if race_start never arrives after arm.
+ARM_GO_FALLBACK_TIMEOUT_S = 5.0
+
 
 def _clamp(value, low, high):
     return max(low, min(high, value))
@@ -35,8 +45,21 @@ class Pilot:
         self.data = data
         self._collision_hold_start = None
         self._z_integral = 0.0
+        self._last_sim_boot_ms = None
+        self._last_race_start_boot_ms = None
+        self._session_armed = False
+        self._go_boot_ms = None
+        self._armed_sim_boot_ms = None
+        self._armed_at_mono = None
+        self._race_go_latch = RaceGoLatch()
+        self._restart_session = False
+        self._racing = False
+        self._passed_go = False
 
     def tick(self):
+        self._consume_main_latch()
+        self._update_race_session()
+
         if not self.data.get("armed"):
             self._hover()
             return
@@ -48,9 +71,7 @@ class Pilot:
             self._hover()
             return
 
-        if not race_go_allowed(self.data):
-            if self.data.get("armed") and self.data.get("track_gates"):
-                ensure_countdown_fallback(self.data)
+        if not self._race_go_allowed():
             self._hover()
             return
 
@@ -66,6 +87,122 @@ class Pilot:
             return
 
         self._cruise_forward()
+
+    def _consume_main_latch(self):
+        latched = self.data.pop("_latched_go_boot_ms", None)
+        if latched is not None:
+            self._go_boot_ms = latched
+            self._session_armed = True
+            self._restart_session = False
+            self._racing = True
+            self._passed_go = False
+            race = self.data.get("race_status") or {}
+            self._last_sim_boot_ms = race.get("sim_boot_time_ms")
+            self._last_race_start_boot_ms = race.get("race_start_boot_time_ms", -1)
+
+    def _race_go_allowed(self):
+        return race_go_allowed(self.data, go_boot_ms=self._go_boot_ms)
+
+    def _update_race_session(self):
+        race = self.data.get("race_status") or {}
+        race_start = race.get("race_start_boot_time_ms", -1)
+        sim_boot = race.get("sim_boot_time_ms", 0)
+
+        if self._go_boot_ms is not None and sim_boot >= self._go_boot_ms:
+            self._passed_go = True
+
+        if race_start < 0:
+            self._racing = False
+
+        if self._is_new_race_session(sim_boot, race_start):
+            self._begin_new_race_session()
+
+        self._update_race_go_target(sim_boot, race_start)
+        self._maybe_arm_relative_fallback(sim_boot)
+
+        if self.data.get("track_gates") and not self._session_armed:
+            if race_start < 0 or self._restart_session:
+                self._arm_for_session(sim_boot)
+
+        self._race_go_latch.observe_race_start(race_start)
+
+        self._last_sim_boot_ms = sim_boot
+        self._last_race_start_boot_ms = race_start
+
+    def _arm_for_session(self, sim_boot):
+        self.controller.arm()
+        self._session_armed = True
+        self._armed_sim_boot_ms = sim_boot
+        self._armed_at_mono = time.monotonic()
+        self._last_race_start_boot_ms = -1
+        self._race_go_latch.reset_for_arm(is_restart=self._restart_session)
+
+    def _update_race_go_target(self, sim_boot, race_start):
+        if not self._session_armed or self._go_boot_ms is not None:
+            return
+
+        go_boot_ms, branch = self._race_go_latch.try_latch(sim_boot, race_start)
+        if go_boot_ms is not None:
+            self._go_boot_ms = go_boot_ms
+            print(
+                "Latch: "
+                f"sim_boot={sim_boot}ms "
+                f"race_start={race_start}ms "
+                f"go_boot={go_boot_ms}ms "
+                f"branch={branch}",
+                flush=True,
+            )
+
+    def _maybe_arm_relative_fallback(self, sim_boot):
+        if self._go_boot_ms is not None or not self._session_armed:
+            return
+        if self._armed_at_mono is None or self._armed_sim_boot_ms is None:
+            return
+        if time.monotonic() - self._armed_at_mono < ARM_GO_FALLBACK_TIMEOUT_S:
+            return
+
+        self._go_boot_ms = arm_relative_go_boot_ms(self._armed_sim_boot_ms)
+        print(
+            "Latch fallback: "
+            f"armed_sim_boot={self._armed_sim_boot_ms}ms "
+            f"go_boot={self._go_boot_ms}ms "
+            f"branch=arm_relative",
+            flush=True,
+        )
+
+    def _is_new_race_session(self, sim_boot, race_start):
+        if self._last_sim_boot_ms is None:
+            return False
+
+        if self._racing and race_start >= 0:
+            return False
+
+        if (
+            self._passed_go
+            and sim_boot < self._last_sim_boot_ms - SIM_BOOT_RESET_DROP_MS
+        ):
+            return True
+
+        return (
+            self._last_race_start_boot_ms is not None
+            and self._last_race_start_boot_ms >= 0
+            and race_start < 0
+        )
+
+    def _begin_new_race_session(self):
+        self._session_armed = False
+        self._go_boot_ms = None
+        self._armed_sim_boot_ms = None
+        self._armed_at_mono = None
+        self._last_race_start_boot_ms = -1
+        self._restart_session = True
+        self._racing = False
+        self._passed_go = False
+        self._race_go_latch.reset_for_arm(is_restart=True)
+        self._z_integral = 0.0
+        self._collision_hold_start = None
+        self.data.pop("collision", None)
+        self.data.pop("race_status", None)
 
     def _in_collision_hold(self):
         collision = self.data.get("collision")
