@@ -2,10 +2,9 @@ from unittest.mock import patch
 
 from simulator.preflight import (
     COUNTDOWN_SCHEDULED_THRESHOLD_MS,
-    RACE_COUNTDOWN_MS,
     RaceGoLatch,
-    arm_relative_go_boot_ms,
     latch_race_go_boot_ms,
+    poll_race_go,
     race_go_allowed,
     wait_for_race_go,
     wait_for_ready,
@@ -21,14 +20,14 @@ def test_latch_scheduled_go():
 
 def test_latch_countdown_start_future():
     go, branch = latch_race_go_boot_ms(4980, 5000)
-    assert go == 5000 + RACE_COUNTDOWN_MS
+    assert go == 5000
     assert branch == "countdown"
 
 
 def test_latch_countdown_start_equal():
     go, branch = latch_race_go_boot_ms(5000, 5000)
-    assert go == 8000
-    assert branch == "countdown"
+    assert go == 5000
+    assert branch == "at_go"
 
 
 def test_latch_threshold_boundary():
@@ -38,29 +37,40 @@ def test_latch_threshold_boundary():
     assert go == race_start
 
 
-def test_arm_relative_go_boot_ms():
-    assert arm_relative_go_boot_ms(1000) == 1000 + RACE_COUNTDOWN_MS
-    assert arm_relative_go_boot_ms(None) is None
+def test_latch_restart_scheduled_go():
+    go, branch = latch_race_go_boot_ms(386, 3293)
+    assert go == 3293
+    assert branch == "scheduled"
 
 
-def test_latch_restart_countdown_future():
-    go, branch = latch_race_go_boot_ms(386, 3293, is_restart=True)
-    assert go == 6293
-    assert branch == "countdown_future"
-
-
-def test_race_go_latch_restart_countdown_future():
+def test_poll_race_go_at_timer_zero():
     latch = RaceGoLatch()
-    latch.reset_for_arm(is_restart=True)
+    latch.reset_for_arm(300)
+    data = {
+        "race_status": {
+            "sim_boot_time_ms": 3293,
+            "race_start_boot_time_ms": 3293,
+        }
+    }
+    allowed, go_boot = poll_race_go(data, latch)
+    assert go_boot == 3293
+    assert allowed is True
+
+
+def test_race_go_latch_deferred_until_sim_advances():
+    latch = RaceGoLatch()
+    latch.reset_for_arm(386)
     go, branch = latch.try_latch(386, 3293)
-    assert go == 6293
-    assert branch == "countdown_future"
+    assert go is None
+    go, branch = latch.try_latch(500, 3293)
+    assert go == 3293
+    assert branch == "scheduled"
 
 
 def test_race_go_latch_delta_heuristic_on_first_run():
     latch = RaceGoLatch()
-    latch.reset_for_arm(is_restart=False)
-    go, branch = latch.try_latch(5000, 8000)
+    latch.reset_for_arm(5000)
+    go, branch = latch.try_latch(5001, 8000)
     assert go == 8000
     assert branch == "scheduled"
 
@@ -103,11 +113,11 @@ def test_race_go_allowed_when_race_not_started():
 def test_race_go_not_allowed_during_countdown_after_latch():
     data = {
         "race_status": {
-            "sim_boot_time_ms": 6000,
+            "sim_boot_time_ms": 4980,
             "race_start_boot_time_ms": 5000,
         }
     }
-    go_boot_ms, _ = latch_race_go_boot_ms(5000, 5000)
+    go_boot_ms, _ = latch_race_go_boot_ms(4980, 5000)
     assert race_go_allowed(data, go_boot_ms=go_boot_ms) is False
 
 
@@ -129,7 +139,7 @@ def test_wait_for_race_go_succeeds_scheduled():
         }
     }
     assert wait_for_race_go(data, timeout_s=1.0) is True
-    assert data["_latched_go_boot_ms"] == 7000
+    assert data["_latched_go_boot_ms"] == 4000
 
 
 def test_wait_for_race_go_succeeds_countdown_latch():
@@ -140,7 +150,7 @@ def test_wait_for_race_go_succeeds_countdown_latch():
         }
     }
     assert wait_for_race_go(data, timeout_s=1.0) is True
-    assert data["_latched_go_boot_ms"] == 8000
+    assert data["_latched_go_boot_ms"] == 5000
 
 
 def test_wait_for_race_go_times_out():

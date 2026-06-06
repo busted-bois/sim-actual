@@ -15,28 +15,24 @@ RACE_COUNTDOWN_MS = int(os.environ.get("RACE_COUNTDOWN_MS", "3000"))
 COUNTDOWN_SCHEDULED_THRESHOLD_MS = 1500
 
 
-def latch_race_go_boot_ms(sim_boot_ms, race_start_boot_ms, is_restart=False):
-    """Latch GO time once when race_start becomes valid after arm.
+def latch_race_go_boot_ms(sim_boot_ms, race_start_boot_ms):
+    """Latch the sim_boot_time_ms when the on-screen timer hits 0.
 
-    First run: a far-future race_start is the scheduled GO instant.
-    Restart: a far-future race_start marks countdown start (GO = race_start + countdown).
+    race_start_boot_time_ms is always the scheduled GO instant from the sim;
+    fly when sim_boot >= race_start.
     """
     if race_start_boot_ms < 0:
         return None, None
 
     delta = race_start_boot_ms - sim_boot_ms
-    if delta > COUNTDOWN_SCHEDULED_THRESHOLD_MS:
-        if is_restart:
-            return race_start_boot_ms + RACE_COUNTDOWN_MS, "countdown_future"
-        return race_start_boot_ms, "scheduled"
+    if sim_boot_ms >= race_start_boot_ms:
+        branch = "at_go"
+    elif delta > COUNTDOWN_SCHEDULED_THRESHOLD_MS:
+        branch = "scheduled"
+    else:
+        branch = "countdown"
 
-    return race_start_boot_ms + RACE_COUNTDOWN_MS, "countdown"
-
-
-def arm_relative_go_boot_ms(armed_sim_boot_ms):
-    if armed_sim_boot_ms is None:
-        return None
-    return armed_sim_boot_ms + RACE_COUNTDOWN_MS
+    return race_start_boot_ms, branch
 
 
 class RaceGoLatch:
@@ -46,13 +42,13 @@ class RaceGoLatch:
         self.go_boot_ms = None
         self.branch = None
         self.last_race_start = -1
-        self.is_restart = False
+        self.armed_sim_boot_ms = None
 
-    def reset_for_arm(self, is_restart=False):
+    def reset_for_arm(self, armed_sim_boot_ms=None):
         self.go_boot_ms = None
         self.branch = None
         self.last_race_start = -1
-        self.is_restart = is_restart
+        self.armed_sim_boot_ms = armed_sim_boot_ms
 
     def try_latch(self, sim_boot_ms, race_start_boot_ms):
         if self.go_boot_ms is not None:
@@ -64,8 +60,14 @@ class RaceGoLatch:
         if self.last_race_start >= 0:
             return None, None
 
+        if (
+            self.armed_sim_boot_ms is not None
+            and sim_boot_ms <= self.armed_sim_boot_ms
+        ):
+            return None, None
+
         self.go_boot_ms, self.branch = latch_race_go_boot_ms(
-            sim_boot_ms, race_start_boot_ms, is_restart=self.is_restart
+            sim_boot_ms, race_start_boot_ms
         )
         return self.go_boot_ms, self.branch
 
@@ -74,8 +76,23 @@ class RaceGoLatch:
             self.last_race_start = race_start_boot_ms
 
 
+def poll_race_go(data, latch):
+    """One wait_for_race_go iteration. True when sim_boot >= latched GO (timer at 0)."""
+    race = data.get("race_status") or {}
+    race_start = race.get("race_start_boot_time_ms", -1)
+    sim_boot = race.get("sim_boot_time_ms", 0)
+
+    latch.try_latch(sim_boot, race_start)
+    latch.observe_race_start(race_start)
+
+    if latch.go_boot_ms is None:
+        return False, None
+
+    return race_go_allowed(data, go_boot_ms=latch.go_boot_ms), latch.go_boot_ms
+
+
 def race_go_allowed(data, go_boot_ms=None):
-    """True when sim reports the race has started (countdown finished)."""
+    """True when sim reports the race has started (on-screen timer at 0)."""
     if go_boot_ms is None:
         return False
 
@@ -107,23 +124,18 @@ def wait_for_race_go(data, timeout_s=RACE_GO_TIMEOUT_S, armed_sim_boot_ms=None):
     print("Waiting for race go...", flush=True)
     deadline = time.time() + timeout_s
     latch = RaceGoLatch()
-    latch.reset_for_arm(is_restart=False)
+    latch.reset_for_arm(armed_sim_boot_ms)
 
     while time.time() < deadline:
-        race = data.get("race_status") or {}
-        race_start = race.get("race_start_boot_time_ms", -1)
-        sim_boot = race.get("sim_boot_time_ms", 0)
-
-        latch.try_latch(sim_boot, race_start)
-        latch.observe_race_start(race_start)
-
-        if race_go_allowed(data, go_boot_ms=latch.go_boot_ms):
-            data["_latched_go_boot_ms"] = latch.go_boot_ms
+        allowed, go_boot_ms = poll_race_go(data, latch)
+        if allowed:
+            data["_latched_go_boot_ms"] = go_boot_ms
+            race = data.get("race_status") or {}
             print(
                 "Race go! "
-                f"sim_boot={sim_boot}ms "
-                f"race_start={race_start}ms "
-                f"go_boot={latch.go_boot_ms}ms "
+                f"sim_boot={race.get('sim_boot_time_ms')}ms "
+                f"race_start={race.get('race_start_boot_time_ms')}ms "
+                f"go_boot={go_boot_ms}ms "
                 f"branch={latch.branch}",
                 flush=True,
             )

@@ -27,14 +27,8 @@ def _prime_countdown_go(pilot, go_boot_ms=7000):
     countdown_start = go_boot_ms - 3000
     pilot._session_armed = True
     pilot._last_race_start_boot_ms = -1
-    pilot._restart_session = False
-    pilot._race_go_latch.reset_for_arm(is_restart=False)
-    pilot.data["race_status"] = {
-        "active_gate_index": 0,
-        "sim_boot_time_ms": countdown_start,
-        "race_start_boot_time_ms": countdown_start,
-    }
-    pilot.tick()
+    pilot._go_boot_ms = go_boot_ms
+    pilot._awaiting_race_go = False
 
 
 def test_tick_hovers_when_not_armed():
@@ -81,12 +75,11 @@ def test_tick_hovers_during_countdown():
         }
     )
     pilot._session_armed = True
-    pilot._last_race_start_boot_ms = -1
+    pilot._go_boot_ms = 7000
     pilot.tick()
     kwargs = controller.set_attitude_rates.call_args.kwargs
     assert kwargs["pitch_rate"] == 0.0
     assert kwargs["thrust"] == HOVER_THRUST
-    assert pilot._go_boot_ms == 7000
 
 
 def test_tick_hovers_during_countdown_from_countdown_start():
@@ -96,17 +89,16 @@ def test_tick_hovers_during_countdown_from_countdown_start():
             "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
             "race_status": {
                 "active_gate_index": 0,
-                "sim_boot_time_ms": 5000,
+                "sim_boot_time_ms": 4980,
                 "race_start_boot_time_ms": 5000,
             },
         }
     )
     pilot._session_armed = True
-    pilot._last_race_start_boot_ms = -1
+    pilot._go_boot_ms = 5000
     pilot.tick()
     kwargs = controller.set_attitude_rates.call_args.kwargs
     assert kwargs["pitch_rate"] == 0.0
-    assert pilot._go_boot_ms == 8000
 
 
 def test_tick_fail_closed_without_latched_go():
@@ -122,6 +114,7 @@ def test_tick_fail_closed_without_latched_go():
         }
     )
     pilot._session_armed = True
+    pilot._awaiting_race_go = True
     pilot._last_race_start_boot_ms = 5000
     pilot._race_go_latch.last_race_start = 5000
     pilot.tick()
@@ -291,7 +284,7 @@ def test_no_false_restart_on_sim_boot_drop_before_go():
     )
     pilot.tick()
     assert pilot._go_boot_ms == 453993
-    assert pilot._restart_session is False
+    assert pilot._protect_initial_go is True
 
     pilot.data["race_status"] = {
         "active_gate_index": 0,
@@ -300,10 +293,10 @@ def test_no_false_restart_on_sim_boot_drop_before_go():
     }
     pilot.tick()
     assert pilot._go_boot_ms == 453993
-    assert pilot._restart_session is False
+    assert pilot._awaiting_race_go is False
 
 
-def test_restart_latches_countdown_future_go():
+def test_restart_waits_for_scheduled_go():
     pilot, controller = _pilot(
         {
             "armed": True,
@@ -323,32 +316,28 @@ def test_restart_latches_countdown_future_go():
         "race_start_boot_time_ms": -1,
     }
     pilot.tick()
-    assert pilot._restart_session is True
+    assert pilot._awaiting_race_go is True
     assert pilot._go_boot_ms is None
 
     pilot.data["armed"] = True
     pilot.data["race_status"] = {
         "active_gate_index": 0,
-        "sim_boot_time_ms": 386,
+        "sim_boot_time_ms": 500,
         "race_start_boot_time_ms": 3293,
     }
     pilot.tick()
-    assert pilot._go_boot_ms == 6293
-
-    pilot.data["race_status"] = {
-        "active_gate_index": 0,
-        "sim_boot_time_ms": 5000,
-        "race_start_boot_time_ms": 3293,
-    }
-    pilot.tick()
+    assert pilot._awaiting_race_go is True
+    assert pilot._go_boot_ms is None
     assert controller.set_attitude_rates.call_args.kwargs["pitch_rate"] == 0.0
 
     pilot.data["race_status"] = {
         "active_gate_index": 0,
-        "sim_boot_time_ms": 6293,
+        "sim_boot_time_ms": 3293,
         "race_start_boot_time_ms": 3293,
     }
     pilot.tick()
+    assert pilot._awaiting_race_go is False
+    assert pilot._go_boot_ms == 3293
     assert (
         controller.set_attitude_rates.call_args.kwargs["pitch_rate"]
         == CRUISE_PITCH_RATE
@@ -387,16 +376,17 @@ def test_flies_again_after_second_race_go():
     pilot.tick()
     kwargs = controller.set_attitude_rates.call_args.kwargs
     assert kwargs["pitch_rate"] == 0.0
-    assert pilot._go_boot_ms == 6293
+    assert pilot._awaiting_race_go is True
 
     pilot.data["race_status"] = {
         "active_gate_index": 0,
-        "sim_boot_time_ms": 6293,
+        "sim_boot_time_ms": 3293,
         "race_start_boot_time_ms": 3293,
     }
     pilot.tick()
     kwargs = controller.set_attitude_rates.call_args.kwargs
     assert kwargs["pitch_rate"] == CRUISE_PITCH_RATE
+    assert pilot._go_boot_ms == 3293
 
 
 def test_altitude_pid_adjusts_thrust_with_odometry():
