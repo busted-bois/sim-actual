@@ -106,13 +106,14 @@ class Pilot:
             return gate_target
         return None
 
-    def _altitude_thrust(self, fallback):
+    def _altitude_thrust(self, fallback, z_target=None):
         odometry = self.data.get("odometry")
         if odometry is None:
             return fallback
         z = float(odometry["z"])
         vz = float(odometry.get("vz", 0.0))
-        ex_z = z - Z_TARGET_NED
+        target = Z_TARGET_NED if z_target is None else z_target
+        ex_z = z - target
         self._z_integral = _clamp(self._z_integral + ex_z * CONTROL_DT_S, -6.0, 6.0)
         return _clamp(
             ALTITUDE_TRIM + KP_Z * ex_z + KI_Z * self._z_integral + KD_Z * vz,

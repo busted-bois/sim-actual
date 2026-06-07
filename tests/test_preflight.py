@@ -1,5 +1,5 @@
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from simulator.preflight import (
     ensure_countdown_fallback,
@@ -55,3 +55,11 @@ def test_wait_for_ready_times_out():
         start = time.time()
         assert wait_for_ready(data, timeout_s=0.05) is False
         assert time.time() - start >= 0.05
+
+
+def test_wait_for_ready_runs_controller_during_wait():
+    data = {"armed": False}
+    controller = MagicMock()
+    with patch("simulator.preflight.PREFLIGHT_POLL_S", 0.01):
+        assert wait_for_ready(data, timeout_s=0.05, controller=controller) is False
+    assert controller.update.call_count >= 1

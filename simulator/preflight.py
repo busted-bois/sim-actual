@@ -54,13 +54,22 @@ def race_go_allowed(data):
 
 
 
-def wait_for_ready(data, timeout_s=PREFLIGHT_TIMEOUT_S):
+def wait_for_ready(data, timeout_s=PREFLIGHT_TIMEOUT_S, controller=None):
 
     print("Preflight: waiting for armed + track_gates...", flush=True)
+    print(
+        "  Press [n] to toggle manual control (works during wait and after timeout)",
+        flush=True,
+    )
 
     deadline = time.time() + timeout_s
 
     while time.time() < deadline:
+
+        if controller is not None:
+            controller.update()
+        else:
+            time.sleep(PREFLIGHT_POLL_S)
 
         if data.get("armed") and data.get("track_gates"):
 
@@ -68,9 +77,11 @@ def wait_for_ready(data, timeout_s=PREFLIGHT_TIMEOUT_S):
 
             return True
 
-        time.sleep(PREFLIGHT_POLL_S)
-
     print("Preflight timeout: armed or track_gates not ready", flush=True)
+    print(
+        "  Continuing anyway — autopilot needs track data; manual control ([n]) works.",
+        flush=True,
+    )
 
     return False
 

@@ -2,6 +2,7 @@ import time
 
 from pymavlink import mavutil
 
+from simulator.manual_control import ManualControl
 from simulator.pilot import Pilot
 
 MAVLINK_CMD_SIM_RESET = 31000
@@ -16,7 +17,6 @@ VELOCITY_POSITION_MASK = (
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
 
 CONTROL_HZ = 250
@@ -51,7 +51,7 @@ def _send_attitude_rates(
     )
 
 
-def _send_velocity_ned(mavlink_conn, system_boot_ms, vx, vy, vz):
+def _send_velocity_ned(mavlink_conn, system_boot_ms, vx, vy, vz, yaw_rate=0.0):
     now_ms = int(time.time() * 1000)
     mavlink_conn.mav.set_position_target_local_ned_send(
         now_ms - system_boot_ms,
@@ -69,7 +69,7 @@ def _send_velocity_ned(mavlink_conn, system_boot_ms, vx, vy, vz):
         0.0,
         0.0,
         0.0,
-        0.0,
+        yaw_rate,
     )
 
 
@@ -87,7 +87,9 @@ class Controller:
         self._vx = 2.0
         self._vy = 0.0
         self._vz = 0.0
+        self._vel_yaw_rate = 0.0
         self.pilot = Pilot(self, data)
+        self.manual = ManualControl(self, data)
 
     def set_control_mode(self, mode):
         if mode not in VALID_CONTROL_MODES:
@@ -114,13 +116,15 @@ class Controller:
         self._yaw_rate = yaw_rate
         self._thrust = thrust
 
-    def set_velocity_ned(self, vx=2.0, vy=0.0, vz=0.0):
+    def set_velocity_ned(self, vx=2.0, vy=0.0, vz=0.0, yaw_rate=0.0):
         self._vx = vx
         self._vy = vy
         self._vz = vz
+        self._vel_yaw_rate = yaw_rate
 
     def update(self):
-        self.pilot.tick()
+        if not self.manual.tick():
+            self.pilot.tick()
         if self.control_mode == "motor":
             _send_motor_control(self.sim_conn, self._motor_rpms)
         elif self.control_mode == "attitude":
@@ -139,6 +143,7 @@ class Controller:
                 self._vx,
                 self._vy,
                 self._vz,
+                self._vel_yaw_rate,
             )
         time.sleep(1.0 / CONTROL_HZ)
 
