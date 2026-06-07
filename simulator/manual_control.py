@@ -18,9 +18,10 @@ CONTROL_DT_S = 1.0 / 250.0
 
 CLIMB_KEYS = ("q", "r", "page up")
 DESCEND_KEYS = ("e", "f", "page down")
+MOVEMENT_KEYS = ("w", "a", "s", "d", "up", "down", "left", "right")
 
 CONTROLS_HINT = (
-    "Manual controls: [n] toggle manual mode (default OFF) | "
+    "Manual controls: [n] toggle autopilot (manual ON by default) | "
     "[w/a/s/d] north/west/south/east | [q/e or r/f or pgup/pgdn] up/down | "
     "[up/down] forward/back along camera | [left/right] turn camera"
 )
@@ -32,11 +33,12 @@ class ManualControl:
     def __init__(self, controller, data):
         self.controller = controller
         self.data = data
-        self.active = False
+        self.active = True
         self._toggle_was_down = False
         self._hold_z = None
         self._z_offset = 0.0
         print(CONTROLS_HINT, flush=True)
+        print("Manual control: ON (default)", flush=True)
         if keyboard is None:
             print(
                 "Manual control unavailable: install keyboard + run terminal as admin on Windows.",
@@ -50,6 +52,8 @@ class ManualControl:
         self._poll_toggle()
         if not self.active:
             return False
+        if self._hold_z is None:
+            self._capture_altitude_hold()
         self._apply_movement()
         return True
 
@@ -85,11 +89,24 @@ class ManualControl:
     def _any_pressed(self, keys):
         return any(keyboard.is_pressed(key) for key in keys)
 
+    def _z_target(self):
+        if self._hold_z is None:
+            return None
+        return self._hold_z + self._z_offset
+
     def _apply_movement(self):
+        if self._any_pressed(CLIMB_KEYS):
+            self._z_offset -= VERTICAL_SPEED_M_S * CONTROL_DT_S
+        if self._any_pressed(DESCEND_KEYS):
+            self._z_offset += VERTICAL_SPEED_M_S * CONTROL_DT_S
+
+        if not self._any_pressed(MOVEMENT_KEYS):
+            self.controller.pilot._hover(z_target=self._z_target())
+            return
+
         vx_n = 0.0  # desired NED north m/s
         vy_n = 0.0  # desired NED east m/s
         yaw_rate = 0.0
-
         if keyboard.is_pressed("w"):
             vx_n += HORIZONTAL_SPEED_M_S
         if keyboard.is_pressed("s"):
@@ -98,11 +115,6 @@ class ManualControl:
             vy_n += HORIZONTAL_SPEED_M_S
         if keyboard.is_pressed("a"):
             vy_n -= HORIZONTAL_SPEED_M_S
-
-        if self._any_pressed(CLIMB_KEYS):
-            self._z_offset -= VERTICAL_SPEED_M_S * CONTROL_DT_S
-        if self._any_pressed(DESCEND_KEYS):
-            self._z_offset += VERTICAL_SPEED_M_S * CONTROL_DT_S
 
         yaw = self._camera_yaw()
         if keyboard.is_pressed("up"):
@@ -123,7 +135,7 @@ class ManualControl:
         pitch_rate = -PITCH_RATE_PER_M_S * forward
         roll_rate = ROLL_RATE_PER_M_S * lateral
 
-        z_target = None if self._hold_z is None else self._hold_z + self._z_offset
+        z_target = self._z_target()
         thrust = self.controller.pilot._altitude_thrust(HOVER_THRUST, z_target=z_target)
 
         self.controller.set_control_mode("attitude")

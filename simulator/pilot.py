@@ -121,8 +121,8 @@ class Pilot:
             1.0,
         )
 
-    def _hover(self):
-        thrust = self._altitude_thrust(HOVER_THRUST)
+    def _hover(self, z_target=None):
+        thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(
             roll_rate=0.0, pitch_rate=0.0, yaw_rate=0.0, thrust=thrust
