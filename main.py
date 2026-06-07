@@ -2,7 +2,6 @@
 # Sample Python client for the AI GP controller
 #
 
-import sys
 import time
 
 from simulator.preflight import wait_for_ready
@@ -25,8 +24,7 @@ vision_rx = components["vision_rx"]
 print("Arming drone...", flush=True)
 controller.arm()
 
-if not wait_for_ready(shared_data):
-    sys.exit(1)
+wait_for_ready(shared_data, controller=controller)
 
 print("Starting control loop...", flush=True)
 try:
