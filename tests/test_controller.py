@@ -22,6 +22,7 @@ def _controller():
     )
     ctrl = Controller(conn, {}, system_boot_ms=1000)
     ctrl.pilot = MagicMock()
+    ctrl.manual.active = False
     return ctrl, mav
 
 
