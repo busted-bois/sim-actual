@@ -1,4 +1,3 @@
-import math
 import time
 
 from pymavlink import mavutil
@@ -42,6 +41,12 @@ MIN_NAV_THRUST = 0.35
 MAX_NAV_THRUST = 0.58
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+YAW_ONLY_ATTITUDE_MASK = (
+    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
+    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
+)
 
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
@@ -91,6 +96,21 @@ def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ra
     )
 
 
+def update_yaw_only_control(mavlink_conn, system_boot_ms, yaw_rate):
+    now_ms = int(time.time() * 1000)
+    mavlink_conn.mav.set_attitude_target_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        YAW_ONLY_ATTITUDE_MASK,
+        [1, 0, 0, 0],
+        0.0,
+        0.0,
+        yaw_rate,
+        0.0,
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
@@ -104,45 +124,6 @@ ALTITUDE_VZ_KD = 0.3
 MAX_DESCEND_VZ = 3.0
 MAX_CLIMB_VZ = 0.2
 
-VELOCITY_POSITION_MASK = (
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-)
-
-
-def update_navigation_velocity_control(mavlink_conn, system_boot_ms, vx=0.0, vy=0.0, vz=0.0, yaw_rate=0.0):
-    now_ms = int(time.time() * 1000)
-    mask = VELOCITY_POSITION_MASK
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
-
-    mavlink_conn.mav.set_position_target_local_ned_send(
-        now_ms - system_boot_ms,
-        mavlink_conn.target_system,
-        mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        mask,
-        0.0,
-        0.0,
-        0.0,
-        vx,
-        vy,
-        vz,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        yaw_rate,
-    )
-
-
 class Controller:
     def __init__(self, sim_conn, data, system_boot_ms):
         self.sim_conn = sim_conn
@@ -154,7 +135,7 @@ class Controller:
         self.last_debug_log_s = 0.0
 
     def update(self):
-        frame_id, detection, vision_time, yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
+        frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
             self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
@@ -167,18 +148,9 @@ class Controller:
             return
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
-        vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
-        ve = ramp * (command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad))
         sim_vz = 0.0
         self._log_debug(now_s, "nav", detection, command, ramp, sim_vz, pos_ned, vel_ned, yaw_ready)
-        update_navigation_velocity_control(
-            self.sim_conn,
-            self.system_boot_ms,
-            vx=vn,
-            vy=ve,
-            vz=sim_vz,
-            yaw_rate=command.yaw_rate,
-        )
+        update_yaw_only_control(self.sim_conn, self.system_boot_ms, command.yaw_rate * ramp)
 
         time.sleep(1.0 / CONTROL_HZ)
 
