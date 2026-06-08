@@ -5,6 +5,8 @@ import threading
 import cv2
 import numpy as np
 
+from simulator.gate_detector import detect_gate
+
 # Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
@@ -88,18 +90,9 @@ class VisionRX:
                 del frames[frame_id]
 
     def process_frame(self, frame_id, img, sim_time_ns=0):
-        try:
-            from simulator.gate_detector import detect_gate
-
-            detection = detect_gate(img, frame_id, sim_time_ns)
-            self.data["last_detection"] = detection
-            self.data["detection_time_ns"] = sim_time_ns
-            if detection is not None:
-                pilot = self.data.get("pilot")
-                if pilot is not None:
-                    pilot.on_frame(detection)
-        except Exception as e:
-            from simulator import config
-
-            if config.DEBUG:
-                print(f"[vision_rx] process_frame error: {e}")
+        detection = detect_gate(img, frame_id, sim_time_ns)
+        self.data["last_detection"] = detection
+        self.data["detection_time_ns"] = sim_time_ns
+        pilot = self.data.get("pilot")
+        if pilot is not None and detection is not None:
+            pilot.on_frame(detection)

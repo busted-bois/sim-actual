@@ -1,11 +1,3 @@
-"""Pilot orchestrator — produces control setpoints per cycle.
-
-Integrates gate estimator, expanding search, and state machine to drive the
-drone through a sequence of gates. Called at ~250 Hz by the controller loop.
-Reads shared_data (populated by telemetry / vision) and outputs a single
-ControlSetpoint per cycle — either velocity or attitude, never both.
-"""
-
 from __future__ import annotations
 
 import time as _time
@@ -38,16 +30,14 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 @dataclass
 class ControlSetpoint:
-    mode: str  # "velocity" | "attitude"
+    mode: str
     vel_ned: tuple[float, float, float] | None
     yaw_rate: float | None
     thrust: float | None
 
 
 class Pilot:
-    """Gate-traversal pilot. Read-only consumer of shared_data."""
-
-    def __init__(self, shared_data: dict):  # type: ignore[type-arg]
+    def __init__(self, shared_data: dict):
         self._shared_data = shared_data
         self._estimator = GateEstimator()
         self._search = ExpandingSearch()
@@ -59,53 +49,38 @@ class Pilot:
 
     def on_frame(self, detection: GateDetection | None) -> None:
         self._last_detection = detection
-        self._last_det_time_ns = detection.sim_time_ns if detection else 0
+        self._last_det_time_ns = int(_time.time() * 1e9) if detection else 0
         if detection is not None:
             self._search.reset()
 
     def update(self, dt_s: float) -> ControlSetpoint:
-        # 1. Read drone state from shared_data
-        _d = self._shared_data
-        pos_ned = _d.get("pos_ned", (0, 0, 0))  # type: ignore[assignment]
-        vel_ned = _d.get("vel_ned", (0, 0, 0))  # type: ignore[assignment]
-        yaw_rad = _d.get("yaw_rad", 0.0)  # type: ignore[assignment]
-        yaw_rate = _d.get("yaw_rate", 0.0)  # type: ignore[assignment]
-        att_time_ms = _d.get("att_time_ms", 0)  # type: ignore[assignment]
-        has_position = _d.get("has_position", False)  # type: ignore[assignment]
-        active_gate_idx = _d.get("active_gate_index", 0)  # type: ignore[assignment]
-        gates = _d.get("gates", [])  # type: ignore[assignment]
-
-        # 2. Build DroneState
+        data = self._shared_data
         drone_state = DroneState(
-            pos_ned=pos_ned,
-            vel_ned=vel_ned,
-            yaw_rad=yaw_rad,
-            yaw_rate=yaw_rate,
-            time_boot_ms=att_time_ms,
-            has_position=has_position,
+            pos_ned=data.get("pos_ned", (0, 0, 0)),
+            vel_ned=data.get("vel_ned", (0, 0, 0)),
+            yaw_rad=data.get("yaw_rad", 0.0),
+            yaw_rate=data.get("yaw_rate", 0.0),
+            time_boot_ms=data.get("att_time_ms", 0),
+            has_position=data.get("has_position", False),
         )
+        active_gate_idx = data.get("active_gate_index", 0)
+        gates = data.get("gates", [])
 
-        # 3. Frame-reuse check — age out stale detections
         effective_det: GateDetection | None = None
         if self._last_detection is not None:
-            now_ns = int(_time.time() * 1e9)
-            age_ms = (now_ns - self._last_det_time_ns) / 1e6
-            effective_det = (
-                self._last_detection if age_ms < DETECTION_AGE_OUT_MS else None
-            )
+            age_ms = (int(_time.time() * 1e9) - self._last_det_time_ns) / 1e6
+            if age_ms < DETECTION_AGE_OUT_MS:
+                effective_det = self._last_detection
 
-        # 4. Gate estimate
         estimate = self._estimator.update(
             effective_det, drone_state, gates, active_gate_idx
         )
 
-        # 5. Track active_gate_index changes
         idx_changed = (
             active_gate_idx != self._last_gate_idx and self._last_gate_idx >= 0
         )
         self._last_gate_idx = active_gate_idx
 
-        # 6. State transition
         prev_state = self._state
         self._elapsed += dt_s
         new_state = transition(
@@ -120,12 +95,7 @@ class Pilot:
             self._state = new_state
             self._elapsed = 0.0
 
-        # 7. Produce ControlSetpoint
         return self._control_for_state(effective_det, estimate, drone_state, dt_s)
-
-    # ------------------------------------------------------------------
-    # Per-state control logic
-    # ------------------------------------------------------------------
 
     def _control_for_state(
         self,
@@ -148,7 +118,6 @@ class Pilot:
         if self._state == PilotState.SEARCH:
             return self._search_control(detection, drone_state, dt_s)
 
-        # Fallback: hover
         return ControlSetpoint(
             mode="velocity", vel_ned=(0.0, 0.0, 0.0), yaw_rate=0.0, thrust=None
         )
@@ -159,31 +128,26 @@ class Pilot:
         estimate,
         drone_state: DroneState,
     ) -> ControlSetpoint:
-        # Gate lost in chase — notify search module
         if detection is None:
             self._search.on_gate_lost()
             return ControlSetpoint(
                 mode="velocity", vel_ned=(0.0, 0.0, 0.0), yaw_rate=0.0, thrust=None
             )
 
-        # Yaw: center the gate in the image
         offset = detection.centroid_x_px - _IMG_W / 2.0
         if abs(offset) < DEADBAND_PX:
             yaw_rate = 0.0
         else:
             yaw_rate = _clamp(YAW_KP * offset, -MAX_YAW_RATE, MAX_YAW_RATE)
 
-        # Forward speed — ramp up as gate gets closer (area grows)
         area_norm = detection.area_px / (_IMG_W * _IMG_H)
         forward = FORWARD_BASE_SPEED_MPS * (
             1.0 + FORWARD_GAIN_PER_AREA * min(area_norm, 1.0)
         )
 
-        # Lateral correction
         if estimate.lateral_offset_m is not None:
             lateral = LATERAL_KP * estimate.lateral_offset_m
         else:
-            # Pixel-ratio mode: bearing_rad is normalized offset, NOT radians
             lateral = LATERAL_KP * estimate.bearing_rad * FORWARD_BASE_SPEED_MPS
 
         vn, ve = body_to_ned_velocity(forward, lateral, drone_state.yaw_rad)
@@ -220,7 +184,6 @@ class Pilot:
             return ControlSetpoint(
                 mode="attitude", vel_ned=None, yaw_rate=cmd.yaw_rate_cmd, thrust=None
             )
-        # EXPAND phase — velocity mode, no yaw
         vn, ve = body_to_ned_velocity(
             cmd.forward_vel_mps, cmd.lateral_vel_mps, drone_state.yaw_rad
         )

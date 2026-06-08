@@ -13,18 +13,18 @@ from simulator.config import (
 @dataclass
 class SearchCommand:
     yaw_rate_cmd: float
-    lateral_vel_mps: float  # body frame
-    forward_vel_mps: float  # body frame
-    phase: str  # "SWEEP", "EXPAND", "RELOCATE"
+    lateral_vel_mps: float
+    forward_vel_mps: float
+    phase: str
 
 
 class ExpandingSearch:
     def __init__(self):
         self._sweep_count: int = 0
         self._sweep_timer: float = 0.0
-        self._sweep_direction: float = 1.0  # alternating ±1
-        self._level: int = 0  # expand level
-        self._expand_side: float = 1.0  # alternating ±1
+        self._sweep_direction: float = 1.0
+        self._level: int = 0
+        self._expand_side: float = 1.0
         self._phase: str = "SWEEP"
 
     def reset(self):
