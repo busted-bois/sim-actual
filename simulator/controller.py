@@ -2,6 +2,8 @@ import time
 
 from pymavlink import mavutil
 
+from simulator.gate_navigation import GateNavigator
+
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 MAVLINK_CMD_SIM_RESET = 31000
@@ -40,7 +42,7 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     """
     Sets a desired vehicle attitude. Used by an external controller to
     command the vehicle (manual controller or other system).
-    
+
     time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
     target_system             : System ID (type:uint8_t)
     target_component          : Component ID (type:uint8_t)
@@ -75,11 +77,10 @@ VELOCITY_POSITION_MASK = (
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
 
 
-def update_position_flight_control(mavlink_conn, system_boot_ms):
+def update_position_flight_control(mavlink_conn, system_boot_ms, command):
     now_ms = int(time.time() * 1000)
 
     """
@@ -108,19 +109,19 @@ def update_position_flight_control(mavlink_conn, system_boot_ms):
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
         VELOCITY_POSITION_MASK,
         0.0,
         0,
         0.0,  # ignored position NED
-        2.0,
-        0.0,
-        0.0,  # Vel - 2 m/s forward
+        command.vx,
+        command.vy,
+        command.vz,
         0.0,
         0,
         0.0,  # ignored acceleration
         0,  # ignored yaw
-        0.0,  # ignored yaw rate
+        command.yaw_rate,
     )
 
 
@@ -136,15 +137,24 @@ class Controller:
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
+        self.navigator = GateNavigator()
 
     def update(self):
-        # send automated targets to sim flight controller
-        # update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
-        # alternatively one of
-        # update_position_flight_control(self.sim_conn, self.system_boot_ms)
-        update_motor_control(self.sim_conn, self.system_boot_ms)
+        frame_id, detection, vision_time = self._latest_detection()
+        now_s = time.monotonic()
+        detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
+        command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
+        update_position_flight_control(self.sim_conn, self.system_boot_ms, command)
 
         time.sleep(1.0 / CONTROL_HZ)
+
+    def _latest_detection(self):
+        with self.data["lock"]:
+            return (
+                self.data.get("latest_frame_id"),
+                self.data.get("latest_detection"),
+                self.data.get("latest_vision_time"),
+            )
 
     # -------------------------------
     # Arm the drone

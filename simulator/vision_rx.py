@@ -1,9 +1,12 @@
 import socket
 import struct
 import threading
+import time
 
 import cv2
 import numpy as np
+
+from simulator.gate_detector import GateDetector
 
 # Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "0.0.0.0"
@@ -13,6 +16,7 @@ SIM_SERVER_UDP_PORT = 5600
 class VisionRX:
     def __init__(self, data):
         self.data = data
+        self.detector = GateDetector()
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -83,10 +87,8 @@ class VisionRX:
                 del frames[frame_id]
 
     def process_frame(self, frame_id, img):
-        #
-        #
-        # Success!
-        # image is your FPV camera frame in JPEG format
-        #
-        #
-        pass
+        detection = self.detector.detect(frame_id, img)
+        with self.data["lock"]:
+            self.data["latest_detection"] = detection
+            self.data["latest_frame_id"] = frame_id
+            self.data["latest_vision_time"] = time.monotonic()

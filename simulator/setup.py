@@ -1,3 +1,5 @@
+import threading
+
 from pymavlink import mavutil
 
 from simulator.controller import Controller
@@ -7,6 +9,10 @@ from simulator.vision_rx import VisionRX
 
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
+    shared_data.setdefault("lock", threading.Lock())
+    shared_data.setdefault("latest_detection", None)
+    shared_data.setdefault("latest_frame_id", None)
+    shared_data.setdefault("latest_vision_time", None)
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
