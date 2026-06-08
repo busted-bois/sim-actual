@@ -2,6 +2,9 @@ import time
 
 from pymavlink import mavutil
 
+from simulator.config import TAKEOFF_THRUST
+from simulator.pilot import ControlSetpoint, Pilot
+
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 MAVLINK_CMD_SIM_RESET = 31000
@@ -17,9 +20,22 @@ MOTOR_BACK_RIGHT = 0
 
 
 def update_motor_control(mavlink_conn, system_boot_ms):
-    motor_rpms = [MOTOR_FRONT_LEFT, MOTOR_FRONT_RIGHT, MOTOR_BACK_LEFT, MOTOR_BACK_RIGHT, 0, 0, 0, 0]
+    motor_rpms = [
+        MOTOR_FRONT_LEFT,
+        MOTOR_FRONT_RIGHT,
+        MOTOR_BACK_LEFT,
+        MOTOR_BACK_RIGHT,
+        0,
+        0,
+        0,
+        0,
+    ]
     mavlink_conn.mav.set_actuator_control_target_send(
-        int(time.time() * 1e6), mavlink_conn.target_system, mavlink_conn.target_component, 0, motor_rpms
+        int(time.time() * 1e6),
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        0,
+        motor_rpms,
     )
 
 
@@ -34,33 +50,25 @@ THRUST = 0.6  # 0.0 - 1.0
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
 
-def update_attitude_flight_control(mavlink_conn, system_boot_ms):
+def update_attitude_flight_control(
+    mavlink_conn,
+    system_boot_ms,
+    roll_rate=ROLL_RATE,
+    pitch_rate=PITCH_RATE,
+    yaw_rate=YAW_RATE,
+    thrust=THRUST,
+):
     now_ms = int(time.time() * 1000)
-
-    """
-    Sets a desired vehicle attitude. Used by an external controller to
-    command the vehicle (manual controller or other system).
-    
-    time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
-    target_system             : System ID (type:uint8_t)
-    target_component          : Component ID (type:uint8_t)
-    type_mask                 : Bitmap to indicate which dimensions should be ignored by the vehicle. (type:uint8_t, values:ATTITUDE_TARGET_TYPEMASK)
-    q                         : Attitude quaternion (w, x, y, z order, zero-rotation is 1, 0, 0, 0) (type:float)
-    body_roll_rate            : Body roll rate [rad/s] (type:float)
-    body_pitch_rate           : Body pitch rate [rad/s] (type:float)
-    body_yaw_rate             : Body yaw rate [rad/s] (type:float)
-    thrust                    : Collective thrust, normalized to 0 .. 1 (-1 .. 1 for vehicles capable of reverse trust) (type:float)
-    """
     mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         RATES_ATTITUDE_MASK,
         [1, 0, 0, 0],  # dummy quaternion (ignored)
-        ROLL_RATE,
-        PITCH_RATE,
-        YAW_RATE,
-        THRUST,
+        roll_rate,
+        pitch_rate,
+        yaw_rate,
+        thrust,
     )
 
 
@@ -79,48 +87,42 @@ VELOCITY_POSITION_MASK = (
 )
 
 
-def update_position_flight_control(mavlink_conn, system_boot_ms):
+def update_position_flight_control(
+    mavlink_conn,
+    system_boot_ms,
+    vx=0.0,
+    vy=0.0,
+    vz=0.0,
+    yaw_rate=0.0,
+):
     now_ms = int(time.time() * 1000)
+    mask = VELOCITY_POSITION_MASK
+    if vx != 0.0:
+        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    if vy != 0.0:
+        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    if vz != 0.0:
+        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    if yaw_rate != 0.0:
+        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 
-    """
-    Sets a desired vehicle position in a local north-east-down coordinate
-    frame. Used by an external controller to command the vehicle
-    (manual controller or other system).
-
-    time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
-    target_system             : System ID (type:uint8_t)
-    target_component          : Component ID (type:uint8_t)
-    coordinate_frame          : Valid options are: MAV_FRAME_LOCAL_NED = 1, MAV_FRAME_LOCAL_OFFSET_NED = 7, MAV_FRAME_BODY_NED = 8, MAV_FRAME_BODY_OFFSET_NED = 9 (type:uint8_t, values:MAV_FRAME)
-    type_mask                 : Bitmap to indicate which dimensions should be ignored by the vehicle. (type:uint16_t, values:POSITION_TARGET_TYPEMASK)
-    x                         : X Position in NED frame [m] (type:float)
-    y                         : Y Position in NED frame [m] (type:float)
-    z                         : Z Position in NED frame (note, altitude is negative in NED) [m] (type:float)
-    vx                        : X velocity in NED frame [m/s] (type:float)
-    vy                        : Y velocity in NED frame [m/s] (type:float)
-    vz                        : Z velocity in NED frame [m/s] (type:float)
-    afx                       : X acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afy                       : Y acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afz                       : Z acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    yaw                       : yaw setpoint [rad] (type:float)
-    yaw_rate                  : yaw rate setpoint [rad/s] (type:float)
-    """
     mavlink_conn.mav.set_position_target_local_ned_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        VELOCITY_POSITION_MASK,
+        mask,
         0.0,
-        0,
+        0.0,
         0.0,  # ignored position NED
-        2.0,
+        vx,
+        vy,
+        vz,
         0.0,
-        0.0,  # Vel - 2 m/s forward
         0.0,
-        0,
         0.0,  # ignored acceleration
-        0,  # ignored yaw
-        0.0,  # ignored yaw rate
+        0.0,  # ignored yaw
+        yaw_rate,
     )
 
 
@@ -136,15 +138,34 @@ class Controller:
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
+        self.pilot = Pilot(data)
+        self.data["pilot"] = self.pilot
 
     def update(self):
-        # send automated targets to sim flight controller
-        # update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
-        # alternatively one of
-        # update_position_flight_control(self.sim_conn, self.system_boot_ms)
-        update_motor_control(self.sim_conn, self.system_boot_ms)
+        dt_s = 1.0 / CONTROL_HZ
+        cs: ControlSetpoint = self.pilot.update(dt_s)
 
-        time.sleep(1.0 / CONTROL_HZ)
+        if cs.mode == "attitude":
+            update_attitude_flight_control(
+                self.sim_conn,
+                self.system_boot_ms,
+                roll_rate=0.0,
+                pitch_rate=0.0,
+                yaw_rate=cs.yaw_rate or 0.0,
+                thrust=cs.thrust or TAKEOFF_THRUST,
+            )
+        elif cs.mode == "velocity":
+            vx, vy, vz = cs.vel_ned if cs.vel_ned else (0.0, 0.0, 0.0)
+            update_position_flight_control(
+                self.sim_conn,
+                self.system_boot_ms,
+                vx=vx,
+                vy=vy,
+                vz=vz,
+                yaw_rate=cs.yaw_rate or 0.0,
+            )
+
+        time.sleep(dt_s)
 
     # -------------------------------
     # Arm the drone
