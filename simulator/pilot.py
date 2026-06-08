@@ -29,12 +29,15 @@ VISION_YAW_GAIN = math.radians(40)
 VISION_CENTER_DEADBAND = 0.14
 VISION_PROXIMITY_R_FRAC = 0.10
 VISION_MAX_AGE_S = 0.5
+VISION_VY_GAIN = 3.0
+VISION_MAX_ALT_ADJUST = 2.0
 
 TELEMETRY_YAW_GAIN = 1.0
 
 CONTROL_DT_S = 1 / 250
+NO_GATES_CRUISE_TIMEOUT_S = 5.0
 
-_LOG_INTERVAL = 2.0  # seconds between status prints
+_LOG_INTERVAL = 2.0
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -51,6 +54,7 @@ class Pilot:
         self._collision_time: float | None = None
         self._last_log = 0.0
         self._mode_str = "???"
+        self._no_gates_since = _time.monotonic()
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + track_gates", flush=True)
@@ -106,13 +110,20 @@ class Pilot:
         if collision is not None:
             self._collision_time = _time.monotonic()
 
-        # No gate data → hover
         track_gates = self.data.get("track_gates")
+
         if not track_gates:
+            if _time.monotonic() - self._no_gates_since > NO_GATES_CRUISE_TIMEOUT_S:
+                self._mode_str = "cruise_no_gates"
+                self._cruise_forward()
+                self._log_status("cruise (no gates timeout)")
+                return
             self._mode_str = "no_gates"
             self._hover()
             self._log_status("no track_gates")
             return
+
+        self._no_gates_since = _time.monotonic()
 
         # Gate from vision
         gate_target = self.data.get("gate_target")
@@ -174,7 +185,14 @@ class Pilot:
         else:
             alignment = max(0.0, 1.0 - abs(nx))
             pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-            thrust = self._altitude_thrust(CRUISE_THRUST)
+
+            # ny-based altitude adjustment: ny > 0 means gate is below center
+            ny_offset = _clamp(
+                -ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
+            )
+            odometry = self.data.get("odometry")
+            z_now = odometry.get("z", 0.0) if odometry else 0.0
+            thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_now + ny_offset)
 
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
@@ -202,7 +220,8 @@ class Pilot:
         yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_error, -2.0, 2.0)
         alignment = max(0.0, 1.0 - abs(bearing_error) / math.pi)
         pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-        thrust = self._altitude_thrust(CRUISE_THRUST)
+        gate_z = gz
+        thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gate_z)
 
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
