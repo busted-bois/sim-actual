@@ -62,6 +62,8 @@ class Pilot:
         self._peak_r_frac: float = 0.0
         self._post_gate_time: float | None = None
         self._last_gate_id: str | None = None
+        self._completed_gates: set[str] = set()
+        self._vision_suppress_until: float = 0.0
         self._mode_str = "???"
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
@@ -81,6 +83,9 @@ class Pilot:
             pos = gate.get("position_ned")
             if not pos or len(pos) < 3:
                 continue
+            gid = self._gate_id(gate)
+            if gid in self._completed_gates:
+                continue
             gates_checked += 1
             dx = pos[0] - ox
             dy = pos[1] - oy
@@ -97,6 +102,7 @@ class Pilot:
         self._stabilize_start = None
         self._post_gate_time = None
         self._peak_r_frac = 0.0
+        self._vision_suppress_until = 0.0
 
     def _gate_id(self, gate: dict) -> str | None:  # type: ignore[type-arg]
         pos = gate.get("position_ned")
@@ -146,7 +152,7 @@ class Pilot:
         if gate_target and gate_target.get("detected"):
             if cam is not None:
                 age = _time.monotonic() - cam.get("received_at", 0)
-                if age < VISION_MAX_AGE_S:
+                if age < VISION_MAX_AGE_S and _time.monotonic() >= self._vision_suppress_until:
                     self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
                     return
@@ -204,6 +210,10 @@ class Pilot:
         if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.4:
             self._post_gate_time = _time.monotonic()
             self._peak_r_frac = 0.0
+            if self._last_gate_id:
+                self._completed_gates.add(self._last_gate_id)
+            self._vision_suppress_until = _time.monotonic() + POST_GATE_HOVER_S + 1.0
+            print(f"[pilot] Gate {self._last_gate_id} marked COMPLETE, total passed: {len(self._completed_gates)}", flush=True)
             print("[pilot] FLY-THROUGH detected, hovering to re-acquire", flush=True)
             pitch = abs(CRUISE_PITCH_RATE) * 0.5
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
