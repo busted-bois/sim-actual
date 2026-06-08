@@ -6,7 +6,7 @@ import time
 import cv2
 import numpy as np
 
-from simulator.vision_processing import detect_gate_target
+from simulator.vision_processing import GateTargetFilter, detect_gate_target
 
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
@@ -17,6 +17,7 @@ SOCKET_TIMEOUT_S = 0.5
 class VisionRX:
     def __init__(self, data):
         self.data = data
+        self._gate_filter = GateTargetFilter()
         self.sock = None
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
@@ -104,4 +105,4 @@ class VisionRX:
             "height": height,
             "received_at": received_at,
         }
-        self.data["gate_target"] = detect_gate_target(img)
+        self.data["gate_target"] = self._gate_filter.apply(detect_gate_target(img))

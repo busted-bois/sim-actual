@@ -5,13 +5,20 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from simulator.flight_config import PNP_R_FRAC_CAP
+from simulator.flight_config import (
+    PNP_R_FRAC_CAP,
+    VISION_DESAT_V_THRESHOLD,
+    VISION_FILTER_ALPHA,
+    VISION_FILTER_MAX_JUMP,
+)
 from simulator.gate_pnp import order_corners, solve_gate_pnp
 
 
 def _blue_mask(image_bgr):
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    lower_blue = np.array([95, 110, 60])
+    v_mean = float(hsv[:, :, 2].mean())
+    s_min = 80 if v_mean < VISION_DESAT_V_THRESHOLD else 110
+    lower_blue = np.array([95, s_min, 40])
     upper_blue = np.array([130, 255, 255])
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
     mask = cv2.erode(mask, None, iterations=1)
@@ -72,6 +79,39 @@ def blue_ring_info_normalized(
     ny = (y - 0.5 * height) / (0.5 * height)
     r_frac = float(radius) / max(1.0, min(width, height))
     return (float(nx), float(ny), r_frac)
+
+
+class GateTargetFilter:
+    """Temporal EMA + outlier rejection for gate detections."""
+
+    def __init__(self, alpha=VISION_FILTER_ALPHA, max_jump=VISION_FILTER_MAX_JUMP):
+        self.alpha = alpha
+        self.max_jump = max_jump
+        self._prev: dict | None = None
+
+    def reset(self):
+        self._prev = None
+
+    def apply(self, target: dict) -> dict:
+        if not target.get("detected"):
+            self._prev = None
+            return target
+
+        if self._prev is None:
+            self._prev = dict(target)
+            return target
+
+        for key in ("nx", "ny", "r_frac"):
+            if abs(float(target[key]) - float(self._prev[key])) > self.max_jump:
+                return {**self._prev, "detected": True}
+
+        smoothed = dict(target)
+        for key in ("nx", "ny", "r_frac"):
+            prev = float(self._prev[key])
+            cur = float(target[key])
+            smoothed[key] = self.alpha * cur + (1.0 - self.alpha) * prev
+        self._prev = smoothed
+        return smoothed
 
 
 def detect_gate_target(image_bgr: np.ndarray) -> dict:

@@ -1,6 +1,7 @@
 import numpy as np
 
 from simulator.vision_processing import (
+    GateTargetFilter,
     blue_ring_info_normalized,
     detect_gate_target,
     find_blue_rings,
@@ -43,3 +44,29 @@ def test_detect_gate_target_positive_on_blue_ring():
     result = detect_gate_target(image)
     assert result["detected"] is True
     assert result["r_frac"] > 0.0
+
+
+def test_gate_target_filter_smooths_jitter():
+    filt = GateTargetFilter(alpha=0.5, max_jump=0.9)
+    t1 = {"detected": True, "nx": 0.2, "ny": 0.0, "r_frac": 0.1}
+    t2 = {"detected": True, "nx": 0.4, "ny": 0.0, "r_frac": 0.1}
+    filt.apply(t1)
+    out = filt.apply(t2)
+    assert abs(out["nx"] - 0.3) < 1e-6
+
+
+def test_gate_target_filter_rejects_outlier():
+    filt = GateTargetFilter(alpha=0.5, max_jump=0.2)
+    t1 = {"detected": True, "nx": 0.1, "ny": 0.0, "r_frac": 0.1}
+    t2 = {"detected": True, "nx": 0.9, "ny": 0.0, "r_frac": 0.1}
+    filt.apply(t1)
+    out = filt.apply(t2)
+    assert out["nx"] == 0.1
+
+
+def test_desaturated_blue_ring_detected():
+    image = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2 = __import__("cv2")
+    cv2.circle(image, (320, 180), 45, (180, 140, 120), thickness=10)
+    result = detect_gate_target(image)
+    assert result["detected"] is True

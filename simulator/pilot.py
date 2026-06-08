@@ -3,6 +3,7 @@ import time
 
 from simulator.flight_config import (
     ALTITUDE_TRIM,
+    ALTITUDE_VZ_CLAMP,
     BEARING_VELOCITY_FALLBACK_DEG,
     COLLISION_HOLD_S,
     COLLISION_THRUST,
@@ -301,14 +302,19 @@ class Pilot:
             "pitch": float(attitude.get("pitch", 0.0)),
         }
 
+    def _clamp_altitude_vz(self, vz):
+        return clamp(vz, -ALTITUDE_VZ_CLAMP, ALTITUDE_VZ_CLAMP)
+
     def _altitude_source(self, target_z=None):
         snapshot = self._healthy_tracking_snapshot()
         if snapshot is not None:
-            return snapshot.z, snapshot.vz
+            return snapshot.z, self._clamp_altitude_vz(snapshot.vz)
         odometry = self.data.get("odometry")
         if odometry is None:
             return None
-        return float(odometry["z"]), float(odometry.get("vz", 0.0))
+        return float(odometry["z"]), self._clamp_altitude_vz(
+            float(odometry.get("vz", 0.0))
+        )
 
     def _altitude_thrust(self, fallback, target_z=None):
         source = self._altitude_source(target_z)

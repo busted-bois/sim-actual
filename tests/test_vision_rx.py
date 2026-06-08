@@ -1,5 +1,6 @@
 import numpy as np
 
+from simulator.vision_processing import GateTargetFilter
 from simulator.vision_rx import VisionRX
 
 
@@ -7,6 +8,7 @@ def test_process_frame_populates_shared_data():
     data = {}
     rx = VisionRX.__new__(VisionRX)
     rx.data = data
+    rx._gate_filter = GateTargetFilter()
 
     image = np.zeros((100, 200, 3), dtype=np.uint8)
     import cv2

@@ -59,6 +59,7 @@ make race-timing-probe
 | `make tracking-smoke` | IMU tracker drift or health issues |
 | `make preflight` | UDP port 5600 blocked |
 | `make test` | Verify code before live run |
+| `make validate-log` | Analyze tracking CSV after a live run |
 
 ## Troubleshooting
 

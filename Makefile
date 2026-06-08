@@ -1,4 +1,4 @@
-.PHONY: i install check test vision-smoke mavlink-probe race-timing-probe preflight tracking-smoke sim
+.PHONY: i install check test validate-log vision-smoke mavlink-probe race-timing-probe preflight tracking-smoke sim
 
 i install:
 	uv sync
@@ -9,6 +9,9 @@ check:
 
 test:
 	uv run pytest -q
+
+validate-log:
+	uv run python -m scripts.validate_tracking_log
 
 vision-smoke:
 	uv run python -m scripts.vision_smoke

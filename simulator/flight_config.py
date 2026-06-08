@@ -14,8 +14,8 @@ CAM_FOV_VERT_DEG = 2.0 * math.degrees(math.atan(CAM_CY / CAM_FY))
 # MAVLink command rate (spec §4.4: client commands must be < 100 Hz)
 CONTROL_HZ = 50
 
-# Tracking
-LOCAL_NED_BLEND = 0.2
+# Tracking (LOCAL_NED_BLEND raised after VQ1 log analysis — IMU z drifts without NED)
+LOCAL_NED_BLEND = 0.38
 ATTITUDE_BLEND = 0.2
 MIN_IMU_SAMPLES_FOR_HEALTHY = 2
 TRACKING_LOG_HZ = 10
@@ -31,9 +31,9 @@ GATE_WIDTH_MM = GATE_OUTER_MM
 HOVER_THRUST = 0.5
 CRUISE_THRUST = 0.55
 CRUISE_PITCH_RATE = -0.2
-V_MAX_BODY = 12.0
+V_MAX_BODY = 9.0
 V_MIN_BODY = 1.5
-V_TURN_SLOWDOWN = 0.55
+V_TURN_SLOWDOWN = 0.62
 COLLISION_THRUST = 0.4
 COLLISION_HOLD_S = 2.0
 
@@ -79,10 +79,16 @@ VISION_CORRECTION_R_FRAC = 0.12
 PNP_R_FRAC_CAP = 0.35
 BEARING_VELOCITY_FALLBACK_DEG = 55.0
 ALTITUDE_TRIM = 0.55
-KP_Z = 0.25
-KI_Z = 0.035
-KD_Z = 0.12
+KP_Z = 0.28
+KI_Z = 0.025
+KD_Z = 0.22
+ALTITUDE_VZ_CLAMP = 8.0
 Z_TARGET_NED = -5.0
+
+# Vision temporal filter + desaturated VQ1 scenes
+VISION_FILTER_ALPHA = 0.35
+VISION_FILTER_MAX_JUMP = 0.45
+VISION_DESAT_V_THRESHOLD = 100
 
 # Tracker-only bearing nudge (tests / optional; pilot uses IBVS in flight_control)
 VISION_YAW_BLEND = 0.15
