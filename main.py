@@ -4,6 +4,7 @@
 
 import time
 
+from simulator.diagnostics import TelemetryProbe
 from simulator.setup import setup_components
 
 # Modify these properties if you want to run the server remotely for example
@@ -24,6 +25,9 @@ controller = components["controller"]
 ts_loop = components["ts_loop"]
 mavlink_rx = components["mavlink_rx"]
 vision_rx = components["vision_rx"]
+
+# Phase 1 read-only telemetry probe (observes shared_data; no effect on flight)
+probe = TelemetryProbe(shared_data)
 
 print("Arming drone...", flush=True)
 controller.arm()

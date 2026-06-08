@@ -133,6 +133,7 @@ class Controller:
         self._vx = 0.0
         self._vy = 0.0
         self._vz = 0.0
+        self._last_arm_attempt = 0.0
         self.pilot = Pilot(self, data)
 
     def set_control_mode(self, mode):
@@ -153,7 +154,18 @@ class Controller:
     def disarm(self):
         pass
 
+    def _ensure_armed(self):
+        # Re-send arm at ~1 Hz while disarmed; a single startup arm() does not
+        # survive a sim/race reset, which leaves the drone disarmed and inert.
+        if self.data.get("armed", False):
+            return
+        now = time.time()
+        if now - self._last_arm_attempt >= 1.0:
+            self._last_arm_attempt = now
+            self.arm()
+
     def update(self):
+        self._ensure_armed()
         self.pilot.tick()
 
         if self.control_mode == "motor":
