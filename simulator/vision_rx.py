@@ -1,18 +1,29 @@
+import os
 import socket
 import struct
 import threading
+import time
 
 import cv2
 import numpy as np
+
+from simulator.vision_processing import analyze_frame, annotate
 
 # Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
 
+# Key under which the latest FrameAnalysis is published into shared_data for the
+# controller/navigator to read.
+VISION_ANALYSIS_KEY = "vision_analysis"
+
 
 class VisionRX:
-    def __init__(self, data):
+    def __init__(self, data, config=None):
         self.data = data
+        self.config = config or {}
+        self.vision_cfg = self.config.get("vision")
+        self.frame_count = 0
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -42,12 +53,17 @@ class VisionRX:
             # jpeg_size - full size of jpeg data
             # payload_size - size of this packet
             # sim_time_ns - frame's epoch timestamp in ns on the server
-            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(
-                header_format, header
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
+                struct.unpack(header_format, header)
             )
 
             if frame_id not in frames:
-                frames[frame_id] = {"chunks": {}, "total": total_chunks, "size": jpeg_size, "time": sim_time_ns}
+                frames[frame_id] = {
+                    "chunks": {},
+                    "total": total_chunks,
+                    "size": jpeg_size,
+                    "time": sim_time_ns,
+                }
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
@@ -84,9 +100,28 @@ class VisionRX:
 
     def process_frame(self, frame_id, img):
         #
+        # image is the decoded FPV camera frame (BGR). Run color detection and
+        # publish the result for the navigator to consume in the control loop.
         #
-        # Success!
-        # image is your FPV camera frame in JPEG format
-        #
-        #
-        pass
+        if not self.vision_cfg:
+            # Detection disabled / no config: behave like the original template.
+            return
+
+        analysis = analyze_frame(
+            img, self.vision_cfg, frame_id=frame_id, timestamp=time.time()
+        )
+        # Single-assignment publish: the control loop reads this key; a plain dict
+        # write of one reference is atomic enough in CPython for our purposes.
+        self.data[VISION_ANALYSIS_KEY] = analysis
+
+        self.frame_count += 1
+        self._maybe_save_debug(img, analysis)
+
+    def _maybe_save_debug(self, img, analysis):
+        every = self.vision_cfg.get("debug_save_every", 0)
+        if not every or self.frame_count % every != 0:
+            return
+        debug_dir = self.vision_cfg.get("debug_dir", "debug_frames")
+        os.makedirs(debug_dir, exist_ok=True)
+        out_path = os.path.join(debug_dir, f"frame_{analysis.frame_id:06d}.jpg")
+        cv2.imwrite(out_path, annotate(img, analysis))

@@ -1,0 +1,45 @@
+{
+  "autonomy": {
+    "enabled": true,
+    "algorithm": "orange_gate"
+  },
+
+  "vision": {
+    "_gate_color_note": "Gate is #f3390f = rgb(243,57,15) ~ OpenCV HSV (H6,S239,V243). Sits near the red/hue-wrap boundary, so we use a low band plus a wrap-around band near H179. S/V floors are loose to tolerate shadows.",
+    "gate_hsv_ranges": [
+      [[0, 90, 70], [18, 255, 255]],
+      [[170, 90, 70], [180, 255, 255]]
+    ],
+    "path_hsv_ranges": [
+      [[100, 110, 50], [130, 255, 255]]
+    ],
+    "min_blob_area_frac": 0.0008,
+    "blur_ksize": 5,
+    "morph_ksize": 5,
+    "debug_save_every": 0,
+    "debug_dir": "debug_frames"
+  },
+
+  "navigation": {
+    "cruise_speed": 2.0,
+    "approach_speed": 1.2,
+    "pass_through_speed": 2.5,
+    "pass_through_seconds": 0.8,
+    "path_speed_frac": 0.7,
+    "yaw_gain": 1.4,
+    "max_yaw_rate": 1.2,
+    "vertical_gain": 1.0,
+    "max_vertical_speed": 1.0,
+    "gate_pass_area_frac": 0.10,
+    "gate_pass_center_tol": 0.25,
+    "search_yaw_rate": 0.5,
+    "search_creep_speed": 0.0
+  },
+
+  "safety": {
+    "require_detection_before_end": true,
+    "end_of_course_seconds": 3.0,
+    "max_run_seconds": 0,
+    "end_action": "hover"
+  }
+}

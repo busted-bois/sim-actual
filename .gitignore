@@ -8,3 +8,7 @@ _backup
 __pycache__/
 *.pyc
 .venv/
+
+# Vision debug / preview artifacts
+debug_frames/
+vision_preview_*.jpg

@@ -2,6 +2,9 @@ import time
 
 from pymavlink import mavutil
 
+from simulator.navigation import GateNavigator
+from simulator.vision_rx import VISION_ANALYSIS_KEY
+
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 MAVLINK_CMD_SIM_RESET = 31000
@@ -17,9 +20,22 @@ MOTOR_BACK_RIGHT = 0
 
 
 def update_motor_control(mavlink_conn, system_boot_ms):
-    motor_rpms = [MOTOR_FRONT_LEFT, MOTOR_FRONT_RIGHT, MOTOR_BACK_LEFT, MOTOR_BACK_RIGHT, 0, 0, 0, 0]
+    motor_rpms = [
+        MOTOR_FRONT_LEFT,
+        MOTOR_FRONT_RIGHT,
+        MOTOR_BACK_LEFT,
+        MOTOR_BACK_RIGHT,
+        0,
+        0,
+        0,
+        0,
+    ]
     mavlink_conn.mav.set_actuator_control_target_send(
-        int(time.time() * 1e6), mavlink_conn.target_system, mavlink_conn.target_component, 0, motor_rpms
+        int(time.time() * 1e6),
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        0,
+        motor_rpms,
     )
 
 
@@ -125,6 +141,45 @@ def update_position_flight_control(mavlink_conn, system_boot_ms):
 
 
 # --------------------------------------------------------------------------------------
+# BODY-FRAME VELOCITY + YAW-RATE CONTROL (used by the autonomous navigator)
+# --------------------------------------------------------------------------------------
+# Command velocity (vx/vy/vz) and yaw rate in the *body* frame so the navigator can
+# steer relative to the drone's nose: +vx forward, +vy right, +vz down, +yaw_rate
+# turns right. Position, acceleration and absolute-yaw fields are ignored.
+VELOCITY_BODY_MASK = (
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+)
+
+
+def update_velocity_flight_control(mavlink_conn, system_boot_ms, vx, vy, vz, yaw_rate):
+    now_ms = int(time.time() * 1000)
+    mavlink_conn.mav.set_position_target_local_ned_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
+        VELOCITY_BODY_MASK,
+        0.0,
+        0.0,
+        0.0,  # position (ignored)
+        vx,
+        vy,
+        vz,  # body-frame velocity
+        0.0,
+        0.0,
+        0.0,  # acceleration (ignored)
+        0.0,  # yaw (ignored)
+        yaw_rate,  # body yaw rate
+    )
+
+
+# --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
 
@@ -132,19 +187,52 @@ CONTROL_HZ = 250
 
 
 class Controller:
-    def __init__(self, sim_conn, data, system_boot_ms):
+    def __init__(self, sim_conn, data, system_boot_ms, config=None):
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
+        self.config = config or {}
+
+        autonomy = self.config.get("autonomy", {})
+        self.safety = self.config.get("safety", {})
+        # Autonomy is active only when explicitly enabled with a known algorithm.
+        self.navigator = None
+        if autonomy.get("enabled") and autonomy.get("algorithm") == "orange_gate":
+            self.navigator = GateNavigator(self.config)
+            print("[controller] autonomy ON (orange_gate navigator)", flush=True)
+        else:
+            print("[controller] autonomy OFF (template motor control)", flush=True)
+
+        self._end_handled = False
 
     def update(self):
-        # send automated targets to sim flight controller
-        # update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
-        # alternatively one of
-        # update_position_flight_control(self.sim_conn, self.system_boot_ms)
-        update_motor_control(self.sim_conn, self.system_boot_ms)
+        if self.navigator is not None:
+            self._update_autonomous()
+        else:
+            # Original template behavior.
+            update_motor_control(self.sim_conn, self.system_boot_ms)
 
         time.sleep(1.0 / CONTROL_HZ)
+
+    def _update_autonomous(self):
+        analysis = self.data.get(VISION_ANALYSIS_KEY)
+        cmd = self.navigator.compute(analysis)
+        update_velocity_flight_control(
+            self.sim_conn, self.system_boot_ms, cmd.vx, cmd.vy, cmd.vz, cmd.yaw_rate
+        )
+        if cmd.complete and not self._end_handled:
+            self._handle_course_complete()
+
+    def _handle_course_complete(self):
+        """Run the configured end-of-course safety action exactly once."""
+        self._end_handled = True
+        action = self.safety.get("end_action", "hover")
+        print(f"[controller] course complete -> end_action={action}", flush=True)
+        if action == "land":
+            self._land()
+        elif action == "disarm":
+            self._disarm()
+        # "hover": navigator keeps emitting zero-velocity setpoints, so we just hold.
 
     # -------------------------------
     # Arm the drone
@@ -156,6 +244,36 @@ class Controller:
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
             1,  # arm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    def _disarm(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,  # disarm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    def _land(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_LAND,
+            0,
+            0,
             0,
             0,
             0,
