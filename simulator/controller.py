@@ -42,8 +42,12 @@ ALTITUDE_TRIM = 0.50
 ALTITUDE_KP = 0.18
 ALTITUDE_KD = 0.10
 ALTITUDE_KI = 0.02
-MIN_NAV_THRUST = 0.20
+MIN_NAV_THRUST = 0.05
 MAX_NAV_THRUST = 0.70
+VERTICAL_EY_DEADBAND = 0.12
+VERTICAL_TARGET_RATE_M_S = 1.0
+VERTICAL_TARGET_LIMIT_UP_M = 3.0
+VERTICAL_TARGET_LIMIT_DOWN_M = 1.0
 
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
@@ -115,6 +119,7 @@ class Controller:
         self.started_at_s = time.monotonic()
         self.last_debug_log_s = 0.0
         self.target_z = None
+        self.base_z = None
         self.z_integral = 0.0
 
     def update(self):
@@ -126,10 +131,13 @@ class Controller:
             return
         if self.target_z is None:
             self.target_z = float(pos_ned[2])
+            self.base_z = self.target_z
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         if detection_age_s > 0.15:
             detection = None
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
+        if detection is not None:
+            self._adjust_target_z_from_detection(detection)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
         thrust = self._altitude_thrust(pos_ned, vel_ned)
         mode = "nav" if detection is not None else "idle"
@@ -146,6 +154,15 @@ class Controller:
         self.z_integral = max(-2.0, min(2.0, self.z_integral + error / CONTROL_HZ))
         thrust = ALTITUDE_TRIM + ALTITUDE_KP * error + ALTITUDE_KD * vz + ALTITUDE_KI * self.z_integral
         return max(MIN_NAV_THRUST, min(MAX_NAV_THRUST, thrust))
+
+    def _adjust_target_z_from_detection(self, detection):
+        if abs(detection.ey) <= VERTICAL_EY_DEADBAND or self.base_z is None:
+            return
+        ey = max(-0.8, min(0.8, detection.ey))
+        self.target_z += ey * VERTICAL_TARGET_RATE_M_S / CONTROL_HZ
+        min_z = self.base_z - VERTICAL_TARGET_LIMIT_UP_M
+        max_z = self.base_z + VERTICAL_TARGET_LIMIT_DOWN_M
+        self.target_z = max(min_z, min(max_z, self.target_z))
 
     def _log_debug(self, now_s, mode, detection, command, ramp, thrust, pitch_rate, pos_ned, vel_ned, yaw_ready):
         if now_s - self.last_debug_log_s < 1.0 / DEBUG_LOG_HZ:

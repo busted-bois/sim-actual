@@ -131,6 +131,12 @@ class GateNavigator:
             return 0.0
         if detection.range_m < 2.0:
             return 0.0
+        if abs(detection.ey) > 0.55:
+            return 0.0
+        if abs(detection.ey) > 0.35:
+            return 0.08
+        if abs(detection.ey) > 0.25:
+            return 0.15
         if detection.confidence < LOCK_CONFIDENCE:
             return 0.20
         if detection.strong_lock and centered and detection.range_m > 5.0:
