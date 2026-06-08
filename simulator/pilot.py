@@ -154,7 +154,7 @@ class Pilot:
         if not track_gates:
             self._mode_str = "no_gates"
             self._reset_approach_state()
-            self._hover()
+            self._cruise_forward()
             self._log_status("no track_gates")
             return
 
@@ -184,10 +184,10 @@ class Pilot:
                 self._log_status("telemetry gate")
                 return
 
-        # Nothing → hover (never blind cruise)
+        # Nothing → slow cruise to trigger race data
         self._mode_str = "no_target"
         self._reset_approach_state()
-        self._hover()
+        self._cruise_forward()
         self._log_status("no target")
 
     # ------------------------------------------------------------------
@@ -212,7 +212,7 @@ class Pilot:
 
         # ny-based altitude adjustment: ny > 0 means gate is below center
         ny_offset = _clamp(
-            -ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
+            ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
         )
         odometry = self.data.get("odometry")
         z_now = odometry.get("z", 0.0) if odometry else 0.0
