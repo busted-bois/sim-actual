@@ -125,13 +125,19 @@ class Controller:
     def update(self):
         frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
-        if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
+        if pos_ned is None:
             self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
             time.sleep(1.0 / CONTROL_HZ)
             return
         if self.target_z is None:
             self.target_z = float(pos_ned[2])
             self.base_z = self.target_z
+        if not yaw_ready or now_s - self.started_at_s < STARTUP_HOLD_S:
+            thrust = self._altitude_thrust(pos_ned, vel_ned)
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, thrust, 0.0, pos_ned, vel_ned, yaw_ready)
+            update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, self.navigator.last_command, 0.0, thrust)
+            time.sleep(1.0 / CONTROL_HZ)
+            return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         if detection_age_s > 0.15:
             detection = None
