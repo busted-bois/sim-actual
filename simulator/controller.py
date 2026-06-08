@@ -161,6 +161,10 @@ class Controller:
             time.sleep(1.0 / CONTROL_HZ)
             return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
+        if detection is None or detection_age_s > 0.15:
+            self._log_debug(now_s, "idle", detection, self.navigator.last_command, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
+            time.sleep(1.0 / CONTROL_HZ)
+            return
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
         vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
