@@ -44,6 +44,7 @@ POST_GATE_HOVER_S = 1.5
 # Search mode — yaw scan to find next gate after fly-through
 SEARCH_SWEEP_YAW_RATE = 0.8
 SEARCH_SWEEP_PERIOD_S = 2.0
+SEARCH_FORWARD_PITCH = -0.08
 
 # Passed-gate rejection — position-based internal map
 PASSED_GATE_NEAR_M = 3.0          # Within this dist of a passed gate, reject all
@@ -174,9 +175,11 @@ class Pilot:
             )
 
         yaw_rate = SEARCH_SWEEP_YAW_RATE * self._search_yaw_dir
-        thrust = self._altitude_thrust(HOVER_THRUST)
+        drone_pos = self._get_position()
+        z_hold = drone_pos[2] if drone_pos else None
+        thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_hold)
         self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, 0, yaw_rate, thrust)
+        self.controller.set_attitude_rates(0, SEARCH_FORWARD_PITCH, yaw_rate, thrust)
 
     # ------------------------------------------------------------------
     # Main tick — called every cycle at 250 Hz
@@ -209,7 +212,8 @@ class Pilot:
             elapsed = _time.monotonic() - self._post_gate_time
             if elapsed < POST_GATE_HOVER_S:
                 self._mode_str = "post_gate_hover"
-                self._hover()
+                drone_pos = self._get_position()
+                self._hover(drone_pos[2] if drone_pos else None)
                 return
             else:
                 self._post_gate_time = None
