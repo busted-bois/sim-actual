@@ -1,3 +1,4 @@
+import math
 import time
 
 from pymavlink import mavutil
@@ -98,6 +99,48 @@ CONTROL_HZ = 250
 STARTUP_HOLD_S = 1.0
 COMMAND_RAMP_S = 3.0
 DEBUG_LOG_HZ = 5.0
+ALTITUDE_VZ_KP = 0.8
+ALTITUDE_VZ_KD = 0.3
+MAX_DOWN_VZ = 3.0
+MAX_UP_VZ = 0.2
+
+VELOCITY_POSITION_MASK = (
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+)
+
+
+def update_navigation_velocity_control(mavlink_conn, system_boot_ms, vx=0.0, vy=0.0, vz=0.0, yaw_rate=0.0):
+    now_ms = int(time.time() * 1000)
+    mask = VELOCITY_POSITION_MASK
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+
+    mavlink_conn.mav.set_position_target_local_ned_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        mask,
+        0.0,
+        0.0,
+        0.0,
+        vx,
+        vy,
+        vz,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        yaw_rate,
+    )
 
 
 class Controller:
@@ -111,45 +154,39 @@ class Controller:
         self.last_debug_log_s = 0.0
 
     def update(self):
-        frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
+        frame_id, detection, vision_time, yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
-        thrust = self._altitude_thrust(pos_ned, vel_ned)
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
-            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, thrust, pos_ned, vel_ned, yaw_ready)
-            update_navigation_attitude_control(
-                self.sim_conn,
-                self.system_boot_ms,
-                self.navigator.last_command,
-                ramp=0.0,
-                thrust=thrust,
-            )
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
             time.sleep(1.0 / CONTROL_HZ)
             return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
-        self._log_debug(now_s, "nav", detection, command, ramp, thrust, pos_ned, vel_ned, yaw_ready)
-        update_navigation_attitude_control(
+        vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
+        ve = ramp * (command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad))
+        down_vz = self._altitude_down_velocity(pos_ned, vel_ned)
+        self._log_debug(now_s, "nav", detection, command, ramp, down_vz, pos_ned, vel_ned, yaw_ready)
+        update_navigation_velocity_control(
             self.sim_conn,
             self.system_boot_ms,
-            command,
-            ramp=ramp,
-            thrust=thrust,
+            vx=vn,
+            vy=ve,
+            vz=down_vz,
+            yaw_rate=command.yaw_rate,
         )
 
         time.sleep(1.0 / CONTROL_HZ)
 
-    def _altitude_thrust(self, pos_ned, vel_ned):
-        if pos_ned is None:
-            return SAFE_THRUST
+    def _altitude_down_velocity(self, pos_ned, vel_ned):
         z = float(pos_ned[2])
         vz = float(vel_ned[2]) if vel_ned is not None else 0.0
         if self.target_z is None:
             self.target_z = z
-        thrust = NAV_THRUST + ALTITUDE_KP * (z - self.target_z) + ALTITUDE_KD * vz
-        return max(MIN_NAV_THRUST, min(thrust, MAX_NAV_THRUST))
+        down_vz = ALTITUDE_VZ_KP * (self.target_z - z) - ALTITUDE_VZ_KD * vz
+        return max(-MAX_UP_VZ, min(down_vz, MAX_DOWN_VZ))
 
-    def _log_debug(self, now_s, mode, detection, command, ramp, thrust, pos_ned, vel_ned, yaw_ready):
+    def _log_debug(self, now_s, mode, detection, command, ramp, down_vz, pos_ned, vel_ned, yaw_ready):
         if now_s - self.last_debug_log_s < 1.0 / DEBUG_LOG_HZ:
             return
         self.last_debug_log_s = now_s
@@ -163,14 +200,14 @@ class Controller:
                 % (detection.confidence, detection.range_m, detection.ex, detection.ey, detection.bbox)
             )
         print(
-            "ctrl mode=%s yaw_ready=%s z=%s target_z=%s vz=%s thrust=%.2f ramp=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
+            "ctrl mode=%s yaw_ready=%s z=%s target_z=%s vz=%s down_vz=%.2f ramp=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
             % (
                 mode,
                 yaw_ready,
                 "none" if z is None else "%.2f" % z,
                 "none" if self.target_z is None else "%.2f" % self.target_z,
                 "none" if vz is None else "%.2f" % vz,
-                thrust,
+                down_vz,
                 ramp,
                 command.vx,
                 command.vy,
