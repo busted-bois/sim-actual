@@ -1,3 +1,4 @@
+import math
 import time
 
 from pymavlink import mavutil
@@ -32,10 +33,6 @@ PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
 ROLL_RATE = 0.0
 YAW_RATE = 0.0
 THRUST = 0.6  # 0.0 - 1.0
-HOVER_THRUST = 0.5
-PITCH_RATE_PER_M_S = 0.04
-ROLL_RATE_PER_M_S = 0.04
-THRUST_PER_DOWN_M_S = 0.08
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
@@ -70,25 +67,6 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     )
 
 
-def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command):
-    now_ms = int(time.time() * 1000)
-    pitch_rate = -PITCH_RATE_PER_M_S * command.vx
-    roll_rate = ROLL_RATE_PER_M_S * command.vy
-    thrust = max(0.0, min(HOVER_THRUST - THRUST_PER_DOWN_M_S * command.vz, 1.0))
-
-    mavlink_conn.mav.set_attitude_target_send(
-        now_ms - system_boot_ms,
-        mavlink_conn.target_system,
-        mavlink_conn.target_component,
-        RATES_ATTITUDE_MASK,
-        [1, 0, 0, 0],
-        roll_rate,
-        pitch_rate,
-        command.yaw_rate,
-        thrust,
-    )
-
-
 # --------------------------------------------------------------------------------------
 # POSITION CONTROLS
 # --------------------------------------------------------------------------------------
@@ -103,8 +81,15 @@ VELOCITY_POSITION_MASK = (
 )
 
 
-def update_position_flight_control(mavlink_conn, system_boot_ms, command):
+def update_position_flight_control(mavlink_conn, system_boot_ms, command, yaw_rad):
     now_ms = int(time.time() * 1000)
+    mask = VELOCITY_POSITION_MASK
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+    vn = command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad)
+    ve = command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad)
 
     """
     Sets a desired vehicle position in a local north-east-down coordinate
@@ -132,14 +117,14 @@ def update_position_flight_control(mavlink_conn, system_boot_ms, command):
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_NED,
-        VELOCITY_POSITION_MASK,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        mask,
         0.0,
         0,
         0.0,  # ignored position NED
-        command.vx,
-        command.vy,
-        command.vz,
+        vn,
+        ve,
+        0.0,
         0.0,
         0,
         0.0,  # ignored acceleration
@@ -163,11 +148,11 @@ class Controller:
         self.navigator = GateNavigator()
 
     def update(self):
-        frame_id, detection, vision_time = self._latest_detection()
+        frame_id, detection, vision_time, yaw_rad = self._latest_detection()
         now_s = time.monotonic()
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
-        update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, command)
+        update_position_flight_control(self.sim_conn, self.system_boot_ms, command, yaw_rad)
 
         time.sleep(1.0 / CONTROL_HZ)
 
@@ -177,6 +162,7 @@ class Controller:
                 self.data.get("latest_frame_id"),
                 self.data.get("latest_detection"),
                 self.data.get("latest_vision_time"),
+                self.data.get("yaw_rad", 0.0),
             )
 
     # -------------------------------
