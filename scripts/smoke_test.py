@@ -1,4 +1,4 @@
-"""Synthetic smoke test for hackathon pilot stack (no FlightSim required)."""
+"""Synthetic smoke test for shared vision/gate modules (no FlightSim required)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from simulator.config import DroneState, TrackGate
-from simulator.pilot import ControlSetpoint
 from simulator.gate_detector import detect_gate
 from simulator.gate_estimator import GateEstimator
-from simulator.pilot import Pilot
 from simulator.state_machine import PilotState, transition
 from simulator.transforms import body_to_ned_velocity, quat_to_yaw
 
@@ -35,8 +33,7 @@ def main() -> int:
     else:
         print("[ok] transforms")
 
-    yaw = quat_to_yaw(1.0, 0.0, 0.0, 0.0)
-    if abs(yaw) > 1e-6:
+    if abs(quat_to_yaw(1.0, 0.0, 0.0, 0.0)) > 1e-6:
         print("[fail] quat_to_yaw identity")
         ok = False
 
@@ -48,9 +45,8 @@ def main() -> int:
         print(f"[ok] gate_detector area={det.area_px:.0f}px")
 
     drone = DroneState((0.0, 0.0, -3.0), (0.0, 0.0, 0.0), 0.0, 0.0, 1000, True)
-    next_state = transition(PilotState.TAKEOFF, None, None, drone, False, 11.0)
-    if next_state != PilotState.CHASE:
-        print("[fail] state_machine takeoff timeout")
+    if transition(PilotState.TAKEOFF, None, None, drone, False, 11.0) != PilotState.CHASE:
+        print("[fail] state_machine")
         ok = False
     else:
         print("[ok] state_machine")
@@ -62,30 +58,6 @@ def main() -> int:
         ok = False
     else:
         print(f"[ok] gate_estimator source={est.source}")
-
-    shared: dict = {
-        "pos_ned": (0.0, 0.0, -3.0),
-        "vel_ned": (0.0, 0.0, 0.0),
-        "yaw_rad": 0.0,
-        "yaw_rate": 0.0,
-        "att_time_ms": 1000,
-        "has_position": True,
-        "active_gate_index": 0,
-        "gates": [gate],
-    }
-    pilot = Pilot(shared)
-    pilot.on_frame(det)
-    pilot._state = PilotState.CHASE
-    cs = pilot.update(1.0 / 250.0)
-    if cs.mode != "velocity" or cs.vel_ned is None:
-        print("[fail] pilot chase control")
-        ok = False
-    else:
-        print(f"[ok] pilot mode={cs.mode} vel={cs.vel_ned}")
-
-    if not isinstance(cs, ControlSetpoint):
-        print("[fail] control setpoint type")
-        ok = False
 
     print("smoke:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

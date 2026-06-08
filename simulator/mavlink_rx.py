@@ -2,8 +2,7 @@ import struct
 import time
 import threading
 
-from simulator.config import TrackGate
-from simulator.transforms import quat_to_yaw
+from pymavlink import mavutil
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 ENCAPSULATED_TRACK_INFO_MSG_ID = 2
@@ -191,6 +190,12 @@ class MAVLinkRX:
 
     def on_race_status(self, msg):
         raw_payload = bytes(msg.data)
+        # data_type - ID of this message
+        # sim_boot_time_ms - elapsed ms on server since sim boot
+        # race_start_boot_time_ms - elapsed ms on server since sim boot when race started. None or < 0 if race has not started
+        # race_finish_time_ns - elapsed ns on server since sim boot when race finished. None or < 0 if race is ongoing
+        # active_gate_index - current index of target race gate
+        # last_gate_race_time - race time in seconds when last gate was passed
         (
             _data_type,
             sim_boot_time_ms,
@@ -229,6 +234,8 @@ class MAVLinkRX:
             self.on_track_data(full_payload)
 
     def on_track_data(self, payload):
+        # header:
+        #   num_gates - track gate count
         (num_gates,) = struct.unpack_from("<H", payload)
         payload = payload[2:]
         gates = []
@@ -245,20 +252,6 @@ class MAVLinkRX:
                 width,
                 height,
             ) = struct.unpack_from("<Hfffffffff", payload)
-            gates.append(
-                TrackGate(
-                    gate_id=gate_id,
-                    pos_ned=(position_ned_x, position_ned_y, position_ned_z),
-                    orient_quat=(
-                        orientation_ned_w,
-                        orientation_ned_x,
-                        orientation_ned_y,
-                        orientation_ned_z,
-                    ),
-                    width_m=width,
-                    height_m=height,
-                )
-            )
             payload = payload[38:]
             gates.append(
                 {
