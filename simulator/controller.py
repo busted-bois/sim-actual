@@ -1,4 +1,3 @@
-import math
 import time
 
 from pymavlink import mavutil
@@ -33,6 +32,8 @@ PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
 ROLL_RATE = 0.0
 YAW_RATE = 0.0
 THRUST = 0.6  # 0.0 - 1.0
+NAV_THRUST = 0.48
+NAV_PITCH_RATE_PER_M_S = 0.03
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
@@ -67,66 +68,20 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     )
 
 
-# --------------------------------------------------------------------------------------
-# POSITION CONTROLS
-# --------------------------------------------------------------------------------------
-VELOCITY_POSITION_MASK = (
-    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-)
-
-
-def update_position_flight_control(mavlink_conn, system_boot_ms, vx=0.0, vy=0.0, vz=0.0, yaw_rate=0.0):
+def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp=1.0):
     now_ms = int(time.time() * 1000)
-    mask = VELOCITY_POSITION_MASK
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-
-    """
-    Sets a desired vehicle position in a local north-east-down coordinate
-    frame. Used by an external controller to command the vehicle
-    (manual controller or other system).
-
-    time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
-    target_system             : System ID (type:uint8_t)
-    target_component          : Component ID (type:uint8_t)
-    coordinate_frame          : Valid options are: MAV_FRAME_LOCAL_NED = 1, MAV_FRAME_LOCAL_OFFSET_NED = 7, MAV_FRAME_BODY_NED = 8, MAV_FRAME_BODY_OFFSET_NED = 9 (type:uint8_t, values:MAV_FRAME)
-    type_mask                 : Bitmap to indicate which dimensions should be ignored by the vehicle. (type:uint16_t, values:POSITION_TARGET_TYPEMASK)
-    x                         : X Position in NED frame [m] (type:float)
-    y                         : Y Position in NED frame [m] (type:float)
-    z                         : Z Position in NED frame (note, altitude is negative in NED) [m] (type:float)
-    vx                        : X velocity in NED frame [m/s] (type:float)
-    vy                        : Y velocity in NED frame [m/s] (type:float)
-    vz                        : Z velocity in NED frame [m/s] (type:float)
-    afx                       : X acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afy                       : Y acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afz                       : Z acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    yaw                       : yaw setpoint [rad] (type:float)
-    yaw_rate                  : yaw rate setpoint [rad/s] (type:float)
-    """
-    mavlink_conn.mav.set_position_target_local_ned_send(
+    pitch_rate = -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
+    yaw_rate = command.yaw_rate * ramp
+    mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        mask,
+        RATES_ATTITUDE_MASK,
+        [1, 0, 0, 0],
         0.0,
-        0,
-        0.0,  # ignored position NED
-        vx,
-        vy,
-        vz,
-        0.0,
-        0,
-        0.0,  # ignored acceleration
-        0,  # ignored yaw
+        pitch_rate,
         yaw_rate,
+        NAV_THRUST,
     )
 
 
@@ -148,24 +103,25 @@ class Controller:
         self.started_at_s = time.monotonic()
 
     def update(self):
-        frame_id, detection, vision_time, yaw_rad, yaw_ready = self._latest_detection()
+        frame_id, detection, vision_time, _yaw_rad, yaw_ready = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or now_s - self.started_at_s < STARTUP_HOLD_S:
-            update_position_flight_control(self.sim_conn, self.system_boot_ms)
+            update_navigation_attitude_control(
+                self.sim_conn,
+                self.system_boot_ms,
+                self.navigator.last_command,
+                ramp=0.0,
+            )
             time.sleep(1.0 / CONTROL_HZ)
             return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
-        vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
-        ve = ramp * (command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad))
-        update_position_flight_control(
+        update_navigation_attitude_control(
             self.sim_conn,
             self.system_boot_ms,
-            vx=vn,
-            vy=ve,
-            vz=0.0,
-            yaw_rate=command.yaw_rate,
+            command,
+            ramp=ramp,
         )
 
         time.sleep(1.0 / CONTROL_HZ)
