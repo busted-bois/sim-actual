@@ -6,6 +6,7 @@ DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
 ENABLE_LATERAL_CONTROL = False
 ENABLE_VERTICAL_CONTROL = False
+ENABLE_FORWARD_CONTROL = False
 ENABLE_SEARCH_SCAN = False
 
 STALE_DETECTION_S = 0.15
@@ -82,7 +83,7 @@ class GateNavigator:
         yaw_rate = clamp(1.2 * detection.ex, -1.0, 1.0)
         vy = clamp(0.8 * detection.ex, -1.0, 1.0) if ENABLE_LATERAL_CONTROL else 0.0
         vz = clamp(0.8 * detection.ey, -0.8, 0.8) if ENABLE_VERTICAL_CONTROL else 0.0
-        vx = self._forward_speed(detection, centered)
+        vx = self._forward_speed(detection, centered) if ENABLE_FORWARD_CONTROL else 0.0
 
         self._set_state("track")
         return VelocityCommand(vx, vy, vz, yaw_rate)
