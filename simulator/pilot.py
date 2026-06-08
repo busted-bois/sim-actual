@@ -31,13 +31,15 @@ VISION_PROXIMITY_R_FRAC = 0.10
 VISION_MAX_AGE_S = 0.5
 VISION_VY_GAIN = 6.0
 VISION_MAX_ALT_ADJUST = 2.0
-STABILIZE_HOLD_S = 0.3
+STABILIZE_HOLD_S = 0.1
 VISION_ALIGN_PITCH_RATE = -0.15
 
 TELEMETRY_YAW_GAIN = 1.0
 TELEMETRY_PROXIMITY_M = 3.0
 
 OBSTACLE_CLEAR_ZONE = 0.25
+
+POST_GATE_HOVER_S = 1.5
 
 CONTROL_DT_S = 1 / 250
 
@@ -58,6 +60,7 @@ class Pilot:
         self._stabilize_start: float | None = None
         self._advancing: bool = False
         self._prev_r_frac: float = 0.0
+        self._post_gate_time: float | None = None
         self._last_gate_id: str | None = None
         self._mode_str = "???"
         controller.set_control_mode("attitude")
@@ -92,6 +95,7 @@ class Pilot:
     def _reset_approach_state(self) -> None:
         self._advancing = False
         self._stabilize_start = None
+        self._post_gate_time = None
 
     def _gate_id(self, gate: dict) -> str | None:  # type: ignore[type-arg]
         pos = gate.get("position_ned")
@@ -124,6 +128,16 @@ class Pilot:
         collision = self.data.get("collision")
         if collision is not None:
             self._collision_time = _time.monotonic()
+
+        # Post-gate hover — stop and re-acquire next gate after passing through
+        if self._post_gate_time is not None:
+            elapsed = _time.monotonic() - self._post_gate_time
+            if elapsed < POST_GATE_HOVER_S:
+                self._mode_str = "post_gate_hover"
+                self._hover()
+                return
+            else:
+                self._post_gate_time = None
 
         # Vision first (real-time camera — highest priority)
         gate_target = self.data.get("gate_target")
@@ -190,17 +204,23 @@ class Pilot:
             and self._prev_r_frac > 0.10
             and r_frac < self._prev_r_frac * 0.4
         ):
-            self._reset_approach_state()
+            self._post_gate_time = _time.monotonic()
+            print("[pilot] GATE PASSED, hovering to re-acquire", flush=True)
+            self._prev_r_frac = r_frac
+            pitch = 0.0
+            thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+            self.controller.set_control_mode("attitude")
+            self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
+            return
         self._prev_r_frac = r_frac
 
         if self._advancing:
             # ADVANCE phase — flying forward through gate
-            if not centered:
-                # Lost centering → back to stabilize
+            if abs(nx) > 0.7 or abs(ny) > 0.7:
                 self._advancing = False
                 self._stabilize_start = None
                 print(
-                    "[pilot] STABILIZE → lost centering, re-aligning",
+                    "[pilot] STABILIZE → gate too far off-center, re-aligning",
                     flush=True,
                 )
                 pitch = 0.0
