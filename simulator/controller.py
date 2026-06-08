@@ -1,4 +1,3 @@
-import math
 import time
 
 from pymavlink import mavutil
@@ -36,14 +35,15 @@ THRUST = 0.6  # 0.0 - 1.0
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 NAV_ATTITUDE_MASK = (
-    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
-    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
-    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
-    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
+    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 )
-NAV_PITCH_ANGLE_PER_M_S = 0.60
-MAX_NAV_PITCH_ANGLE = 0.26
-YAW_LOOKAHEAD_S = 0.35
+NAV_PITCH_RATE_PER_M_S = 0.35
+ALTITUDE_TRIM = 0.50
+ALTITUDE_KP = 0.18
+ALTITUDE_KD = 0.10
+ALTITUDE_KI = 0.02
+MIN_NAV_THRUST = 0.20
+MAX_NAV_THRUST = 0.70
 
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
@@ -76,41 +76,25 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     )
 
 
-def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp, yaw_rad):
+def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp, thrust):
     now_ms = int(time.time() * 1000)
-    pitch_angle = navigation_pitch_angle(command, ramp)
-    yaw_target = yaw_rad + command.yaw_rate * ramp * YAW_LOOKAHEAD_S
+    pitch_rate = navigation_pitch_rate(command, ramp)
+    yaw_rate = command.yaw_rate * ramp
     mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         NAV_ATTITUDE_MASK,
-        euler_to_quaternion(0.0, pitch_angle, yaw_target),
+        [1, 0, 0, 0],
         0.0,
-        0.0,
-        0.0,
-        0.0,
+        pitch_rate,
+        yaw_rate,
+        thrust,
     )
 
 
-def navigation_pitch_angle(command, ramp):
-    pitch = -NAV_PITCH_ANGLE_PER_M_S * command.vx * ramp
-    return max(-MAX_NAV_PITCH_ANGLE, min(0.0, pitch))
-
-
-def euler_to_quaternion(roll, pitch, yaw):
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    return [
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    ]
+def navigation_pitch_rate(command, ramp):
+    return -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
 
 
 # --------------------------------------------------------------------------------------
@@ -130,28 +114,40 @@ class Controller:
         self.navigator = GateNavigator()
         self.started_at_s = time.monotonic()
         self.last_debug_log_s = 0.0
+        self.target_z = None
+        self.z_integral = 0.0
 
     def update(self):
-        frame_id, detection, vision_time, yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
+        frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
-            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
             time.sleep(1.0 / CONTROL_HZ)
             return
+        if self.target_z is None:
+            self.target_z = float(pos_ned[2])
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         if detection_age_s > 0.15:
             detection = None
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
-        sim_vz = 0.0
+        thrust = self._altitude_thrust(pos_ned, vel_ned)
         mode = "nav" if detection is not None else "idle"
-        pitch_angle = navigation_pitch_angle(command, ramp)
-        self._log_debug(now_s, mode, detection, command, ramp, sim_vz, pitch_angle, pos_ned, vel_ned, yaw_ready)
-        update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, command, ramp, yaw_rad)
+        pitch_rate = navigation_pitch_rate(command, ramp)
+        self._log_debug(now_s, mode, detection, command, ramp, thrust, pitch_rate, pos_ned, vel_ned, yaw_ready)
+        update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, command, ramp, thrust)
 
         time.sleep(1.0 / CONTROL_HZ)
 
-    def _log_debug(self, now_s, mode, detection, command, ramp, sim_vz, pitch_rate, pos_ned, vel_ned, yaw_ready):
+    def _altitude_thrust(self, pos_ned, vel_ned):
+        z = float(pos_ned[2])
+        vz = float(vel_ned[2]) if vel_ned is not None else 0.0
+        error = z - self.target_z
+        self.z_integral = max(-2.0, min(2.0, self.z_integral + error / CONTROL_HZ))
+        thrust = ALTITUDE_TRIM + ALTITUDE_KP * error + ALTITUDE_KD * vz + ALTITUDE_KI * self.z_integral
+        return max(MIN_NAV_THRUST, min(MAX_NAV_THRUST, thrust))
+
+    def _log_debug(self, now_s, mode, detection, command, ramp, thrust, pitch_rate, pos_ned, vel_ned, yaw_ready):
         if now_s - self.last_debug_log_s < 1.0 / DEBUG_LOG_HZ:
             return
         self.last_debug_log_s = now_s
@@ -165,13 +161,14 @@ class Controller:
                 % (detection.confidence, detection.range_m, detection.ex, detection.ey, detection.bbox)
             )
         print(
-            "ctrl mode=%s yaw_ready=%s z=%s vz=%s sim_vz=%.2f ramp=%.2f pitch=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
+            "ctrl mode=%s yaw_ready=%s z=%s target_z=%s vz=%s thrust=%.2f ramp=%.2f pitch_rate=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
             % (
                 mode,
                 yaw_ready,
                 "none" if z is None else "%.2f" % z,
+                "none" if self.target_z is None else "%.2f" % self.target_z,
                 "none" if vz is None else "%.2f" % vz,
-                sim_vz,
+                thrust,
                 ramp,
                 pitch_rate,
                 command.vx,
