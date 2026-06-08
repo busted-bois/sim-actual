@@ -39,7 +39,7 @@ NAV_ATTITUDE_MASK = (
     | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
     | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
 )
-NAV_PITCH_RATE_PER_M_S = 0.8
+NAV_PITCH_RATE_PER_M_S = 1.0
 
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
@@ -89,6 +89,10 @@ def update_navigation_rate_control(mavlink_conn, system_boot_ms, command, ramp):
     )
 
 
+def navigation_pitch_rate(command, ramp):
+    return -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
+
+
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
@@ -111,7 +115,7 @@ class Controller:
         frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
-            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
             time.sleep(1.0 / CONTROL_HZ)
             return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
@@ -121,12 +125,13 @@ class Controller:
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
         sim_vz = 0.0
         mode = "nav" if detection is not None else "idle"
-        self._log_debug(now_s, mode, detection, command, ramp, sim_vz, pos_ned, vel_ned, yaw_ready)
+        pitch_rate = navigation_pitch_rate(command, ramp)
+        self._log_debug(now_s, mode, detection, command, ramp, sim_vz, pitch_rate, pos_ned, vel_ned, yaw_ready)
         update_navigation_rate_control(self.sim_conn, self.system_boot_ms, command, ramp)
 
         time.sleep(1.0 / CONTROL_HZ)
 
-    def _log_debug(self, now_s, mode, detection, command, ramp, sim_vz, pos_ned, vel_ned, yaw_ready):
+    def _log_debug(self, now_s, mode, detection, command, ramp, sim_vz, pitch_rate, pos_ned, vel_ned, yaw_ready):
         if now_s - self.last_debug_log_s < 1.0 / DEBUG_LOG_HZ:
             return
         self.last_debug_log_s = now_s
@@ -140,7 +145,7 @@ class Controller:
                 % (detection.confidence, detection.range_m, detection.ex, detection.ey, detection.bbox)
             )
         print(
-            "ctrl mode=%s yaw_ready=%s z=%s vz=%s sim_vz=%.2f ramp=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
+            "ctrl mode=%s yaw_ready=%s z=%s vz=%s sim_vz=%.2f ramp=%.2f pitch=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
             % (
                 mode,
                 yaw_ready,
@@ -148,6 +153,7 @@ class Controller:
                 "none" if vz is None else "%.2f" % vz,
                 sim_vz,
                 ramp,
+                pitch_rate,
                 command.vx,
                 command.vy,
                 command.vz,

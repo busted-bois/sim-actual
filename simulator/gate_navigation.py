@@ -9,7 +9,7 @@ LATERAL_GAIN = 0.0
 ENABLE_VERTICAL_CONTROL = False
 SCAN_FORWARD_SPEED = 0.0
 SCAN_YAW_RATE = 0.0
-MAX_FORWARD_SPEED = 0.35
+MAX_FORWARD_SPEED = 0.60
 MIN_TRACK_CONFIDENCE = 0.40
 
 STALE_DETECTION_S = 0.15
@@ -132,12 +132,12 @@ class GateNavigator:
         if detection.range_m < 2.0:
             return 0.0
         if detection.confidence < LOCK_CONFIDENCE:
-            return 0.08
+            return 0.20
         if detection.strong_lock and centered and detection.range_m > 5.0:
             return MAX_FORWARD_SPEED
         if detection.confidence >= 0.75 and centered:
-            return 0.2
-        return 0.1
+            return 0.40
+        return 0.25
 
     def _near_pass(self, detection):
         _, _, w, h = detection.bbox
