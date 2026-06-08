@@ -268,11 +268,9 @@ class MAVLinkRX:
             msg.id,
             msg.threat_level,
             msg.horizontal_minimum_delta,
-            msg.time_usec,
         )
         self.data["collision"] = {
             "id": msg.id,
             "threat_level": msg.threat_level,
             "delta": msg.horizontal_minimum_delta,
-            "time_usec": msg.time_usec,
         }
