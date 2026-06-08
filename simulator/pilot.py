@@ -39,12 +39,13 @@ TELEMETRY_PROXIMITY_M = 3.0
 
 OBSTACLE_CLEAR_ZONE = 0.25
 
-POST_GATE_HOVER_S = 1.5
+POST_GATE_HOVER_S = 2.5
 
 # Search mode — yaw scan to find next gate after fly-through
 SEARCH_SWEEP_YAW_RATE = 0.8
 SEARCH_SWEEP_PERIOD_S = 2.0
-SEARCH_FORWARD_PITCH = -0.08
+SEARCH_FORWARD_PITCH = -0.04
+SEARCH_WARMUP_S = 1.5
 
 # Passed-gate rejection — position-based internal map
 PASSED_GATE_NEAR_M = 3.0  # Within this dist of a passed gate, reject all
@@ -178,8 +179,9 @@ class Pilot:
         drone_pos = self._get_position()
         z_hold = drone_pos[2] if drone_pos else None
         thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_hold)
+        pitch = 0.0 if elapsed < SEARCH_WARMUP_S else SEARCH_FORWARD_PITCH
         self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, SEARCH_FORWARD_PITCH, yaw_rate, thrust)
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
     # ------------------------------------------------------------------
     # Main tick — called every cycle at 250 Hz
