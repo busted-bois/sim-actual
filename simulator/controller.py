@@ -81,15 +81,12 @@ VELOCITY_POSITION_MASK = (
 )
 
 
-def update_position_flight_control(mavlink_conn, system_boot_ms, command, yaw_rad):
+def update_position_flight_control(mavlink_conn, system_boot_ms, vx=0.0, vy=0.0, vz=0.0, yaw_rate=0.0):
     now_ms = int(time.time() * 1000)
     mask = VELOCITY_POSITION_MASK
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
-    vn = command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad)
-    ve = command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad)
 
     """
     Sets a desired vehicle position in a local north-east-down coordinate
@@ -122,14 +119,14 @@ def update_position_flight_control(mavlink_conn, system_boot_ms, command, yaw_ra
         0.0,
         0,
         0.0,  # ignored position NED
-        vn,
-        ve,
-        0.0,
+        vx,
+        vy,
+        vz,
         0.0,
         0,
         0.0,  # ignored acceleration
         0,  # ignored yaw
-        command.yaw_rate,
+        yaw_rate,
     )
 
 
@@ -138,6 +135,8 @@ def update_position_flight_control(mavlink_conn, system_boot_ms, command, yaw_ra
 # --------------------------------------------------------------------------------------
 
 CONTROL_HZ = 250
+STARTUP_HOLD_S = 1.0
+COMMAND_RAMP_S = 3.0
 
 
 class Controller:
@@ -146,13 +145,28 @@ class Controller:
         self.data = data
         self.system_boot_ms = system_boot_ms
         self.navigator = GateNavigator()
+        self.started_at_s = time.monotonic()
 
     def update(self):
-        frame_id, detection, vision_time, yaw_rad = self._latest_detection()
+        frame_id, detection, vision_time, yaw_rad, yaw_ready = self._latest_detection()
         now_s = time.monotonic()
+        if not yaw_ready or now_s - self.started_at_s < STARTUP_HOLD_S:
+            update_position_flight_control(self.sim_conn, self.system_boot_ms)
+            time.sleep(1.0 / CONTROL_HZ)
+            return
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
-        update_position_flight_control(self.sim_conn, self.system_boot_ms, command, yaw_rad)
+        ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
+        vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
+        ve = ramp * (command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad))
+        update_position_flight_control(
+            self.sim_conn,
+            self.system_boot_ms,
+            vx=vn,
+            vy=ve,
+            vz=0.0,
+            yaw_rate=command.yaw_rate,
+        )
 
         time.sleep(1.0 / CONTROL_HZ)
 
@@ -163,6 +177,7 @@ class Controller:
                 self.data.get("latest_detection"),
                 self.data.get("latest_vision_time"),
                 self.data.get("yaw_rad", 0.0),
+                self.data.get("yaw_ready", False),
             )
 
     # -------------------------------

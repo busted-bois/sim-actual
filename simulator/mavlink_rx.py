@@ -1,11 +1,18 @@
 import struct
 import time
 import threading
+import math
 
 from pymavlink import mavutil
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 ENCAPSULATED_TRACK_INFO_MSG_ID = 2
+
+
+def _quat_to_yaw(qw, qx, qy, qz):
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 class MAVLinkRX:
@@ -121,6 +128,7 @@ class MAVLinkRX:
 
     def on_attitude(self, msg):
         self.data["yaw_rad"] = msg.yaw
+        self.data["yaw_ready"] = True
         self.data["attitude"] = {
             "roll": msg.roll,
             "pitch": msg.pitch,
@@ -132,6 +140,9 @@ class MAVLinkRX:
         }
 
     def on_local_position_ned(self, msg):
+        self.data["pos_ned"] = (msg.x, msg.y, msg.z)
+        self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
+        self.data["has_position"] = True
         self.data["local_position_ned"] = {
             "x": msg.x,
             "y": msg.y,
@@ -143,14 +154,29 @@ class MAVLinkRX:
         }
 
     def on_odometry(self, msg):
-        pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
-        qx, qy, qz, qw = msg.q[1], msg.q[2], msg.q[3], msg.q[0]
-        vel_x, vel_y, vel_z = msg.vx, msg.vy, msg.vz
-        roll_speed = msg.rollspeed
-        pitch_speed = msg.pitchspeed
-        yaw_speed = msg.yawspeed
-        time_boot_us = msg.time_usec
-        reset_count = msg.reset_counter
+        qw, qx, qy, qz = msg.q[0], msg.q[1], msg.q[2], msg.q[3]
+        self.data["yaw_rad"] = _quat_to_yaw(qw, qx, qy, qz)
+        self.data["yaw_ready"] = True
+        self.data["pos_ned"] = (msg.x, msg.y, msg.z)
+        self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
+        self.data["has_position"] = True
+        self.data["odometry"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+            "qx": qx,
+            "qy": qy,
+            "qz": qz,
+            "qw": qw,
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
+            "time_boot_us": msg.time_usec,
+            "reset_count": msg.reset_counter,
+        }
 
     def on_highres_imu(self, msg):
         acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
