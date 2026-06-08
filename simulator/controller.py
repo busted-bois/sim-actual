@@ -121,7 +121,7 @@ class Controller:
         frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
-            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
             time.sleep(1.0 / CONTROL_HZ)
             return
         if self.target_z is None:
