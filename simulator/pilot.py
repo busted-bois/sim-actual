@@ -103,6 +103,7 @@ class Pilot:
         self._post_gate_time = None
         self._peak_r_frac = 0.0
         self._vision_suppress_until = 0.0
+        self._last_gate_id = None
 
     def _gate_id(self, gate: dict) -> str | None:  # type: ignore[type-arg]
         pos = gate.get("position_ned")
@@ -160,6 +161,12 @@ class Pilot:
         gate_target = self.data.get("gate_target")
         cam = self.data.get("camera")
         if gate_target and gate_target.get("detected"):
+            if track_gates and odometry is not None:
+                nearest = self._find_nearest_gate(track_gates, odometry)
+                if nearest is not None:
+                    gid = self._gate_id(nearest)
+                    if gid:
+                        self._last_gate_id = gid
             if cam is not None:
                 age = _time.monotonic() - cam.get("received_at", 0)
                 if age < VISION_MAX_AGE_S and _time.monotonic() >= self._vision_suppress_until:
@@ -216,12 +223,19 @@ class Pilot:
         self._peak_r_frac = max(self._peak_r_frac, r_frac)
 
         if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.6:
+            gate_id = self._last_gate_id
+            track_gates = self.data.get("track_gates")
+            odometry = self.data.get("odometry")
+            if track_gates and odometry is not None:
+                nearest = self._find_nearest_gate(track_gates, odometry)
+                if nearest is not None:
+                    gate_id = self._gate_id(nearest)
+            self._reset_approach_state()
             self._post_gate_time = _time.monotonic()
-            self._peak_r_frac = 0.0
-            if self._last_gate_id:
-                self._completed_gates.add(self._last_gate_id)
             self._vision_suppress_until = _time.monotonic() + POST_GATE_HOVER_S + 1.0
-            print(f"[pilot] Gate {self._last_gate_id} marked COMPLETE, total passed: {len(self._completed_gates)}", flush=True)
+            if gate_id:
+                self._completed_gates.add(gate_id)
+            print(f"[pilot] Gate {gate_id} marked COMPLETE, total passed: {len(self._completed_gates)}", flush=True)
             print("[pilot] FLY-THROUGH detected, hovering to re-acquire", flush=True)
             pitch = abs(CRUISE_PITCH_RATE) * 0.5
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
