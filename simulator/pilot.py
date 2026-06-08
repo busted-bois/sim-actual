@@ -34,6 +34,8 @@ TELEMETRY_YAW_GAIN = 1.0
 
 CONTROL_DT_S = 1 / 250
 
+_LOG_INTERVAL = 2.0  # seconds between status prints
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
@@ -47,8 +49,34 @@ class Pilot:
         self.data = data
         self._z_integral = 0.0
         self._collision_time: float | None = None
+        self._last_log = 0.0
+        self._mode_str = "???"
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
+        print("[pilot] init done, waiting for armed + track_gates", flush=True)
+
+    def _log_status(self, reason: str) -> None:
+        now = _time.monotonic()
+        if now - self._last_log < _LOG_INTERVAL:
+            return
+        self._last_log = now
+        armed = self.data.get("armed", False)
+        tg = self.data.get("track_gates")
+        odo = self.data.get("odometry")
+        gt = self.data.get("gate_target")
+        col = self.data.get("collision")
+        z = odo.get("z", "?") if odo else "?"
+        n_gates = len(tg) if tg else 0
+        gt_det = gt.get("detected") if gt else None
+        c = self.controller
+        print(
+            f"[pilot] {reason:25s} | mode={self._mode_str:8s} | "
+            f"armed={armed} gates={n_gates} z={z} "
+            f"pitch={c._pitch_rate:+.3f} yaw_r={c._yaw_rate:+.3f} "
+            f"thr={c._thrust:.3f} ctrl={c.control_mode} | "
+            f"gt_det={gt_det} collision={col is not None}",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------
     # Main tick — called every cycle at 250 Hz
@@ -57,7 +85,9 @@ class Pilot:
         armed = self.data.get("armed", False)
 
         if not armed:
+            self._mode_str = "disarmed"
             self._hover()
+            self._log_status("not armed")
             return
 
         # Collision hold
@@ -66,6 +96,8 @@ class Pilot:
             if elapsed < COLLISION_HOLD_S:
                 self.controller.set_control_mode("attitude")
                 self.controller.set_attitude_rates(0, 0, 0, COLLISION_THRUST)
+                self._mode_str = "collision_hold"
+                self._log_status("collision hold")
                 return
             self._collision_time = None
             self.data.pop("collision", None)
@@ -77,7 +109,9 @@ class Pilot:
         # No gate data → hover
         track_gates = self.data.get("track_gates")
         if not track_gates:
+            self._mode_str = "no_gates"
             self._hover()
+            self._log_status("no track_gates")
             return
 
         # Gate from vision
@@ -87,7 +121,9 @@ class Pilot:
             if cam is not None:
                 age = _time.monotonic() - cam.get("received_at", 0)
                 if age < VISION_MAX_AGE_S:
+                    self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
+                    self._log_status("vision gate")
                     return
 
         # Gate from telemetry
@@ -95,11 +131,15 @@ class Pilot:
         active_idx = race_status.get("active_gate_index", 0)
         odometry = self.data.get("odometry")
         if odometry is not None and len(track_gates) > active_idx:
+            self._mode_str = "telemetry"
             self._fly_toward_gate_telemetry(track_gates[active_idx], odometry)
+            self._log_status("telemetry gate")
             return
 
         # Nothing → cruise forward
+        self._mode_str = "cruise"
         self._cruise_forward()
+        self._log_status("cruise")
 
     # ------------------------------------------------------------------
     # Flight primitives
