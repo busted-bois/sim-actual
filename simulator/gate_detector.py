@@ -82,7 +82,7 @@ class GateDetector:
             self.previous_target = None
             return None
 
-        candidates.sort(key=lambda item: item.confidence, reverse=True)
+        candidates.sort(key=lambda item: (item.confidence + min(item.area_ratio * 20.0, 1.0) * 0.25), reverse=True)
         detection = candidates[0]
         detection = GateDetection(
             frame_id=detection.frame_id,
