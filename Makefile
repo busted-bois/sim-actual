@@ -11,19 +11,19 @@ test:
 	uv run pytest -q
 
 vision-smoke:
-	uv run python scripts/vision_smoke.py
+	uv run python -m scripts.vision_smoke
 
 mavlink-probe:
-	uv run python scripts/mavlink_probe.py
+	uv run python -m scripts.mavlink_probe
 
 race-timing-probe:
-	uv run python scripts/race_timing_probe.py
+	uv run python -m scripts.race_timing_probe
 
 preflight:
-	uv run python scripts/preflight.py
+	uv run python -m scripts.preflight
 
 tracking-smoke:
-	uv run python scripts/tracking_smoke.py
+	uv run python -m scripts.tracking_smoke
 
 sim:
-	uv run main.py
+	uv run main.py $(if $(COLLISION_RESET),--collision-reset,)

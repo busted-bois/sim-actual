@@ -14,6 +14,8 @@ class TrackingSnapshot:
     pitch: float
     yaw: float
     status: str
+    healthy: bool = False
+    imu_samples: int = 0
 
     def as_dict(self):
         return {
@@ -28,4 +30,6 @@ class TrackingSnapshot:
             "pitch": self.pitch,
             "yaw": self.yaw,
             "status": self.status,
+            "healthy": self.healthy,
+            "imu_samples": self.imu_samples,
         }

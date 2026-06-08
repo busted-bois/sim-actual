@@ -24,18 +24,23 @@ def yaw_from_state(odometry, attitude=None):
     return math.atan2(siny_cosp, cosy_cosp)
 
 
-def bearing_error_ned(odometry, gate, attitude=None):
-    ox = float(odometry["x"])
-    oy = float(odometry["y"])
-    gx, gy, _gz = gate["position_ned"]
-    target_bearing = math.atan2(gy - oy, gx - ox)
-    current_yaw = yaw_from_state(odometry, attitude)
-    error = target_bearing - current_yaw
+def _normalize_angle(error):
     while error > math.pi:
         error -= 2.0 * math.pi
     while error < -math.pi:
         error += 2.0 * math.pi
     return error
+
+
+def bearing_error_from_pose(x, y, yaw, gate):
+    gx, gy, _gz = gate["position_ned"]
+    target_bearing = math.atan2(gy - float(y), gx - float(x))
+    return _normalize_angle(target_bearing - float(yaw))
+
+
+def bearing_error_ned(odometry, gate, attitude=None):
+    current_yaw = yaw_from_state(odometry, attitude)
+    return bearing_error_from_pose(odometry["x"], odometry["y"], current_yaw, gate)
 
 
 def distance_to_gate(odometry, gate):

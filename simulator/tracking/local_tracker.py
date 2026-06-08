@@ -2,12 +2,22 @@ import csv
 import os
 import time
 
-from simulator.tracking.imu_propagator import propagate_position_velocity
+from simulator.flight_config import (
+    LOCAL_NED_BLEND,
+    MIN_IMU_SAMPLES_FOR_HEALTHY,
+    TRACKING_LOG_HZ,
+    TRACKING_MAX_IMU_GAP_S,
+)
+from simulator.gate_fusion import apply_pnp_to_state
+from simulator.navigation import active_gate
+from simulator.tracking.imu_propagator import (
+    blend_attitude,
+    propagate_position_velocity,
+)
 from simulator.tracking.snapshot import TrackingSnapshot
 from simulator.tracking.vision_correction import apply_gate_yaw_correction
 from simulator.tracking.vision_sync import StateRingBuffer, _StateSample
 
-LOCAL_NED_BLEND = 0.2
 LOG_DIR = "logs"
 
 
@@ -23,6 +33,9 @@ class LocalTracker:
         self._ring = StateRingBuffer()
         self._log_rows: list[dict] = []
         self._status = "idle"
+        self._imu_samples = 0
+        self._last_log_mono = 0.0
+        self._vision_corrected = False
 
     def _zero_state(self):
         return {
@@ -38,9 +51,22 @@ class LocalTracker:
             "sim_time_ns": 0,
         }
 
+    def reset(self):
+        self._origin_set = False
+        self._last_imu_us = None
+        self._last_camera_sim_time_ns = None
+        self._state = self._zero_state()
+        self._ring = StateRingBuffer()
+        self._status = "idle"
+        self._imu_samples = 0
+        self._last_log_mono = 0.0
+        self._vision_corrected = False
+
     def tick(self, data):
         armed = bool(data.get("armed"))
-        if armed and not self._armed_prev:
+        if not armed and self._armed_prev:
+            self.reset()
+        elif armed and (not self._armed_prev or not self._origin_set):
             self._set_origin()
         self._armed_prev = armed
 
@@ -48,6 +74,7 @@ class LocalTracker:
             self._publish_snapshot(data, "waiting_arm")
             return
 
+        self._vision_corrected = False
         self._integrate_highres_imu(data)
         self._blend_local_position_ned(data)
         self._apply_attitude(data)
@@ -59,6 +86,7 @@ class LocalTracker:
         self._state = self._zero_state()
         self._origin_set = True
         self._last_imu_us = None
+        self._imu_samples = 0
         self._status = "origin_set"
 
     def _integrate_highres_imu(self, data):
@@ -73,7 +101,7 @@ class LocalTracker:
 
         dt_s = max(0.0, (time_us - self._last_imu_us) * 1e-6)
         self._last_imu_us = time_us
-        if dt_s <= 0.0 or dt_s > 0.1:
+        if dt_s <= 0.0 or dt_s > TRACKING_MAX_IMU_GAP_S:
             return
 
         accel_body = (
@@ -90,6 +118,7 @@ class LocalTracker:
             propagate_position_velocity(self._state, accel_body, gyro, dt_s)
         )
         self._state["sim_time_ns"] = time_us * 1000
+        self._imu_samples += 1
 
     def _blend_local_position_ned(self, data):
         pos = data.get("local_position_ned")
@@ -107,9 +136,13 @@ class LocalTracker:
         attitude = data.get("attitude")
         if attitude is None:
             return
-        self._state["roll"] = float(attitude["roll"])
-        self._state["pitch"] = float(attitude["pitch"])
-        self._state["yaw"] = float(attitude["yaw"])
+        blended = blend_attitude(
+            self._state,
+            float(attitude["roll"]),
+            float(attitude["pitch"]),
+            float(attitude["yaw"]),
+        )
+        self._state.update(blended)
 
     def _apply_vision_correction(self, data):
         camera = data.get("camera")
@@ -135,9 +168,33 @@ class LocalTracker:
             self._state["yaw"] = aligned.yaw
 
         self._state["sim_time_ns"] = sim_time_ns
-        self._state = apply_gate_yaw_correction(
+        corrected = apply_gate_yaw_correction(
             self._state, gate_target, self.pitch_up_degrees
         )
+        if corrected["yaw"] != self._state["yaw"]:
+            self._vision_corrected = True
+        self._state = corrected
+
+        gate = active_gate(data)
+        pnp = gate_target.get("pnp") if gate_target else None
+        if gate is not None and pnp is not None:
+            fused = apply_pnp_to_state(self._state, gate, pnp)
+            if fused != self._state:
+                self._vision_corrected = True
+            self._state = fused
+
+    def _is_healthy(self, status):
+        return status == "tracking" and self._imu_samples >= MIN_IMU_SAMPLES_FOR_HEALTHY
+
+    def _should_log_row(self):
+        if self._vision_corrected:
+            return True
+        interval = 1.0 / TRACKING_LOG_HZ
+        now = time.monotonic()
+        if now - self._last_log_mono >= interval:
+            self._last_log_mono = now
+            return True
+        return False
 
     def _push_ring_sample(self):
         self._ring.push(
@@ -156,6 +213,7 @@ class LocalTracker:
         )
 
     def _publish_snapshot(self, data, status):
+        healthy = self._is_healthy(status)
         snapshot = TrackingSnapshot(
             sim_time_ns=int(self._state["sim_time_ns"]),
             x=self._state["x"],
@@ -168,9 +226,16 @@ class LocalTracker:
             pitch=self._state["pitch"],
             yaw=self._state["yaw"],
             status=status,
+            healthy=healthy,
+            imu_samples=self._imu_samples,
         )
         data["tracking_snapshot"] = snapshot
-        if self.log_csv and status == "tracking":
+        data["tracking_health"] = {
+            "healthy": healthy,
+            "imu_samples": self._imu_samples,
+            "status": status,
+        }
+        if self.log_csv and status == "tracking" and self._should_log_row():
             self._log_rows.append(snapshot.as_dict())
 
     def flush_log(self):
@@ -185,6 +250,7 @@ class LocalTracker:
             writer.writerows(self._log_rows)
 
     def get_snapshot(self):
+        healthy = self._is_healthy(self._status)
         return TrackingSnapshot(
             sim_time_ns=int(self._state["sim_time_ns"]),
             x=self._state["x"],
@@ -197,4 +263,6 @@ class LocalTracker:
             pitch=self._state["pitch"],
             yaw=self._state["yaw"],
             status=self._status,
+            healthy=healthy,
+            imu_samples=self._imu_samples,
         )

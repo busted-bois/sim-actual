@@ -1,30 +1,27 @@
 import math
 import time
 
-from simulator.navigation import active_gate, bearing_error_ned
+from simulator.flight_config import (
+    ALTITUDE_TRIM,
+    COLLISION_HOLD_S,
+    COLLISION_THRUST,
+    CONTROL_HZ,
+    CRUISE_PITCH_RATE,
+    CRUISE_THRUST,
+    HOVER_THRUST,
+    KD_Z,
+    KI_Z,
+    KP_Z,
+    VISION_MAX_AGE_S,
+    resolve_auto_reset_on_collision,
+)
+from simulator.flight_control import attitude_fallback_command, racing_command
+from simulator.navigation import active_gate, yaw_from_state
 from simulator.preflight import RaceGoLatch, poll_race_go, race_go_allowed
+from simulator.racing_planner import precompute_racing_path, pursuit_target_from_data
+from simulator.tracking.snapshot import TrackingSnapshot
 
-CONTROL_DT_S = 1.0 / 250.0
-
-HOVER_THRUST = 0.5
-CRUISE_THRUST = 0.55
-CRUISE_PITCH_RATE = -0.2
-COLLISION_THRUST = 0.4
-COLLISION_HOLD_S = 2.0
-
-VISION_YAW_GAIN_RAD_S = math.radians(40.0)
-VISION_CENTER_DEADBAND = 0.14
-VISION_PROXIMITY_R_FRAC = 0.10
-VISION_MAX_AGE_S = 0.5
-
-TELEMETRY_YAW_GAIN = 1.0
-ALTITUDE_TRIM = 0.55
-KP_Z = 0.25
-KI_Z = 0.035
-KD_Z = 0.12
-Z_TARGET_NED = -5.0
-
-# Sim reboot / session reset drops sim_boot_time_ms sharply.
+CONTROL_DT_S = 1.0 / CONTROL_HZ
 SIM_BOOT_RESET_DROP_MS = 500
 
 
@@ -33,9 +30,12 @@ def _clamp(value, low, high):
 
 
 class Pilot:
-    def __init__(self, controller, data):
+    def __init__(self, controller, data, auto_reset_on_collision=None):
         self.controller = controller
         self.data = data
+        self.auto_reset_on_collision = resolve_auto_reset_on_collision(
+            auto_reset_on_collision
+        )
         self._collision_hold_start = None
         self._z_integral = 0.0
         self._last_sim_boot_ms = None
@@ -45,7 +45,10 @@ class Pilot:
         self._race_go_latch = RaceGoLatch()
         self._awaiting_race_go = False
         self._protect_initial_go = False
+        self._pending_restart_arm = False
         self._passed_go = False
+        self._racing_path = None
+        self._pn_prev_nx = None
 
     def tick(self):
         self._consume_main_latch()
@@ -84,18 +87,21 @@ class Pilot:
             self._hover()
             return
 
-        gate_target = self._fresh_gate_target()
-        if gate_target is not None:
-            self._fly_toward_gate(gate_target)
-            return
-
+        self._ensure_racing_path()
         gate = active_gate(self.data)
-        odometry = self.data.get("odometry")
-        if gate is not None and odometry is not None:
-            self._fly_toward_gate_telemetry(gate, odometry)
+        if gate is None:
+            self._cruise_forward()
             return
 
-        self._cruise_forward()
+        self._fly_race(gate)
+
+    def _ensure_racing_path(self):
+        gates = self.data.get("track_gates")
+        if not gates or self._racing_path is not None:
+            return
+        valid = [g for g in gates if g.get("position_ned")]
+        if valid:
+            self._racing_path = precompute_racing_path(valid)
 
     def _consume_main_latch(self):
         latched = self.data.pop("_latched_go_boot_ms", None)
@@ -110,7 +116,11 @@ class Pilot:
             self._last_race_start_boot_ms = race.get("race_start_boot_time_ms", -1)
 
     def _race_go_allowed(self):
-        return race_go_allowed(self.data, go_boot_ms=self._go_boot_ms)
+        return race_go_allowed(
+            self.data,
+            go_boot_ms=self._go_boot_ms,
+            is_restart=self._race_go_latch.is_restart,
+        )
 
     def _update_race_session(self):
         race = self.data.get("race_status") or {}
@@ -127,17 +137,19 @@ class Pilot:
             self._begin_new_race_session()
 
         if self.data.get("track_gates") and not self._session_armed and race_start < 0:
-            self._arm_for_session(sim_boot)
+            self._arm_for_session(sim_boot, is_restart=self._pending_restart_arm)
+            self._pending_restart_arm = False
 
         self._last_sim_boot_ms = sim_boot
         self._last_race_start_boot_ms = race_start
 
-    def _arm_for_session(self, sim_boot):
-        self.controller.arm()
+    def _arm_for_session(self, sim_boot, is_restart=False):
+        if not self.data.get("armed"):
+            self.controller.arm()
         self._session_armed = True
         self._go_boot_ms = None
         self._awaiting_race_go = True
-        self._race_go_latch.reset_for_arm(sim_boot)
+        self._race_go_latch.reset_for_arm(sim_boot, is_restart=is_restart)
         print(f"Armed for session at sim_boot={sim_boot}ms", flush=True)
 
     def _is_new_race_session(self, sim_boot, race_start):
@@ -160,6 +172,7 @@ class Pilot:
         )
 
     def _begin_new_race_session(self):
+        self._pending_restart_arm = self._passed_go
         self._session_armed = False
         self._go_boot_ms = None
         self._awaiting_race_go = False
@@ -169,7 +182,17 @@ class Pilot:
         self._race_go_latch.reset_for_arm()
         self._z_integral = 0.0
         self._collision_hold_start = None
+        self._racing_path = None
+        self._pn_prev_nx = None
         self.data.pop("collision", None)
+        self._reset_local_tracker()
+
+    def _reset_local_tracker(self):
+        tracker = self.data.get("_local_tracker")
+        if tracker is not None:
+            tracker.reset()
+        self.data.pop("tracking_snapshot", None)
+        self.data.pop("tracking_health", None)
 
     def _in_collision_hold(self):
         collision = self.data.get("collision")
@@ -189,6 +212,12 @@ class Pilot:
                 thrust=COLLISION_THRUST,
             )
             return True
+
+        if self.auto_reset_on_collision and (
+            collision.get("threat_level", 0) >= 2 or collision.get("id") == 1002
+        ):
+            self.controller.reset_sim()
+            self._reset_local_tracker()
 
         del self.data["collision"]
         self._collision_hold_start = None
@@ -210,19 +239,76 @@ class Pilot:
             return gate_target
         return None
 
-    def _altitude_thrust(self, fallback):
+    def _healthy_tracking_snapshot(self):
+        snapshot = self.data.get("tracking_snapshot")
+        if not isinstance(snapshot, TrackingSnapshot):
+            return None
+        if snapshot.status != "tracking" or not snapshot.healthy:
+            return None
+        return snapshot
+
+    def _flight_pose(self):
+        snapshot = self._healthy_tracking_snapshot()
+        if snapshot is not None:
+            return {
+                "x": snapshot.x,
+                "y": snapshot.y,
+                "z": snapshot.z,
+                "vx": snapshot.vx,
+                "vy": snapshot.vy,
+                "vz": snapshot.vz,
+                "yaw": snapshot.yaw,
+                "roll": snapshot.roll,
+                "pitch": snapshot.pitch,
+            }
+
         odometry = self.data.get("odometry")
         if odometry is None:
+            return None
+
+        attitude = self.data.get("attitude") or {}
+        return {
+            "x": float(odometry["x"]),
+            "y": float(odometry["y"]),
+            "z": float(odometry["z"]),
+            "vx": float(odometry.get("vx", 0.0)),
+            "vy": float(odometry.get("vy", 0.0)),
+            "vz": float(odometry.get("vz", 0.0)),
+            "yaw": yaw_from_state(odometry, attitude or None),
+            "roll": float(attitude.get("roll", 0.0)),
+            "pitch": float(attitude.get("pitch", 0.0)),
+        }
+
+    def _altitude_source(self, target_z=None):
+        snapshot = self._healthy_tracking_snapshot()
+        if snapshot is not None:
+            return snapshot.z, snapshot.vz
+        odometry = self.data.get("odometry")
+        if odometry is None:
+            return None
+        return float(odometry["z"]), float(odometry.get("vz", 0.0))
+
+    def _altitude_thrust(self, fallback, target_z=None):
+        source = self._altitude_source(target_z)
+        if source is None:
             return fallback
-        z = float(odometry["z"])
-        vz = float(odometry.get("vz", 0.0))
-        ex_z = z - Z_TARGET_NED
+        z, vz = source
+        goal_z = target_z if target_z is not None else z
+        ex_z = z - goal_z
         self._z_integral = _clamp(self._z_integral + ex_z * CONTROL_DT_S, -6.0, 6.0)
         return _clamp(
             ALTITUDE_TRIM + KP_Z * ex_z + KI_Z * self._z_integral + KD_Z * vz,
             0.0,
             1.0,
         )
+
+    def _altitude_velocity_cmd(self, target_z):
+        source = self._altitude_source(target_z)
+        if source is None:
+            return 0.0
+        z, vz = source
+        ex_z = target_z - z
+        return _clamp(KP_Z * ex_z - KD_Z * vz, -1.5, 1.5)
 
     def _hover(self):
         thrust = self._altitude_thrust(HOVER_THRUST)
@@ -241,47 +327,55 @@ class Pilot:
             thrust=thrust,
         )
 
-    def _fly_toward_gate(self, gate_target):
-        nx = float(gate_target["nx"])
-        ny = float(gate_target["ny"])
-        r_frac = float(gate_target["r_frac"])
+    def _fly_race(self, gate):
+        pose = self._flight_pose()
+        gate_target = self._fresh_gate_target()
 
-        yaw_rate = _clamp(VISION_YAW_GAIN_RAD_S * nx, -2.0, 2.0)
-        near_target = r_frac >= VISION_PROXIMITY_R_FRAC
-        centered = (
-            near_target
-            and abs(nx) < VISION_CENTER_DEADBAND
-            and abs(ny) < VISION_CENTER_DEADBAND
+        if pose is None:
+            if gate_target is not None:
+                self._fly_vision_attitude(gate_target, gate)
+            else:
+                self._cruise_forward()
+            return
+
+        target = pursuit_target_from_data(pose, self.data, self._racing_path)
+        cmd = racing_command(
+            pose,
+            target,
+            gate,
+            gate_target,
+            self._pn_prev_nx,
+            CONTROL_DT_S,
         )
+        if gate_target is not None:
+            self._pn_prev_nx = float(gate_target.get("nx", 0.0))
 
-        if centered:
-            pitch_rate = 0.0
-            thrust = self._altitude_thrust(HOVER_THRUST)
-        else:
-            alignment = max(0.0, 1.0 - abs(nx))
-            pitch_rate = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-            thrust = self._altitude_thrust(CRUISE_THRUST)
+        if abs(cmd["bearing_err"]) > math.radians(55.0) and gate_target is not None:
+            self._fly_vision_attitude(
+                gate_target, gate, bearing_err=cmd["bearing_err"]
+            )
+            return
 
+        vz = self._altitude_velocity_cmd(target[2])
+        self.controller.set_control_mode("position")
+        self.controller.set_velocity_body_ned(cmd["vx"], cmd["vy"], vz)
+
+    def _fly_vision_attitude(self, gate_target, gate, bearing_err=0.0):
+        target_z = gate.get("position_ned", (0.0, 0.0, -5.0))[2]
+        thrust = self._altitude_thrust(CRUISE_THRUST, target_z=target_z)
+        cmd = attitude_fallback_command(
+            bearing_err,
+            gate_target,
+            self._pn_prev_nx,
+            CONTROL_DT_S,
+            thrust,
+        )
+        if gate_target is not None:
+            self._pn_prev_nx = float(gate_target.get("nx", 0.0))
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(
             roll_rate=0.0,
-            pitch_rate=pitch_rate,
-            yaw_rate=yaw_rate,
-            thrust=thrust,
-        )
-
-    def _fly_toward_gate_telemetry(self, gate, odometry):
-        attitude = self.data.get("attitude")
-        bearing_err = bearing_error_ned(odometry, gate, attitude)
-        yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_err, -2.0, 2.0)
-        alignment = max(0.0, 1.0 - abs(bearing_err) / math.pi)
-        pitch_rate = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-        thrust = self._altitude_thrust(CRUISE_THRUST)
-
-        self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(
-            roll_rate=0.0,
-            pitch_rate=pitch_rate,
-            yaw_rate=yaw_rate,
-            thrust=thrust,
+            pitch_rate=cmd["pitch_rate"],
+            yaw_rate=cmd["yaw_rate"],
+            thrust=cmd["thrust"],
         )

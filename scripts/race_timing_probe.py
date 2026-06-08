@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pymavlink import mavutil
 
-from simulator.preflight import latch_race_go_boot_ms
+from simulator.preflight import is_restart_arm_context, latch_race_go_boot_ms
 from simulator.setup import HEARTBEAT_TIMEOUT_S, _send_gcs_heartbeat
 
 LISTEN_IP = "127.0.0.1"
@@ -60,6 +60,7 @@ def main() -> int:
 
     last = None
     armed_at_mono = None
+    armed_sim_boot = None
     go_boot_ms = None
     latch_branch = None
     last_race_start = -1
@@ -75,15 +76,24 @@ def main() -> int:
 
             if shared_data.get("armed") and armed_at_mono is None:
                 armed_at_mono = time.monotonic()
+                armed_sim_boot = sim_boot
 
+            is_restart = (
+                armed_sim_boot is not None
+                and is_restart_arm_context(armed_sim_boot)
+                and last_race_start >= 0
+            )
             if (
                 go_boot_ms is None
                 and last_race_start < 0
                 and race_start is not None
                 and race_start >= 0
                 and sim_boot is not None
+                and (armed_sim_boot is None or sim_boot > armed_sim_boot)
             ):
-                go_boot_ms, latch_branch = latch_race_go_boot_ms(sim_boot, race_start)
+                go_boot_ms, latch_branch = latch_race_go_boot_ms(
+                    sim_boot, race_start, is_restart=is_restart
+                )
 
             if race_start is not None and race_start >= 0:
                 last_race_start = race_start

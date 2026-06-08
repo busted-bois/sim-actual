@@ -1,5 +1,6 @@
 from simulator.navigation import (
     active_gate,
+    bearing_error_from_pose,
     bearing_error_ned,
     distance_to_gate,
     yaw_from_state,
@@ -24,6 +25,12 @@ def test_active_gate_none_when_missing():
         active_gate({"track_gates": [{}], "race_status": {"active_gate_index": 5}})
         is None
     )
+
+
+def test_bearing_error_from_pose():
+    gate = {"position_ned": (10.0, 0.0, -5.0)}
+    err = bearing_error_from_pose(0.0, 0.0, 0.0, gate)
+    assert abs(err) < 0.01
 
 
 def test_bearing_error_ned():

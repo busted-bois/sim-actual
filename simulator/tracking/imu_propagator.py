@@ -1,5 +1,7 @@
 import math
 
+from simulator.flight_config import ATTITUDE_BLEND
+
 
 def rotate_body_to_ned(vec_body, roll, pitch, yaw):
     bx, by, bz = vec_body
@@ -17,9 +19,9 @@ def rotate_body_to_ned(vec_body, roll, pitch, yaw):
 
 
 def propagate_position_velocity(state, accel_body, gyro, dt_s):
-    roll, pitch, yaw = state["roll"], state["pitch"], state["yaw"]
-    yaw_rate = gyro[2]
-    yaw = yaw + yaw_rate * dt_s
+    roll = state["roll"] + float(gyro[0]) * dt_s
+    pitch = state["pitch"] + float(gyro[1]) * dt_s
+    yaw = state["yaw"] + float(gyro[2]) * dt_s
 
     accel_ned = rotate_body_to_ned(accel_body, roll, pitch, yaw)
     gravity_ned = (0.0, 0.0, 9.81)
@@ -43,4 +45,13 @@ def propagate_position_velocity(state, accel_body, gyro, dt_s):
         "roll": roll,
         "pitch": pitch,
         "yaw": yaw,
+    }
+
+
+def blend_attitude(state, measured_roll, measured_pitch, measured_yaw):
+    alpha = ATTITUDE_BLEND
+    return {
+        "roll": (1.0 - alpha) * state["roll"] + alpha * measured_roll,
+        "pitch": (1.0 - alpha) * state["pitch"] + alpha * measured_pitch,
+        "yaw": (1.0 - alpha) * state["yaw"] + alpha * measured_yaw,
     }

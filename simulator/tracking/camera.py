@@ -1,6 +1,6 @@
 import math
 
-DEFAULT_CAMERA_PITCH_UP_DEG = 20.0
+from simulator.flight_config import CAM_TILT_UP_DEG
 
 
 def _pitch_compensation_matrix(pitch_up_degrees):
@@ -18,7 +18,7 @@ def _mat_vec_mul(matrix, vec):
     return tuple(sum(row[i] * vec[i] for i in range(3)) for row in matrix)
 
 
-def pixel_ray_to_body_ned(nx, ny, pitch_up_degrees=DEFAULT_CAMERA_PITCH_UP_DEG):
+def pixel_ray_to_body_ned(nx, ny, pitch_up_degrees=CAM_TILT_UP_DEG):
     """Map normalized pixel offset to a unit ray in MAV_FRAME_BODY_NED."""
     fx = 1.0
     fy = 1.0
@@ -31,7 +31,7 @@ def pixel_ray_to_body_ned(nx, ny, pitch_up_degrees=DEFAULT_CAMERA_PITCH_UP_DEG):
     return _mat_vec_mul(rot, ray_cam)
 
 
-def bearing_local_yaw_rad(nx, ny, pitch_up_degrees=DEFAULT_CAMERA_PITCH_UP_DEG):
+def bearing_local_yaw_rad(nx, ny, pitch_up_degrees=CAM_TILT_UP_DEG):
     ray = pixel_ray_to_body_ned(nx, ny, pitch_up_degrees)
     return math.atan2(ray[1], ray[0])
 

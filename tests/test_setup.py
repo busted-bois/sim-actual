@@ -2,7 +2,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from simulator.setup import wait_for_sim_heartbeat
+from simulator.setup import setup_components, wait_for_sim_heartbeat
 
 
 def test_wait_for_sim_heartbeat_returns_first_heartbeat():
@@ -23,3 +23,18 @@ def test_wait_for_sim_heartbeat_times_out():
         hb = wait_for_sim_heartbeat(conn, timeout_s=0.05)
     assert hb is None
     assert time.monotonic() - start >= 0.05
+
+
+def test_setup_exits_when_vision_preflight_fails():
+    shared = {}
+    conn = MagicMock()
+    conn.target_system = 1
+    conn.recv_match.return_value = SimpleNamespace(get_type=lambda: "HEARTBEAT")
+
+    with patch("simulator.setup._udp_port_available", return_value=True):
+        with patch("simulator.setup.mavutil.mavlink_connection", return_value=conn):
+            with patch("simulator.setup.wait_for_sim_heartbeat", return_value=conn):
+                with patch("simulator.setup.run_preflight_checks", return_value=False):
+                    with patch("simulator.setup.sys.exit") as exit_mock:
+                        setup_components(shared, 1000, "127.0.0.1", 14550)
+                        exit_mock.assert_called_once_with(1)

@@ -14,12 +14,16 @@ from simulator.controller import Controller
 
 from simulator.mavlink_rx import MAVLinkRX
 
+from simulator.preflight import run_preflight_checks
+
 from simulator.timesync import TimeSync
 
 from simulator.tracking import LocalTracker
 
 from simulator.vision_rx import VisionRX
 
+
+from simulator.mavlink_tx import send_gcs_heartbeat
 
 HEARTBEAT_TIMEOUT_S = 60
 
@@ -78,14 +82,7 @@ def _pid_on_udp_port(port):
 
 
 def _send_gcs_heartbeat(sim_conn):
-
-    sim_conn.mav.heartbeat_send(
-        mavutil.mavlink.MAV_TYPE_GCS,
-        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-        0,
-        0,
-        mavutil.mavlink.MAV_STATE_ACTIVE,
-    )
+    send_gcs_heartbeat(sim_conn)
 
 
 def wait_for_sim_heartbeat(sim_conn, timeout_s=HEARTBEAT_TIMEOUT_S):
@@ -161,7 +158,13 @@ def _exit_no_heartbeat(host, port):
     sys.exit(1)
 
 
-def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
+def setup_components(
+    shared_data,
+    system_boot_ms,
+    server_ip,
+    server_udp_port,
+    auto_reset_on_collision=None,
+):
 
     if not _udp_port_available(server_ip, server_udp_port):
         _exit_port_in_use(server_ip, server_udp_port)
@@ -189,7 +192,12 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
 
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
 
-    controller = Controller(sim_conn, shared_data, system_boot_ms)
+    controller = Controller(
+        sim_conn,
+        shared_data,
+        system_boot_ms,
+        auto_reset_on_collision=auto_reset_on_collision,
+    )
     controller.request_highres_imu()
 
     print("Setting up MAVLink rx...", flush=True)
@@ -199,6 +207,13 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     print("Setting up Timesync loop...", flush=True)
 
     ts_loop = TimeSync.create_timesync(sim_conn, shared_data)
+
+    if not run_preflight_checks():
+        print(
+            "Vision preflight failed. Stop other pilots using UDP 5600, then retry.",
+            flush=True,
+        )
+        sys.exit(1)
 
     vision_rx = VisionRX(shared_data)
 

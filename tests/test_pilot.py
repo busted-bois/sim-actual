@@ -8,6 +8,7 @@ from simulator.pilot import (
     HOVER_THRUST,
     Pilot,
 )
+from simulator.tracking.snapshot import TrackingSnapshot
 
 
 _RACE_GO = {
@@ -22,9 +23,28 @@ def _pilot(data):
     return Pilot(controller, data), controller
 
 
+def _tracking_snapshot(**kwargs):
+    defaults = {
+        "sim_time_ns": 1_000_000,
+        "x": 0.0,
+        "y": 0.0,
+        "z": -5.0,
+        "vx": 0.0,
+        "vy": 0.0,
+        "vz": 0.0,
+        "roll": 0.0,
+        "pitch": 0.0,
+        "yaw": 0.0,
+        "status": "tracking",
+        "healthy": True,
+        "imu_samples": 3,
+    }
+    defaults.update(kwargs)
+    return TrackingSnapshot(**defaults)
+
+
 def _prime_countdown_go(pilot, go_boot_ms=7000):
     """Latch GO time as if countdown started at go_boot_ms - 3000."""
-    countdown_start = go_boot_ms - 3000
     pilot._session_armed = True
     pilot._last_race_start_boot_ms = -1
     pilot._go_boot_ms = go_boot_ms
@@ -59,6 +79,39 @@ def test_tick_clears_collision_after_hold():
     )
     pilot._collision_hold_start = time.monotonic() - 10.0
     pilot.tick()
+    assert "collision" not in pilot.data
+    controller.reset_sim.assert_not_called()
+
+
+def test_high_threat_collision_resets_when_enabled():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{}],
+            "collision": {"id": 1001, "threat_level": 2},
+            "_local_tracker": MagicMock(),
+        }
+    )
+    pilot.auto_reset_on_collision = True
+    pilot._collision_hold_start = time.monotonic() - 10.0
+    pilot.tick()
+    controller.reset_sim.assert_called_once()
+    pilot.data["_local_tracker"].reset.assert_called_once()
+    assert "collision" not in pilot.data
+
+
+def test_high_threat_collision_hovers_when_reset_disabled():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{}],
+            "collision": {"id": 1002, "threat_level": 2},
+        }
+    )
+    pilot.auto_reset_on_collision = False
+    pilot._collision_hold_start = time.monotonic() - 10.0
+    pilot.tick()
+    controller.reset_sim.assert_not_called()
     assert "collision" not in pilot.data
 
 
@@ -185,28 +238,32 @@ def test_tick_ignores_stale_vision():
             "race_status": _RACE_GO,
             "camera": {"received_at": time.time() - 5.0},
             "gate_target": {"detected": True, "nx": 0.5, "ny": 0.0, "r_frac": 0.05},
-            "odometry": {
-                "x": 0.0,
-                "y": 0.0,
-                "z": -5.0,
-                "vz": 0.0,
-                "qx": 0.0,
-                "qy": 0.0,
-                "qz": 0.0,
-                "qw": 1.0,
-            },
-            "attitude": {"yaw": 0.0},
+            "tracking_snapshot": _tracking_snapshot(),
         }
     )
     _prime_countdown_go(pilot)
     pilot.data["race_status"] = _RACE_GO
     pilot.tick()
-    kwargs = controller.set_attitude_rates.call_args.kwargs
-    assert kwargs["yaw_rate"] == 0.0
-    assert kwargs["pitch_rate"] < 0.0
+    controller.set_velocity_body_ned.assert_called_once()
 
 
-def test_tick_telemetry_yaw_toward_gate():
+def test_tick_tracking_yaw_toward_gate():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (0.0, 20.0, -5.0)}],
+            "race_status": _RACE_GO,
+            "tracking_snapshot": _tracking_snapshot(),
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.data["race_status"] = _RACE_GO
+    pilot.tick()
+    controller.set_velocity_body_ned.assert_called_once()
+    assert controller.set_velocity_body_ned.call_args[0][1] > 0.0
+
+
+def test_tick_telemetry_yaw_fallback_without_tracking():
     pilot, controller = _pilot(
         {
             "armed": True,
@@ -228,8 +285,8 @@ def test_tick_telemetry_yaw_toward_gate():
     _prime_countdown_go(pilot)
     pilot.data["race_status"] = _RACE_GO
     pilot.tick()
-    kwargs = controller.set_attitude_rates.call_args.kwargs
-    assert kwargs["yaw_rate"] > 0.0
+    controller.set_velocity_body_ned.assert_called_once()
+    assert controller.set_velocity_body_ned.call_args[0][1] > 0.0
 
 
 def test_arms_before_first_countdown():
@@ -332,12 +389,12 @@ def test_restart_waits_for_scheduled_go():
 
     pilot.data["race_status"] = {
         "active_gate_index": 0,
-        "sim_boot_time_ms": 3293,
+        "sim_boot_time_ms": 6293,
         "race_start_boot_time_ms": 3293,
     }
     pilot.tick()
     assert pilot._awaiting_race_go is False
-    assert pilot._go_boot_ms == 3293
+    assert pilot._go_boot_ms == 6293
     assert (
         controller.set_attitude_rates.call_args.kwargs["pitch_rate"]
         == CRUISE_PITCH_RATE
@@ -380,25 +437,52 @@ def test_flies_again_after_second_race_go():
 
     pilot.data["race_status"] = {
         "active_gate_index": 0,
-        "sim_boot_time_ms": 3293,
+        "sim_boot_time_ms": 6293,
         "race_start_boot_time_ms": 3293,
     }
     pilot.tick()
     kwargs = controller.set_attitude_rates.call_args.kwargs
     assert kwargs["pitch_rate"] == CRUISE_PITCH_RATE
-    assert pilot._go_boot_ms == 3293
+    assert pilot._go_boot_ms == 6293
 
 
-def test_altitude_pid_adjusts_thrust_with_odometry():
+def test_altitude_pid_prefers_tracking_snapshot():
     pilot, controller = _pilot(
         {
             "armed": True,
-            "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
+            "track_gates": [{"gate_id": 0, "position_ned": (0.0, 20.0, -5.0)}],
             "race_status": _RACE_GO,
+            "tracking_snapshot": _tracking_snapshot(z=-7.0),
             "odometry": {
                 "x": 0.0,
                 "y": 0.0,
-                "z": -7.0,
+                "z": -3.0,
+                "vz": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            },
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.data["race_status"] = _RACE_GO
+    pilot.tick()
+    vz = controller.set_velocity_body_ned.call_args[0][2]
+    assert vz > 0.0
+
+
+def test_unhealthy_tracking_falls_back_to_odometry():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (0.0, 20.0, -5.0)}],
+            "race_status": _RACE_GO,
+            "tracking_snapshot": _tracking_snapshot(healthy=False, imu_samples=0),
+            "odometry": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": -5.0,
                 "vz": 0.0,
                 "qx": 0.0,
                 "qy": 0.0,
@@ -411,5 +495,64 @@ def test_altitude_pid_adjusts_thrust_with_odometry():
     _prime_countdown_go(pilot)
     pilot.data["race_status"] = _RACE_GO
     pilot.tick()
-    thrust = controller.set_attitude_rates.call_args.kwargs["thrust"]
-    assert thrust < CRUISE_THRUST
+    controller.set_velocity_body_ned.assert_called_once()
+    assert controller.set_velocity_body_ned.call_args[0][1] > 0.0
+
+
+def test_velocity_mode_when_tracking_aligned():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
+            "race_status": _RACE_GO,
+            "tracking_snapshot": _tracking_snapshot(x=0.0, y=0.0, yaw=0.0),
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.data["race_status"] = _RACE_GO
+    pilot.tick()
+    controller.set_control_mode.assert_called_with("position")
+    controller.set_velocity_body_ned.assert_called_once()
+
+
+def test_blended_gate_steering():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (0.0, 20.0, -5.0)}],
+            "race_status": _RACE_GO,
+            "camera": {"received_at": time.time()},
+            "gate_target": {"detected": True, "nx": 0.3, "ny": 0.0, "r_frac": 0.05},
+            "tracking_snapshot": _tracking_snapshot(),
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.data["race_status"] = _RACE_GO
+    pilot.tick()
+    kwargs = controller.set_attitude_rates.call_args.kwargs
+    assert kwargs["yaw_rate"] > 0.0
+
+
+def test_pilot_resets_tracker_on_session_restart():
+    tracker = MagicMock()
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
+            "race_status": _RACE_GO,
+            "_local_tracker": tracker,
+            "tracking_snapshot": _tracking_snapshot(),
+        }
+    )
+    pilot.tick()
+    pilot._passed_go = True
+    pilot._last_sim_boot_ms = 8000
+
+    pilot.data["race_status"] = {
+        "active_gate_index": 0,
+        "sim_boot_time_ms": 200,
+        "race_start_boot_time_ms": -1,
+    }
+    pilot.tick()
+    tracker.reset.assert_called_once()
+    assert "tracking_snapshot" not in pilot.data

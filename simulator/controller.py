@@ -3,6 +3,7 @@ import time
 
 from pymavlink import mavutil
 
+from simulator.flight_config import CONTROL_HZ
 from simulator.mavlink_masks import (
     build_attitude_only_type_mask,
     build_body_rate_type_mask,
@@ -10,11 +11,11 @@ from simulator.mavlink_masks import (
     build_position_type_mask,
     build_velocity_type_mask,
 )
+from simulator.mavlink_tx import GCSHeartbeat
 from simulator.pilot import Pilot
 
 MAVLINK_CMD_SIM_RESET = 31000
 
-CONTROL_HZ = 250
 DEFAULT_HIGHRES_IMU_HZ = 120
 
 VALID_CONTROL_MODES = (
@@ -116,7 +117,7 @@ def _euler_to_quaternion(roll, pitch, yaw):
 
 
 class Controller:
-    def __init__(self, sim_conn, data, system_boot_ms):
+    def __init__(self, sim_conn, data, system_boot_ms, auto_reset_on_collision=None):
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
@@ -139,7 +140,8 @@ class Controller:
         self._position_frame = "local_ned"
         self._quaternion = [1.0, 0.0, 0.0, 0.0]
         self._use_explicit_quaternion = False
-        self.pilot = Pilot(self, data)
+        self._gcs_heartbeat = GCSHeartbeat(sim_conn)
+        self.pilot = Pilot(self, data, auto_reset_on_collision=auto_reset_on_collision)
 
     def set_control_mode(self, mode):
         if mode not in VALID_CONTROL_MODES:
@@ -232,6 +234,7 @@ class Controller:
         return self.data.get("tracking_snapshot")
 
     def update(self):
+        self._gcs_heartbeat.tick()
         self.pilot.tick()
         tracker = self.data.get("_local_tracker")
         if tracker is not None:
