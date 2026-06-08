@@ -5,6 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from simulator.flight_config import PNP_R_FRAC_CAP
 from simulator.gate_pnp import order_corners, solve_gate_pnp
 
 
@@ -93,7 +94,7 @@ def detect_gate_target(image_bgr: np.ndarray) -> dict:
         range_m = pnp["range_m"]
         nx = lateral / max(range_m, 0.5)
         ny = 0.0
-        r_frac = min(0.35, 0.5 / max(range_m, 0.5))
+        r_frac = min(PNP_R_FRAC_CAP, 0.5 / max(range_m, 0.5))
     else:
         nx, ny, r_frac = info
 

@@ -9,7 +9,7 @@ from simulator.flight_control import (
 from simulator.racing_planner import gate_crossing_point, precompute_racing_path
 
 
-def _gate(x, y, z= -5.0, yaw=0.0):
+def _gate(x, y, z=-5.0, yaw=0.0):
     half = math.sin(yaw / 2.0)
     return {
         "gate_id": 0,

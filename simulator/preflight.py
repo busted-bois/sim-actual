@@ -123,6 +123,15 @@ def poll_race_go(data, latch):
     ), latch.go_boot_ms
 
 
+def race_finished(data):
+    """True when sim reports race_finish_time_ns >= 0 (lap complete)."""
+    race = data.get("race_status")
+    if race is None:
+        return False
+    finish_ns = race.get("race_finish_time_ns", -1)
+    return finish_ns is not None and finish_ns >= 0
+
+
 def race_go_allowed(data, go_boot_ms=None, is_restart=False):
     """True when sim reports the race has started (on-screen GO! / timer at 0)."""
     race = data.get("race_status")

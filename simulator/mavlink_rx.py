@@ -107,7 +107,7 @@ class MAVLinkRX:
                 self.on_collision(msg)
 
             # --------------------------------------------------------------------------------------
-            # DATA_TRANSMISSION_HANDSHAKE - Repurposed and used for upcoming 'Track Data' packets
+            # DATA_TRANSMISSION_HANDSHAKE - repurposed for chunked track gate packets
             # --------------------------------------------------------------------------------------
             elif msg.get_type() == "DATA_TRANSMISSION_HANDSHAKE":
                 track_data_transfer_id = msg.width
@@ -115,8 +115,9 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
+        base_mode = getattr(msg, "base_mode", 0)
         self.data["armed"] = bool(
-            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
         )
 
     def on_timesync(self, msg):

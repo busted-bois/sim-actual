@@ -1,6 +1,4 @@
-#
-# Sample Python client for the AI GP controller
-#
+# AI Grand Prix autonomous drone pilot — connects to FlightSim.exe via MAVLink + FPV vision.
 
 import argparse
 import sys
@@ -9,8 +7,8 @@ import time
 from simulator.preflight import wait_for_race_go, wait_for_track
 from simulator.setup import setup_components
 
-SIM_SERVER_UDP_IP = "127.0.0.1"
-SIM_SERVER_UDP_PORT = 14550
+MAVLINK_UDP_IP = "127.0.0.1"
+MAVLINK_UDP_PORT = 14550
 
 
 def _parse_args():
@@ -35,8 +33,8 @@ def main():
     components = setup_components(
         shared_data,
         system_boot_ms,
-        SIM_SERVER_UDP_IP,
-        SIM_SERVER_UDP_PORT,
+        MAVLINK_UDP_IP,
+        MAVLINK_UDP_PORT,
         auto_reset_on_collision=args.collision_reset,
     )
     controller = components["controller"]

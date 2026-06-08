@@ -6,6 +6,7 @@ from simulator.preflight import (
     RaceGoLatch,
     latch_race_go_boot_ms,
     poll_race_go,
+    race_finished,
     race_go_allowed,
     wait_for_race_go,
     wait_for_ready,
@@ -209,3 +210,14 @@ def test_probe_udp_port_roundtrip():
     ok, err = probe_udp_port(port=0)
     assert ok is True
     assert err is None
+
+
+def test_race_finished_when_finish_ns_valid():
+    assert race_finished({"race_status": {"race_finish_time_ns": 0}}) is True
+    assert race_finished({"race_status": {"race_finish_time_ns": 9_000_000}}) is True
+
+
+def test_race_not_finished_when_ongoing():
+    assert race_finished({}) is False
+    assert race_finished({"race_status": {"race_finish_time_ns": -1}}) is False
+    assert race_finished({"race_status": {}}) is False

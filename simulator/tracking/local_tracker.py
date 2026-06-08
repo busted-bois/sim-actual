@@ -3,10 +3,12 @@ import os
 import time
 
 from simulator.flight_config import (
+    CAM_TILT_UP_DEG,
     LOCAL_NED_BLEND,
     MIN_IMU_SAMPLES_FOR_HEALTHY,
     TRACKING_LOG_HZ,
     TRACKING_MAX_IMU_GAP_S,
+    VISION_MAX_AGE_S,
 )
 from simulator.gate_fusion import apply_pnp_to_state
 from simulator.navigation import active_gate
@@ -15,14 +17,13 @@ from simulator.tracking.imu_propagator import (
     propagate_position_velocity,
 )
 from simulator.tracking.snapshot import TrackingSnapshot
-from simulator.tracking.vision_correction import apply_gate_yaw_correction
 from simulator.tracking.vision_sync import StateRingBuffer, _StateSample
 
 LOG_DIR = "logs"
 
 
 class LocalTracker:
-    def __init__(self, pitch_up_degrees=20.0, log_csv=True):
+    def __init__(self, pitch_up_degrees=CAM_TILT_UP_DEG, log_csv=True):
         self.pitch_up_degrees = pitch_up_degrees
         self.log_csv = log_csv
         self._armed_prev = False
@@ -144,10 +145,18 @@ class LocalTracker:
         )
         self._state.update(blended)
 
+    def _vision_fresh(self, camera):
+        if camera is None:
+            return False
+        age = time.time() - float(camera.get("received_at", 0.0))
+        return age <= VISION_MAX_AGE_S
+
     def _apply_vision_correction(self, data):
         camera = data.get("camera")
         gate_target = data.get("gate_target")
-        if camera is None or gate_target is None:
+        if camera is None or gate_target is None or not self._vision_fresh(camera):
+            return
+        if not gate_target.get("detected"):
             return
 
         sim_time_ns = int(camera.get("sim_time_ns", 0))
@@ -168,12 +177,6 @@ class LocalTracker:
             self._state["yaw"] = aligned.yaw
 
         self._state["sim_time_ns"] = sim_time_ns
-        corrected = apply_gate_yaw_correction(
-            self._state, gate_target, self.pitch_up_degrees
-        )
-        if corrected["yaw"] != self._state["yaw"]:
-            self._vision_corrected = True
-        self._state = corrected
 
         gate = active_gate(data)
         pnp = gate_target.get("pnp") if gate_target else None

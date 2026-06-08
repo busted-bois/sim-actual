@@ -1,35 +1,20 @@
 import socket
-
 import subprocess
-
 import sys
-
 import time
-
 
 from pymavlink import mavutil
 
-
 from simulator.controller import Controller
-
 from simulator.mavlink_rx import MAVLinkRX
-
+from simulator.mavlink_tx import GCS_HEARTBEAT_INTERVAL_S, send_gcs_heartbeat
 from simulator.preflight import run_preflight_checks
-
 from simulator.timesync import TimeSync
-
 from simulator.tracking import LocalTracker
-
 from simulator.vision_rx import VisionRX
 
-
-from simulator.mavlink_tx import send_gcs_heartbeat
-
 HEARTBEAT_TIMEOUT_S = 60
-
 HEARTBEAT_POLL_S = 0.02
-
-GCS_HEARTBEAT_INTERVAL_S = 1.0
 
 
 SIM_INSTALL_HINT = (
@@ -81,10 +66,6 @@ def _pid_on_udp_port(port):
     return None
 
 
-def _send_gcs_heartbeat(sim_conn):
-    send_gcs_heartbeat(sim_conn)
-
-
 def wait_for_sim_heartbeat(sim_conn, timeout_s=HEARTBEAT_TIMEOUT_S):
 
     deadline = time.monotonic() + timeout_s
@@ -95,8 +76,7 @@ def wait_for_sim_heartbeat(sim_conn, timeout_s=HEARTBEAT_TIMEOUT_S):
         now = time.monotonic()
 
         if now >= next_tx:
-            _send_gcs_heartbeat(sim_conn)
-
+            send_gcs_heartbeat(sim_conn)
             next_tx = now + GCS_HEARTBEAT_INTERVAL_S
 
         msg = sim_conn.recv_match(type="HEARTBEAT", blocking=False)

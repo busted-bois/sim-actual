@@ -89,17 +89,69 @@ def test_tracker_reset_clears_state():
     assert tracker._state["x"] == 0.0
 
 
-def test_tracker_applies_vision_yaw_correction():
+def test_tracker_applies_pnp_fusion():
+    import time
+
     tracker = LocalTracker(log_csv=False)
     data = _armed_data()
-    data["camera"] = {"sim_time_ns": 10_000_000}
-    data["gate_target"] = {"detected": True, "nx": 0.4, "ny": 0.0, "r_frac": 0.05}
-    tracker.tick(data)
-    tracker.tick(
+    data["track_gates"] = [
         {
-            **data,
-            "highres_imu": {**data["highres_imu"], "time_boot_us": 20_000},
-            "camera": {"sim_time_ns": 20_000_000},
+            "gate_id": 0,
+            "position_ned": (10.0, 0.0, -5.0),
+            "orientation_ned": (1.0, 0.0, 0.0, 0.0),
         }
-    )
-    assert data["tracking_snapshot"].yaw != 0.0
+    ]
+    data["race_status"] = {"active_gate_index": 0}
+    data["camera"] = {
+        "sim_time_ns": 10_000_000,
+        "received_at": time.time(),
+    }
+    data["gate_target"] = {
+        "detected": True,
+        "nx": 0.0,
+        "ny": 0.0,
+        "r_frac": 0.05,
+        "pnp": {"range_m": 8.0, "lateral_m": 0.5, "yaw_correction": 0.1},
+    }
+    tracker.tick(data)
+    data["highres_imu"]["time_boot_us"] = 20_000
+    data["camera"]["sim_time_ns"] = 20_000_000
+    tracker.tick(data)
+    assert data["tracking_snapshot"].x > 0.0
+
+
+def test_tracker_ignores_stale_vision():
+    import time
+
+    tracker = LocalTracker(log_csv=False)
+    data = _armed_data()
+    data["track_gates"] = [
+        {
+            "gate_id": 0,
+            "position_ned": (10.0, 0.0, -5.0),
+            "orientation_ned": (1.0, 0.0, 0.0, 0.0),
+        }
+    ]
+    data["race_status"] = {"active_gate_index": 0}
+    data["camera"] = {
+        "sim_time_ns": 10_000_000,
+        "received_at": time.time() - 5.0,
+    }
+    data["gate_target"] = {
+        "detected": True,
+        "nx": 0.0,
+        "ny": 0.0,
+        "r_frac": 0.05,
+        "pnp": {"range_m": 8.0, "lateral_m": 0.5, "yaw_correction": 0.1},
+    }
+    for us in (10_000, 20_000, 30_000):
+        data["highres_imu"]["time_boot_us"] = us
+        data["camera"]["sim_time_ns"] = us * 1000
+        tracker.tick(data)
+    stale_x = data["tracking_snapshot"].x
+
+    data["camera"]["received_at"] = time.time()
+    data["highres_imu"]["time_boot_us"] = 40_000
+    data["camera"]["sim_time_ns"] = 40_000_000
+    tracker.tick(data)
+    assert data["tracking_snapshot"].x > stale_x

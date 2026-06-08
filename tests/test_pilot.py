@@ -556,3 +556,49 @@ def test_pilot_resets_tracker_on_session_restart():
     pilot.tick()
     tracker.reset.assert_called_once()
     assert "tracking_snapshot" not in pilot.data
+
+
+def test_tick_hovers_when_race_finished():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
+            "race_status": {
+                **_RACE_GO,
+                "race_finish_time_ns": 9_500_000_000,
+                "last_gate_race_time": 42.5,
+            },
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.tick()
+    controller.set_attitude_rates.assert_called_once()
+    assert controller.set_attitude_rates.call_args.kwargs["thrust"] == HOVER_THRUST
+    controller.set_velocity_body_ned.assert_not_called()
+    assert pilot._race_finished_logged is True
+
+
+def test_race_finish_log_resets_on_new_session():
+    pilot, controller = _pilot(
+        {
+            "armed": True,
+            "track_gates": [{"gate_id": 0, "position_ned": (10.0, 0.0, -5.0)}],
+            "race_status": {
+                **_RACE_GO,
+                "race_finish_time_ns": 1,
+            },
+        }
+    )
+    _prime_countdown_go(pilot)
+    pilot.tick()
+    assert pilot._race_finished_logged is True
+
+    pilot._passed_go = True
+    pilot._last_sim_boot_ms = 8000
+    pilot.data["race_status"] = {
+        "active_gate_index": 0,
+        "sim_boot_time_ms": 200,
+        "race_start_boot_time_ms": -1,
+    }
+    pilot.tick()
+    assert pilot._race_finished_logged is False

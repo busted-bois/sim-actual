@@ -1,5 +1,7 @@
 import math
 
+from simulator.math_util import normalize_angle
+
 
 def active_gate(data):
     gates = data.get("track_gates")
@@ -24,18 +26,10 @@ def yaw_from_state(odometry, attitude=None):
     return math.atan2(siny_cosp, cosy_cosp)
 
 
-def _normalize_angle(error):
-    while error > math.pi:
-        error -= 2.0 * math.pi
-    while error < -math.pi:
-        error += 2.0 * math.pi
-    return error
-
-
 def bearing_error_from_pose(x, y, yaw, gate):
     gx, gy, _gz = gate["position_ned"]
     target_bearing = math.atan2(gy - float(y), gx - float(x))
-    return _normalize_angle(target_bearing - float(yaw))
+    return normalize_angle(target_bearing - float(yaw))
 
 
 def bearing_error_ned(odometry, gate, attitude=None):

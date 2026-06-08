@@ -5,15 +5,8 @@ from __future__ import annotations
 import math
 
 from simulator.flight_config import PNP_BLEND
+from simulator.math_util import normalize_angle
 from simulator.racing_planner import gate_yaw_from_orientation
-
-
-def _normalize_angle(error):
-    while error > math.pi:
-        error -= 2.0 * math.pi
-    while error < -math.pi:
-        error += 2.0 * math.pi
-    return error
 
 
 def implied_position_from_pnp(state, gate, pnp_result):
@@ -47,5 +40,5 @@ def apply_pnp_to_state(state, gate, pnp_result, blend=PNP_BLEND):
     updated["z"] = (1.0 - alpha) * updated["z"] + alpha * pz
 
     yaw_corr = float(pnp_result.get("yaw_correction", 0.0))
-    updated["yaw"] = _normalize_angle(updated["yaw"] + alpha * yaw_corr)
+    updated["yaw"] = normalize_angle(updated["yaw"] + alpha * yaw_corr)
     return updated

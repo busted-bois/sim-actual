@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pymavlink import mavutil
 
 from simulator.preflight import is_restart_arm_context, latch_race_go_boot_ms
-from simulator.setup import HEARTBEAT_TIMEOUT_S, _send_gcs_heartbeat
+from simulator.mavlink_tx import GCS_HEARTBEAT_INTERVAL_S, send_gcs_heartbeat
+from simulator.setup import HEARTBEAT_TIMEOUT_S
 
 LISTEN_IP = "127.0.0.1"
 LISTEN_PORT = 14550
@@ -47,8 +48,8 @@ def main() -> int:
     while time.monotonic() < deadline:
         now = time.monotonic()
         if now >= next_tx:
-            _send_gcs_heartbeat(conn)
-            next_tx = now + 1.0
+            send_gcs_heartbeat(conn)
+            next_tx = now + GCS_HEARTBEAT_INTERVAL_S
         if shared_data.get("race_status"):
             break
         time.sleep(0.02)

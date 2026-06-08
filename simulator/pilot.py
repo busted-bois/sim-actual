@@ -3,6 +3,7 @@ import time
 
 from simulator.flight_config import (
     ALTITUDE_TRIM,
+    BEARING_VELOCITY_FALLBACK_DEG,
     COLLISION_HOLD_S,
     COLLISION_THRUST,
     CONTROL_HZ,
@@ -13,20 +14,23 @@ from simulator.flight_config import (
     KI_Z,
     KP_Z,
     VISION_MAX_AGE_S,
+    Z_TARGET_NED,
     resolve_auto_reset_on_collision,
 )
+from simulator.math_util import clamp
 from simulator.flight_control import attitude_fallback_command, racing_command
 from simulator.navigation import active_gate, yaw_from_state
-from simulator.preflight import RaceGoLatch, poll_race_go, race_go_allowed
+from simulator.preflight import (
+    RaceGoLatch,
+    poll_race_go,
+    race_finished,
+    race_go_allowed,
+)
 from simulator.racing_planner import precompute_racing_path, pursuit_target_from_data
 from simulator.tracking.snapshot import TrackingSnapshot
 
 CONTROL_DT_S = 1.0 / CONTROL_HZ
 SIM_BOOT_RESET_DROP_MS = 500
-
-
-def _clamp(value, low, high):
-    return max(low, min(high, value))
 
 
 class Pilot:
@@ -49,6 +53,7 @@ class Pilot:
         self._passed_go = False
         self._racing_path = None
         self._pn_prev_nx = None
+        self._race_finished_logged = False
 
     def tick(self):
         self._consume_main_latch()
@@ -59,6 +64,10 @@ class Pilot:
             return
 
         if self._in_collision_hold():
+            return
+
+        if race_finished(self.data):
+            self._handle_race_finish()
             return
 
         if not self.data.get("track_gates"):
@@ -171,6 +180,18 @@ class Pilot:
             and race_start < 0
         )
 
+    def _handle_race_finish(self):
+        if not self._race_finished_logged:
+            race = self.data.get("race_status") or {}
+            print(
+                "Race finished! "
+                f"last_gate_race_time={race.get('last_gate_race_time')}s "
+                f"finish_ns={race.get('race_finish_time_ns')}",
+                flush=True,
+            )
+            self._race_finished_logged = True
+        self._hover()
+
     def _begin_new_race_session(self):
         self._pending_restart_arm = self._passed_go
         self._session_armed = False
@@ -184,6 +205,7 @@ class Pilot:
         self._collision_hold_start = None
         self._racing_path = None
         self._pn_prev_nx = None
+        self._race_finished_logged = False
         self.data.pop("collision", None)
         self._reset_local_tracker()
 
@@ -295,8 +317,8 @@ class Pilot:
         z, vz = source
         goal_z = target_z if target_z is not None else z
         ex_z = z - goal_z
-        self._z_integral = _clamp(self._z_integral + ex_z * CONTROL_DT_S, -6.0, 6.0)
-        return _clamp(
+        self._z_integral = clamp(self._z_integral + ex_z * CONTROL_DT_S, -6.0, 6.0)
+        return clamp(
             ALTITUDE_TRIM + KP_Z * ex_z + KI_Z * self._z_integral + KD_Z * vz,
             0.0,
             1.0,
@@ -308,7 +330,7 @@ class Pilot:
             return 0.0
         z, vz = source
         ex_z = target_z - z
-        return _clamp(KP_Z * ex_z - KD_Z * vz, -1.5, 1.5)
+        return clamp(KP_Z * ex_z - KD_Z * vz, -1.5, 1.5)
 
     def _hover(self):
         thrust = self._altitude_thrust(HOVER_THRUST)
@@ -350,10 +372,9 @@ class Pilot:
         if gate_target is not None:
             self._pn_prev_nx = float(gate_target.get("nx", 0.0))
 
-        if abs(cmd["bearing_err"]) > math.radians(55.0) and gate_target is not None:
-            self._fly_vision_attitude(
-                gate_target, gate, bearing_err=cmd["bearing_err"]
-            )
+        fallback_bearing = math.radians(BEARING_VELOCITY_FALLBACK_DEG)
+        if abs(cmd["bearing_err"]) > fallback_bearing and gate_target is not None:
+            self._fly_vision_attitude(gate_target, gate, bearing_err=cmd["bearing_err"])
             return
 
         vz = self._altitude_velocity_cmd(target[2])
@@ -361,7 +382,7 @@ class Pilot:
         self.controller.set_velocity_body_ned(cmd["vx"], cmd["vy"], vz)
 
     def _fly_vision_attitude(self, gate_target, gate, bearing_err=0.0):
-        target_z = gate.get("position_ned", (0.0, 0.0, -5.0))[2]
+        target_z = gate.get("position_ned", (0.0, 0.0, Z_TARGET_NED))[2]
         thrust = self._altitude_thrust(CRUISE_THRUST, target_z=target_z)
         cmd = attitude_fallback_command(
             bearing_err,

@@ -5,10 +5,8 @@ import time
 
 from pymavlink import mavutil
 
-from simulator.setup import (
-    HEARTBEAT_TIMEOUT_S,
-    _send_gcs_heartbeat,
-)
+from simulator.mavlink_tx import GCS_HEARTBEAT_INTERVAL_S, send_gcs_heartbeat
+from simulator.setup import HEARTBEAT_TIMEOUT_S
 
 LISTEN_IP = "0.0.0.0"
 LISTEN_PORT = 14550
@@ -27,8 +25,8 @@ def main() -> int:
     while time.monotonic() < deadline:
         now = time.monotonic()
         if now >= next_tx:
-            _send_gcs_heartbeat(conn)
-            next_tx = now + 1.0
+            send_gcs_heartbeat(conn)
+            next_tx = now + GCS_HEARTBEAT_INTERVAL_S
         msg = conn.recv_match(blocking=False)
         if msg is None:
             time.sleep(0.02)
