@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 GATE_HEX_COLOR = "#F3390F"
 
-HSV_TOLERANCE = 15  # wider to handle shadow/shading on gate
+HSV_TOLERANCE = 40  # wider to handle shadow/shading on gate
 
 # Compute HSV bounds from hex color at import time
 _hex_rgb = tuple(

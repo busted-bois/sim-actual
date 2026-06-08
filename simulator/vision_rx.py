@@ -110,7 +110,7 @@ class VisionRX:
                     "r_frac": r_frac,
                 }
                 print(
-                    f"[vision] detected=True cx={detection.centroid_x_px:.1f} cy={detection.centroid_y_px:.1f} "
+                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
                     f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
                     flush=True,
                 )
@@ -121,7 +121,6 @@ class VisionRX:
                     "ny": 0.0,
                     "r_frac": 0.0,
                 }
-                print("[vision] detected=False", flush=True)
 
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
@@ -151,7 +150,6 @@ class VisionRX:
                 orf = oa / (w * h)
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
             self.data["obstacles"] = obstacles
-            print(f"[vision] obstacles={len(obstacles)}", flush=True)
         except Exception as e:
             from simulator import config
 

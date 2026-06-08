@@ -59,10 +59,6 @@ def detect_gate(
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _KERNEL, iterations=MORPH_ITERS)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL, iterations=MORPH_ITERS)
 
-    mask_px = cv2.countNonZero(mask)
-    if frame_id % 10 == 0:
-        print(f"[detector] f={frame_id} mask_px={mask_px}", flush=True)
-
     # 4. Extract external contours.
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -93,21 +89,8 @@ def detect_gate(
             best_score = score
             best_contour = c
 
-    if frame_id % 10 == 0:
-        print(
-            f"[detector] f={frame_id} mask_px={mask_px} "
-            f"contours_area={contours_area_pass} contours_aspect={contours_aspect_pass}",
-            flush=True,
-        )
-
     # 6. Nothing passed the filters.
     if best_contour is None:
-        if frame_id % 10 == 0:
-            print(
-                f"[detector] f={frame_id} mask_px={mask_px} "
-                f"contours_area={contours_area_pass} contours_aspect={contours_aspect_pass} best_area=N/A",
-                flush=True,
-            )
         return None
 
     # 7. Centroid via image moments (guarded against m00 == 0).
@@ -117,14 +100,6 @@ def detect_gate(
     cy = moments["m01"] / m00
     _, _, w, h = cv2.boundingRect(best_contour)
     best_area = cv2.contourArea(best_contour)
-
-    if frame_id % 10 == 0:
-        print(
-            f"[detector] f={frame_id} mask_px={mask_px} "
-            f"contours_area={contours_area_pass} contours_aspect={contours_aspect_pass} "
-            f"best_area={best_area:.0f} cx={cx:.0f} cy={cy:.0f}",
-            flush=True,
-        )
 
     return GateDetection(
         frame_id=frame_id,

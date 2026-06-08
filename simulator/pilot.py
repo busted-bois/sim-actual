@@ -41,9 +41,6 @@ OBSTACLE_CLEAR_ZONE = 0.25
 
 CONTROL_DT_S = 1 / 250
 
-_LOG_INTERVAL = 2.0
-_DBG_INTERVAL = 0.5
-
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
@@ -61,43 +58,10 @@ class Pilot:
         self._stabilize_start: float | None = None
         self._advancing: bool = False
         self._last_gate_id: str | None = None
-        self._last_log = 0.0
-        self._dbg_timer = 0.0
         self._mode_str = "???"
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + track_gates", flush=True)
-
-    def _log_status(self, reason: str) -> None:
-        now = _time.monotonic()
-        if now - self._last_log < _LOG_INTERVAL:
-            return
-        self._last_log = now
-        armed = self.data.get("armed", False)
-        tg = self.data.get("track_gates")
-        odo = self.data.get("odometry")
-        gt = self.data.get("gate_target")
-        col = self.data.get("collision")
-        z = odo.get("z", "?") if odo else "?"
-        n_gates = len(tg) if tg else 0
-        gt_det = gt.get("detected") if gt else None
-        c = self.controller
-        print(
-            f"[pilot] {reason:25s} | mode={self._mode_str:8s} | "
-            f"armed={armed} gates={n_gates} z={z} "
-            f"pitch={c._pitch_rate:+.3f} yaw_r={c._yaw_rate:+.3f} "
-            f"thr={c._thrust:.3f} ctrl={c.control_mode} | "
-            f"gt_det={gt_det} collision={col is not None}",
-            flush=True,
-        )
-
-    def _dbg(self, msg: str) -> None:
-        """Print debug message with 0.5s throttle."""
-        now = _time.monotonic()
-        if now - self._dbg_timer < _DBG_INTERVAL:
-            return
-        self._dbg_timer = now
-        print(f"[pilot_dbg] {msg}", flush=True)
 
     # ------------------------------------------------------------------
     # Gate selection
@@ -122,13 +86,6 @@ class Pilot:
                 best_dist = dist
                 best_gate = gate
 
-        if best_gate:
-            pos = best_gate.get("position_ned", [0, 0, 0])
-            self._dbg(
-                f"find_nearest gates_checked={gates_checked} best_dist={best_dist:.2f} "
-                f"selected_pos=[{pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}]"
-            )
-
         return best_gate
 
     def _reset_approach_state(self) -> None:
@@ -150,22 +107,7 @@ class Pilot:
         if not armed:
             self._mode_str = "disarmed"
             self._hover()
-            self._log_status("not armed")
             return
-
-        odo = self.data.get("odometry")
-        z = odo.get("z", "?") if odo else "?"
-        tg = self.data.get("track_gates")
-        gt = self.data.get("gate_target")
-        gt_det = gt.get("detected") if gt else None
-        c = self.controller
-        col = self.data.get("collision")
-        self._dbg(
-            f"tick state={self._mode_str} armed={armed} gates={len(tg) if tg else 0} "
-            f"z={z} pitch={c._pitch_rate:+.3f} thrust={c._thrust:.3f} "
-            f"gt_det={gt_det} advancing={self._advancing} "
-            f"stabilize_start={self._stabilize_start} collision={col is not None}"
-        )
 
         # Collision hold
         if self._collision_time is not None:
@@ -174,7 +116,6 @@ class Pilot:
                 self.controller.set_control_mode("attitude")
                 self.controller.set_attitude_rates(0, 0, 0, COLLISION_THRUST)
                 self._mode_str = "collision_hold"
-                self._log_status("collision hold")
                 return
             self._collision_time = None
             self.data.pop("collision", None)
@@ -189,7 +130,6 @@ class Pilot:
             self._mode_str = "no_gates"
             self._reset_approach_state()
             self._hover()
-            self._log_status("no track_gates")
             return
 
         # Gate from vision
@@ -201,7 +141,6 @@ class Pilot:
                 if age < VISION_MAX_AGE_S:
                     self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
-                    self._log_status("vision gate")
                     return
 
         # Gate from telemetry — find nearest by 3D distance
@@ -212,21 +151,18 @@ class Pilot:
                 gid = self._gate_id(nearest)
                 if gid != self._last_gate_id:
                     self._reset_approach_state()
-                    old_gid = self._last_gate_id
                     self._last_gate_id = gid
                     print(
-                        f"[pilot_dbg] state_transition: gate_id changed {old_gid} -> {gid}",
+                        f"[pilot] NEW TARGET gate {gid}",
                         flush=True,
                     )
                 self._mode_str = "telemetry"
                 self._fly_toward_gate_telemetry(nearest, odometry)
-                self._log_status("telemetry gate")
                 return
 
         self._mode_str = "no_target"
         self._reset_approach_state()
         self._hover()
-        self._log_status("no target")
 
     # ------------------------------------------------------------------
     # Flight primitives
@@ -264,7 +200,7 @@ class Pilot:
                 self._advancing = False
                 self._stabilize_start = None
                 print(
-                    "[pilot_dbg] state_transition: advancing=False (lost centering)",
+                    "[pilot] STABILIZE → lost centering, re-aligning",
                     flush=True,
                 )
                 pitch = 0.0
@@ -284,6 +220,10 @@ class Pilot:
                     yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
                     pitch = 0.0
                     thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+                    print(
+                        "[pilot] OBSTACLE blocking, stopping",
+                        flush=True,
+                    )
                 else:
                     alignment = max(0.0, 1.0 - abs(nx))
                     pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
@@ -297,32 +237,21 @@ class Pilot:
                 if self._stabilize_start is None:
                     self._stabilize_start = _time.monotonic()
                     print(
-                        "[pilot_dbg] state_transition: stabilize_start set", flush=True
+                        f"[pilot] GATE CENTERED, holding {STABILIZE_HOLD_S}s...",
+                        flush=True,
                     )
                 elif _time.monotonic() - self._stabilize_start >= STABILIZE_HOLD_S:
                     # Held center long enough → advance
                     self._advancing = True
-                    old_stabilize_start = self._stabilize_start
                     self._stabilize_start = None
                     print(
-                        f"[pilot_dbg] state_transition: advancing=True (held center for {old_stabilize_start}s)",
+                        "[pilot] ADVANCE → gate centered, pitching forward",
                         flush=True,
                     )
             else:
                 # Not centered — reset hold timer
                 if self._stabilize_start is not None:
-                    print(
-                        "[pilot_dbg] state_transition: stabilize_start cleared (not centered)",
-                        flush=True,
-                    )
                     self._stabilize_start = None
-
-        phase = "ADVANCE" if self._advancing else "STABILIZE"
-        self._dbg(
-            f"vision ny={ny:+.3f} nx={nx:+.3f} r_frac={r_frac:.3f} ny_offset={ny_offset:+.3f} "
-            f"z_target={z_target:.2f} centered={centered} phase={phase} "
-            f"obstacle_blocking={obstacle_blocking if self._advancing else 'N/A'} pitch={pitch:+.3f}"
-        )
 
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
@@ -364,7 +293,7 @@ class Pilot:
                 self._advancing = False
                 self._stabilize_start = None
                 print(
-                    "[pilot_dbg] state_transition: advancing=False (lost heading)",
+                    "[pilot] STABILIZE → lost centering, re-aligning",
                     flush=True,
                 )
                 pitch = 0.0
@@ -384,6 +313,10 @@ class Pilot:
                     yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
                     pitch = 0.0
                     thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
+                    print(
+                        "[pilot] OBSTACLE blocking, stopping",
+                        flush=True,
+                    )
                 else:
                     alignment = max(0.0, 1.0 - abs(nx_telemetry))
                     pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
@@ -396,32 +329,18 @@ class Pilot:
             if centered:
                 if self._stabilize_start is None:
                     self._stabilize_start = _time.monotonic()
-                    print(
-                        "[pilot_dbg] state_transition: stabilize_start set", flush=True
-                    )
                 elif _time.monotonic() - self._stabilize_start >= STABILIZE_HOLD_S:
                     # Held heading long enough → advance
                     self._advancing = True
-                    old_stabilize_start = self._stabilize_start
                     self._stabilize_start = None
                     print(
-                        f"[pilot_dbg] state_transition: advancing=True (held heading for {old_stabilize_start}s)",
+                        "[pilot] ADVANCE → gate centered, pitching forward",
                         flush=True,
                     )
             else:
                 # Not centered — reset hold timer
                 if self._stabilize_start is not None:
-                    print(
-                        "[pilot_dbg] state_transition: stabilize_start cleared (not centered)",
-                        flush=True,
-                    )
                     self._stabilize_start = None
-
-        phase = "ADVANCE" if self._advancing else "STABILIZE"
-        self._dbg(
-            f"telemetry bearing_err={bearing_error:+.3f} dist={dist:.2f} centered={centered} "
-            f"phase={phase} obstacle_blocking={obstacle_blocking if self._advancing else 'N/A'} pitch={pitch:+.3f}"
-        )
 
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
@@ -450,10 +369,5 @@ class Pilot:
 
         raw_thrust = ALTITUDE_TRIM + KP_Z * error + KI_Z * self._z_integral + KD_Z * vz
         clamped_thrust = _clamp(raw_thrust, 0.0, 1.0)
-
-        self._dbg(
-            f"altitude z={z:.2f} z_target={target:.2f} error={error:+.3f} "
-            f"z_integral={self._z_integral:+.3f} raw_thrust={raw_thrust:.3f} clamped_thrust={clamped_thrust:.3f}"
-        )
 
         return clamped_thrust
