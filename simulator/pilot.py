@@ -68,8 +68,8 @@ class Pilot:
                 self.controller.set_attitude_rates(0, 0, 0, COLLISION_THRUST)
                 return
             self._collision_time = None
+            self.data.pop("collision", None)
 
-        # Check for new collision
         collision = self.data.get("collision")
         if collision is not None:
             self._collision_time = _time.monotonic()
