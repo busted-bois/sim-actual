@@ -53,16 +53,14 @@
 ## Phase 3 - Gate Lifecycle
 
 - [x] Detect pass by vision: gate grows/clips/disappears after near centered lock.
-- [x] On loss: short memory coast, then yaw scan.
+- [x] On loss/no detection: hold still; search scan disabled after sim showed unintended climb.
 - [x] Pass candidate: strong/centered lock and range `<0.8m` or outer bbox covers `>60%` frame width/height.
 - [x] Declare pass when candidate then gate disappears/clips for `5` frames.
 - [x] Lost after `6` consecutive no-detect frames (`0.2s` at 30Hz).
 - [x] Coast last command damped for `10` frames (`0.33s`).
-- [x] Scan after coast.
+- [x] Scan disabled until MAVLink frame behavior is verified.
 - [x] Reset lock history after `30` lost frames (`1s`).
-- [x] Scan: `vx=0.5 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.5 rad/s`.
-- [x] Scan toward last known horizontal error sign.
-- [x] If no history, alternate direction every `2s`.
+- [x] No-detection command: `vx=0`, `vy=0`, `vz=0`, `yaw_rate=0`.
 
 ## Phase 4 - Model Fallback
 
