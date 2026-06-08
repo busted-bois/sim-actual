@@ -124,15 +124,7 @@ class Pilot:
         if collision is not None:
             self._collision_time = _time.monotonic()
 
-        track_gates = self.data.get("track_gates")
-
-        if not track_gates:
-            self._mode_str = "no_gates"
-            self._reset_approach_state()
-            self._hover()
-            return
-
-        # Gate from vision
+        # Vision first (real-time camera — highest priority)
         gate_target = self.data.get("gate_target")
         cam = self.data.get("camera")
         if gate_target and gate_target.get("detected"):
@@ -143,19 +135,17 @@ class Pilot:
                     self._fly_toward_gate_vision(gate_target)
                     return
 
-        # Gate from telemetry — find nearest by 3D distance
+        # Telemetry fallback — find nearest gate by 3D distance
+        track_gates = self.data.get("track_gates")
         odometry = self.data.get("odometry")
-        if odometry is not None:
+        if track_gates and odometry is not None:
             nearest = self._find_nearest_gate(track_gates, odometry)
             if nearest is not None:
                 gid = self._gate_id(nearest)
                 if gid != self._last_gate_id:
                     self._reset_approach_state()
                     self._last_gate_id = gid
-                    print(
-                        f"[pilot] NEW TARGET gate {gid}",
-                        flush=True,
-                    )
+                    print(f"[pilot] NEW TARGET gate {gid}", flush=True)
                 self._mode_str = "telemetry"
                 self._fly_toward_gate_telemetry(nearest, odometry)
                 return
