@@ -215,7 +215,7 @@ class Pilot:
 
         self._peak_r_frac = max(self._peak_r_frac, r_frac)
 
-        if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.4:
+        if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.6:
             self._post_gate_time = _time.monotonic()
             self._peak_r_frac = 0.0
             if self._last_gate_id:
