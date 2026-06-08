@@ -219,7 +219,7 @@ class Pilot:
         vz = odometry.get("vz", 0.0)
         target = z_target if z_target is not None else Z_TARGET_NED
 
-        error = target - z
+        error = z - target
         self._z_integral += error * CONTROL_DT_S
         # Anti-windup
         self._z_integral = _clamp(self._z_integral, -2.0, 2.0)
