@@ -97,7 +97,17 @@ class VisionRX:
         if now_s - self.last_debug_log_s >= 0.2:
             self.last_debug_log_s = now_s
             if detection is None:
-                print(f"vision frame={frame_id} det=none", flush=True)
+                stats = self.detector.last_stats
+                print(
+                    "vision frame=%s det=none mask_px=%s contours=%s candidates=%s"
+                    % (
+                        frame_id,
+                        stats.get("mask_px", "n/a"),
+                        stats.get("contours", "n/a"),
+                        stats.get("candidates", "n/a"),
+                    ),
+                    flush=True,
+                )
             else:
                 print(
                     "vision frame=%s conf=%.2f range=%.2f target=(%.0f,%.0f) bbox=%s candidates=%s"

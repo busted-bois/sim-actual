@@ -11,11 +11,11 @@ FX = 320.0
 OUTER_GATE_WIDTH_M = 2.7
 INNER_GATE_WIDTH_M = 1.5
 
-MIN_AREA_RATIO = 0.005
-OUTER_ASPECT_MIN = 0.75
-OUTER_ASPECT_MAX = 1.33
-FILL_RATIO_MIN = 0.15
-FILL_RATIO_MAX = 0.75
+MIN_AREA_RATIO = 0.001
+OUTER_ASPECT_MIN = 0.45
+OUTER_ASPECT_MAX = 2.2
+FILL_RATIO_MIN = 0.04
+FILL_RATIO_MAX = 0.95
 INNER_ASPECT_MIN = 0.7
 INNER_ASPECT_MAX = 1.4
 RANGE_MISMATCH_MAX = 0.40
@@ -52,20 +52,20 @@ class GateDetection:
 class GateDetector:
     def __init__(self):
         self.previous_target = None
+        self.last_stats = {}
 
     def detect(self, frame_id, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower_red = cv2.inRange(hsv, np.array([0, 120, 80]), np.array([15, 255, 255]))
-        upper_red = cv2.inRange(hsv, np.array([170, 120, 80]), np.array([179, 255, 255]))
-        mask = cv2.bitwise_or(lower_red, upper_red)
+        mask = self._color_mask(frame)
 
         kernel = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask_pixels = cv2.countNonZero(mask)
 
         contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         if hierarchy is None:
             self.previous_target = None
+            self.last_stats = {"mask_px": mask_pixels, "contours": 0, "candidates": 0}
             return None
 
         candidates = []
@@ -76,6 +76,7 @@ class GateDetector:
             candidate = self._candidate(frame_id, mask, contour, contours, hierarchy, index)
             if candidate is not None:
                 candidates.append(candidate)
+        self.last_stats = {"mask_px": mask_pixels, "contours": len(contours), "candidates": len(candidates)}
 
         if not candidates:
             self.previous_target = None
@@ -97,6 +98,24 @@ class GateDetector:
         )
         self.previous_target = (detection.target_x, detection.target_y)
         return detection
+
+    def _color_mask(self, frame):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower_red = cv2.inRange(hsv, np.array([0, 60, 40]), np.array([25, 255, 255]))
+        upper_red = cv2.inRange(hsv, np.array([160, 60, 40]), np.array([179, 255, 255]))
+        hsv_mask = cv2.bitwise_or(lower_red, upper_red)
+
+        bgr_mask = cv2.inRange(frame, np.array([0, 20, 100]), np.array([120, 180, 255]))
+
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        target = np.uint8([[[15, 57, 243]]])
+        target_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB)[0, 0].astype(np.int16)
+        diff = lab.astype(np.int16) - target_lab
+        dist = np.sqrt(np.sum(diff * diff, axis=2))
+        lab_mask = (dist < 95).astype(np.uint8) * 255
+
+        mask = cv2.bitwise_or(hsv_mask, bgr_mask)
+        return cv2.bitwise_or(mask, lab_mask)
 
     def _candidate(self, frame_id, mask, contour, contours, hierarchy, index):
         frame_area = FRAME_WIDTH * FRAME_HEIGHT
