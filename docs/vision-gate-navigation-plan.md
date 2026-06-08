@@ -42,12 +42,12 @@
 - [x] Horizontal control: yaw-rate primary, small `vy` assist.
 - [x] Errors: `ex=(target_x-cx)/cx`, `ey=(target_y-cy)/cy`.
 - [x] `yaw_rate=0.7*ex`, clamp `+-0.6 rad/s`.
-- [x] `vy=0.2*ex`, clamp `+-0.25 m/s`.
+- [x] `vy=0.0`; lateral correction disabled until frame response is verified.
 - [x] `vz=0.0`; vertical image correction disabled until sign verified.
-- [x] Conservative `vx` range `0.3-1.5 m/s`.
-- [x] No/weak lock: `0.25-0.3 m/s`.
-- [x] Strong centered lock and range `>5m`: `1.5 m/s`.
-- [x] Near `<2m`: cap `0.7 m/s`; very near `<1m`: `0.4 m/s`.
+- [x] Crawl `vx` range `0.05-0.25 m/s`.
+- [x] No/weak lock: `0.05 m/s`.
+- [x] Strong centered lock and range `>5m`: `0.25 m/s`.
+- [x] Near `<2m`: cap `0.12 m/s`; very near `<1m`: `0.08 m/s`.
 
 ## Phase 3 - Gate Lifecycle
 
@@ -59,7 +59,7 @@
 - [x] Coast last command damped for `10` frames (`0.33s`).
 - [x] Scan after coast.
 - [x] Reset lock history after `30` lost frames (`1s`).
-- [x] Scan: `vx=0.25 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.3 rad/s`.
+- [x] Scan: `vx=0.05 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.2 rad/s`.
 - [x] Scan toward last known horizontal error sign.
 - [x] If no history, alternate direction every `2s`.
 

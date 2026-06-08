@@ -5,10 +5,10 @@ from simulator.gate_detector import FRAME_HEIGHT, FRAME_WIDTH, LOCK_CONFIDENCE
 DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
 YAW_GAIN = 0.7
-LATERAL_GAIN = 0.2
+LATERAL_GAIN = 0.0
 ENABLE_VERTICAL_CONTROL = False
-SCAN_FORWARD_SPEED = 0.25
-SCAN_YAW_RATE = 0.3
+SCAN_FORWARD_SPEED = 0.05
+SCAN_YAW_RATE = 0.2
 
 STALE_DETECTION_S = 0.15
 LOST_FRAMES = 6
@@ -39,7 +39,7 @@ class GateNavigator:
         self.coast_frames = 0
         self.pass_missing_frames = 0
         self.near_pass_candidate = False
-        self.last_command = VelocityCommand(0.5, 0.0, 0.0, 0.0)
+        self.last_command = VelocityCommand(SCAN_FORWARD_SPEED, 0.0, 0.0, 0.0)
         self.last_ex = 0.0
         self.scan_direction = 1.0
         self.last_scan_flip_s = 0.0
@@ -82,7 +82,7 @@ class GateNavigator:
             self.near_pass_candidate = True
 
         yaw_rate = clamp(YAW_GAIN * detection.ex, -0.6, 0.6)
-        vy = clamp(LATERAL_GAIN * detection.ex, -0.25, 0.25)
+        vy = clamp(LATERAL_GAIN * detection.ex, -0.05, 0.05)
         vz = clamp(0.8 * detection.ey, -0.8, 0.8) if ENABLE_VERTICAL_CONTROL else 0.0
         vx = self._forward_speed(detection, centered)
 
@@ -124,16 +124,16 @@ class GateNavigator:
 
     def _forward_speed(self, detection, centered):
         if detection.confidence < LOCK_CONFIDENCE:
-            return 0.3
+            return 0.05
         if detection.range_m < 1.0:
-            return 0.4
+            return 0.08
         if detection.range_m < 2.0:
-            return 0.7
+            return 0.12
         if detection.strong_lock and centered and detection.range_m > 5.0:
-            return 1.5
+            return 0.25
         if detection.confidence >= 0.75 and centered:
-            return 1.0
-        return 0.6
+            return 0.2
+        return 0.1
 
     def _near_pass(self, detection):
         _, _, w, h = detection.bbox
