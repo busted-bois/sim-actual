@@ -62,9 +62,11 @@ def detect_gate(
     # 4. Extract external contours.
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 5. Filter by area and aspect ratio; keep the largest survivor.
-    largest_contour = None
-    largest_area = -1.0
+    # 5. Filter by area and aspect ratio; score by area / distance-to-center.
+    best_contour = None
+    best_score = -1.0
+    img_h, img_w = mask.shape[:2]
+    half_w, half_h = img_w / 2.0, img_h / 2.0
     for c in contours:
         area = cv2.contourArea(c)
         if area < MIN_CONTOUR_AREA_PX:
@@ -73,27 +75,33 @@ def detect_gate(
         aspect = w / max(h, 1)
         if aspect > MAX_ASPECT_RATIO or aspect < MIN_ASPECT_RATIO:
             continue
-        if area > largest_area:
-            largest_area = area
-            largest_contour = c
+        moments = cv2.moments(c)
+        m00 = max(moments["m00"], 1e-6)
+        cx = moments["m10"] / m00
+        cy = moments["m01"] / m00
+        dist = abs(cx - half_w) + abs(cy - half_h)
+        score = area / (1.0 + dist)
+        if score > best_score:
+            best_score = score
+            best_contour = c
 
     # 6. Nothing passed the filters.
-    if largest_contour is None:
+    if best_contour is None:
         return None
 
     # 7. Centroid via image moments (guarded against m00 == 0).
-    moments = cv2.moments(largest_contour)
+    moments = cv2.moments(best_contour)
     m00 = max(moments["m00"], 1e-6)
     cx = moments["m10"] / m00
     cy = moments["m01"] / m00
-    _, _, w, h = cv2.boundingRect(largest_contour)
+    _, _, w, h = cv2.boundingRect(best_contour)
 
     return GateDetection(
         frame_id=frame_id,
         sim_time_ns=sim_time_ns,
         centroid_x_px=cx,
         centroid_y_px=cy,
-        area_px=largest_area,
+        area_px=cv2.contourArea(best_contour),
         width_px=float(w),
         height_px=float(h),
         contour_valid=True,

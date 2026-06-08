@@ -29,8 +29,10 @@ VISION_YAW_GAIN = math.radians(40)
 VISION_CENTER_DEADBAND = 0.14
 VISION_PROXIMITY_R_FRAC = 0.10
 VISION_MAX_AGE_S = 0.5
-VISION_VY_GAIN = 3.0
+VISION_VY_GAIN = 6.0
 VISION_MAX_ALT_ADJUST = 2.0
+STABILIZE_HOLD_S = 0.3
+VISION_ALIGN_PITCH_RATE = -0.15
 
 TELEMETRY_YAW_GAIN = 1.0
 
@@ -52,6 +54,8 @@ class Pilot:
         self.data = data
         self._z_integral = 0.0
         self._collision_time: float | None = None
+        self._stabilize_start: float | None = None
+        self._advancing: bool = False
         self._last_log = 0.0
         self._mode_str = "???"
         self._no_gates_since = _time.monotonic()
@@ -172,27 +176,48 @@ class Pilot:
 
         yaw_rate = _clamp(VISION_YAW_GAIN * nx, -2.0, 2.0)
 
-        near = r_frac >= VISION_PROXIMITY_R_FRAC
-        centered = (
-            near
-            and abs(nx) < VISION_CENTER_DEADBAND
-            and abs(ny) < VISION_CENTER_DEADBAND
+        # ny-based altitude adjustment: ny > 0 means gate is below center
+        ny_offset = _clamp(
+            -ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
         )
+        odometry = self.data.get("odometry")
+        z_now = odometry.get("z", 0.0) if odometry else 0.0
 
-        if centered:
-            pitch = 0.0
-            thrust = self._altitude_thrust(HOVER_THRUST)
+        centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
+
+        if self._advancing:
+            # ADVANCE phase — flying forward through gate
+            if not centered:
+                # Lost centering → back to stabilize
+                self._advancing = False
+                self._stabilize_start = None
+                pitch = 0.0
+                thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_now + ny_offset)
+            elif r_frac >= VISION_PROXIMITY_R_FRAC:
+                # Very close — stop pitching, fine-tune altitude+yaw only
+                pitch = 0.0
+                thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_now + ny_offset)
+            else:
+                alignment = max(0.0, 1.0 - abs(nx))
+                pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+                thrust = self._altitude_thrust(
+                    CRUISE_THRUST, z_target=z_now + ny_offset
+                )
         else:
-            alignment = max(0.0, 1.0 - abs(nx))
-            pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+            # STABILIZE phase — hover, align yaw+altitude only
+            pitch = 0.0
+            thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_now + ny_offset)
 
-            # ny-based altitude adjustment: ny > 0 means gate is below center
-            ny_offset = _clamp(
-                -ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
-            )
-            odometry = self.data.get("odometry")
-            z_now = odometry.get("z", 0.0) if odometry else 0.0
-            thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_now + ny_offset)
+            if centered:
+                if self._stabilize_start is None:
+                    self._stabilize_start = _time.monotonic()
+                elif _time.monotonic() - self._stabilize_start >= STABILIZE_HOLD_S:
+                    # Held center long enough → advance
+                    self._advancing = True
+                    self._stabilize_start = None
+            else:
+                # Not centered — reset hold timer
+                self._stabilize_start = None
 
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
