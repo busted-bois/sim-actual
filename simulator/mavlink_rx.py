@@ -113,29 +113,34 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        self.data["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
 
     def on_timesync(self, msg):
         request_time = msg.ts1
         response_time = msg.tc1
 
     def on_attitude(self, msg):
-        roll = msg.roll
-        pitch = msg.pitch
-        yaw = msg.yaw
-        roll_speed = msg.rollspeed
-        pitch_speed = msg.pitchspeed
-        yaw_speed = msg.yawspeed
-        time_boot_ms = msg.time_boot_ms
+        self.data["yaw_rad"] = msg.yaw
+        self.data["attitude"] = {
+            "roll": msg.roll,
+            "pitch": msg.pitch,
+            "yaw": msg.yaw,
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
+            "time_boot_ms": msg.time_boot_ms,
+        }
 
     def on_local_position_ned(self, msg):
-        pos_x = msg.x
-        pos_y = msg.y
-        pos_z = msg.z
-        vel_x = msg.vx
-        vel_y = msg.vy
-        vel_z = msg.vz
-        time_boot_ms = msg.time_boot_ms
+        self.data["local_position_ned"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+            "time_boot_ms": msg.time_boot_ms,
+        }
 
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z

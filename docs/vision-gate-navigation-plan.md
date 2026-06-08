@@ -37,8 +37,8 @@
 - [x] Camera tilt compensation deferred until sign/behavior verified in sim.
 - [x] Adaptive speed: faster when centered/confident/far-mid range; slower when close/off-center/low confidence.
 - [x] Optimize reliability before lap time.
-- [x] MAVLink: use attitude-rate targets for flight, matching manual-control branch.
-- [x] Convert velocity intent to pitch/roll/thrust/yaw-rate; avoid `MAV_FRAME_BODY_NED` velocity climb.
+- [x] MAVLink: use `SET_POSITION_TARGET_LOCAL_NED` with `MAV_FRAME_LOCAL_NED`, matching `sk/hackathon`.
+- [x] Convert body forward/lateral intent to local NED with current yaw; command `vz=0` explicitly.
 - [x] Horizontal control: yaw-rate primary, small `vy` assist.
 - [x] Errors: `ex=(target_x-cx)/cx`, `ey=(target_y-cy)/cy`.
 - [x] `yaw_rate=0.7*ex`, clamp `+-0.6 rad/s`.
