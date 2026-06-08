@@ -97,6 +97,7 @@ def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ra
 CONTROL_HZ = 250
 STARTUP_HOLD_S = 1.0
 COMMAND_RAMP_S = 3.0
+DEBUG_LOG_HZ = 5.0
 
 
 class Controller:
@@ -107,12 +108,14 @@ class Controller:
         self.navigator = GateNavigator()
         self.started_at_s = time.monotonic()
         self.target_z = None
+        self.last_debug_log_s = 0.0
 
     def update(self):
         frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         thrust = self._altitude_thrust(pos_ned, vel_ned)
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
+            self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, thrust, pos_ned, vel_ned, yaw_ready)
             update_navigation_attitude_control(
                 self.sim_conn,
                 self.system_boot_ms,
@@ -125,6 +128,7 @@ class Controller:
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
+        self._log_debug(now_s, "nav", detection, command, ramp, thrust, pos_ned, vel_ned, yaw_ready)
         update_navigation_attitude_control(
             self.sim_conn,
             self.system_boot_ms,
@@ -144,6 +148,38 @@ class Controller:
             self.target_z = z
         thrust = NAV_THRUST + ALTITUDE_KP * (z - self.target_z) + ALTITUDE_KD * vz
         return max(MIN_NAV_THRUST, min(thrust, MAX_NAV_THRUST))
+
+    def _log_debug(self, now_s, mode, detection, command, ramp, thrust, pos_ned, vel_ned, yaw_ready):
+        if now_s - self.last_debug_log_s < 1.0 / DEBUG_LOG_HZ:
+            return
+        self.last_debug_log_s = now_s
+        z = None if pos_ned is None else float(pos_ned[2])
+        vz = None if vel_ned is None else float(vel_ned[2])
+        if detection is None:
+            det = "none"
+        else:
+            det = (
+                "conf=%.2f range=%.2f ex=%.2f ey=%.2f bbox=%s"
+                % (detection.confidence, detection.range_m, detection.ex, detection.ey, detection.bbox)
+            )
+        print(
+            "ctrl mode=%s yaw_ready=%s z=%s target_z=%s vz=%s thrust=%.2f ramp=%.2f cmd=(vx=%.2f vy=%.2f vz=%.2f yaw=%.2f) det=%s"
+            % (
+                mode,
+                yaw_ready,
+                "none" if z is None else "%.2f" % z,
+                "none" if self.target_z is None else "%.2f" % self.target_z,
+                "none" if vz is None else "%.2f" % vz,
+                thrust,
+                ramp,
+                command.vx,
+                command.vy,
+                command.vz,
+                command.yaw_rate,
+                det,
+            ),
+            flush=True,
+        )
 
     def _latest_detection(self):
         with self.data["lock"]:

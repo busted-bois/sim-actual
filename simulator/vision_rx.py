@@ -17,6 +17,7 @@ class VisionRX:
     def __init__(self, data):
         self.data = data
         self.detector = GateDetector()
+        self.last_debug_log_s = 0.0
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -88,7 +89,26 @@ class VisionRX:
 
     def process_frame(self, frame_id, img):
         detection = self.detector.detect(frame_id, img)
+        now_s = time.monotonic()
         with self.data["lock"]:
             self.data["latest_detection"] = detection
             self.data["latest_frame_id"] = frame_id
-            self.data["latest_vision_time"] = time.monotonic()
+            self.data["latest_vision_time"] = now_s
+        if now_s - self.last_debug_log_s >= 0.2:
+            self.last_debug_log_s = now_s
+            if detection is None:
+                print(f"vision frame={frame_id} det=none", flush=True)
+            else:
+                print(
+                    "vision frame=%s conf=%.2f range=%.2f target=(%.0f,%.0f) bbox=%s candidates=%s"
+                    % (
+                        frame_id,
+                        detection.confidence,
+                        detection.range_m,
+                        detection.target_x,
+                        detection.target_y,
+                        detection.bbox,
+                        detection.candidate_count,
+                    ),
+                    flush=True,
+                )
