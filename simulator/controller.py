@@ -169,7 +169,7 @@ class Controller:
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
         vn = ramp * (command.vx * math.cos(yaw_rad) - command.vy * math.sin(yaw_rad))
         ve = ramp * (command.vx * math.sin(yaw_rad) + command.vy * math.cos(yaw_rad))
-        sim_vz = self._altitude_velocity(pos_ned, vel_ned)
+        sim_vz = 0.0
         self._log_debug(now_s, "nav", detection, command, ramp, sim_vz, pos_ned, vel_ned, yaw_ready)
         update_navigation_velocity_control(
             self.sim_conn,

@@ -124,16 +124,16 @@ class GateNavigator:
 
     def _forward_speed(self, detection, centered):
         if detection.confidence < LOCK_CONFIDENCE:
-            return 0.05
+            return 0.0
         if detection.range_m < 1.0:
-            return 0.08
+            return 0.0
         if detection.range_m < 2.0:
-            return 0.12
+            return 0.0
         if detection.strong_lock and centered and detection.range_m > 5.0:
-            return 0.25
+            return 0.0
         if detection.confidence >= 0.75 and centered:
-            return 0.2
-        return 0.1
+            return 0.0
+        return 0.0
 
     def _near_pass(self, detection):
         _, _, w, h = detection.bbox
