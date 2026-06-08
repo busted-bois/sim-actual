@@ -59,7 +59,7 @@ class Pilot:
         self._collision_time: float | None = None
         self._stabilize_start: float | None = None
         self._advancing: bool = False
-        self._prev_r_frac: float = 0.0
+        self._peak_r_frac: float = 0.0
         self._post_gate_time: float | None = None
         self._last_gate_id: str | None = None
         self._mode_str = "???"
@@ -96,6 +96,7 @@ class Pilot:
         self._advancing = False
         self._stabilize_start = None
         self._post_gate_time = None
+        self._peak_r_frac = 0.0
 
     def _gate_id(self, gate: dict) -> str | None:  # type: ignore[type-arg]
         pos = gate.get("position_ned")
@@ -198,21 +199,22 @@ class Pilot:
         centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
         z_target = z_now + ny_offset
 
-        # Detect gate fly-through: area was large then suddenly small = passed it
-        if (
-            hasattr(self, "_prev_r_frac")
-            and self._prev_r_frac > 0.10
-            and r_frac < self._prev_r_frac * 0.4
-        ):
+        self._peak_r_frac = max(self._peak_r_frac, r_frac)
+
+        if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.4:
             self._post_gate_time = _time.monotonic()
-            print("[pilot] GATE PASSED, hovering to re-acquire", flush=True)
-            self._prev_r_frac = r_frac
-            pitch = 0.0
+            self._peak_r_frac = 0.0
+            print("[pilot] FLY-THROUGH detected, hovering to re-acquire", flush=True)
+            pitch = abs(CRUISE_PITCH_RATE) * 0.5
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             self.controller.set_control_mode("attitude")
             self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
             return
-        self._prev_r_frac = r_frac
+
+        if not self._advancing and r_frac > 0.15:
+            self._advancing = True
+            self._stabilize_start = None
+            print("[pilot] ADVANCE → gate area large, bypassing stabilize", flush=True)
 
         if self._advancing:
             # ADVANCE phase — flying forward through gate
@@ -226,8 +228,7 @@ class Pilot:
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             elif r_frac >= VISION_PROXIMITY_R_FRAC:
-                # Very close — stop pitching, fine-tune altitude+yaw only
-                pitch = 0.0
+                pitch = abs(CRUISE_PITCH_RATE) * 0.5
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             else:
                 obstacles = self.data.get("obstacles", [])
