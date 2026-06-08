@@ -1,3 +1,4 @@
+import math
 import time
 
 from pymavlink import mavutil
@@ -35,11 +36,14 @@ THRUST = 0.6  # 0.0 - 1.0
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 NAV_ATTITUDE_MASK = (
-    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
-    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+    mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
+    | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
     | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
 )
-NAV_PITCH_RATE_PER_M_S = 1.0
+NAV_PITCH_ANGLE_PER_M_S = 0.60
+MAX_NAV_PITCH_ANGLE = 0.26
+YAW_LOOKAHEAD_S = 0.35
 
 
 def update_attitude_flight_control(mavlink_conn, system_boot_ms):
@@ -72,25 +76,41 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     )
 
 
-def update_navigation_rate_control(mavlink_conn, system_boot_ms, command, ramp):
+def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp, yaw_rad):
     now_ms = int(time.time() * 1000)
-    pitch_rate = -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
-    yaw_rate = command.yaw_rate * ramp
+    pitch_angle = navigation_pitch_angle(command, ramp)
+    yaw_target = yaw_rad + command.yaw_rate * ramp * YAW_LOOKAHEAD_S
     mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         NAV_ATTITUDE_MASK,
-        [1, 0, 0, 0],
+        euler_to_quaternion(0.0, pitch_angle, yaw_target),
         0.0,
-        pitch_rate,
-        yaw_rate,
+        0.0,
+        0.0,
         0.0,
     )
 
 
-def navigation_pitch_rate(command, ramp):
-    return -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
+def navigation_pitch_angle(command, ramp):
+    pitch = -NAV_PITCH_ANGLE_PER_M_S * command.vx * ramp
+    return max(-MAX_NAV_PITCH_ANGLE, min(0.0, pitch))
+
+
+def euler_to_quaternion(roll, pitch, yaw):
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    return [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
 
 
 # --------------------------------------------------------------------------------------
@@ -99,7 +119,7 @@ def navigation_pitch_rate(command, ramp):
 
 CONTROL_HZ = 250
 STARTUP_HOLD_S = 1.0
-COMMAND_RAMP_S = 3.0
+COMMAND_RAMP_S = 1.0
 DEBUG_LOG_HZ = 5.0
 
 class Controller:
@@ -112,7 +132,7 @@ class Controller:
         self.last_debug_log_s = 0.0
 
     def update(self):
-        frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
+        frame_id, detection, vision_time, yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
         if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
             self._log_debug(now_s, "hold", None, self.navigator.last_command, 0.0, 0.0, 0.0, pos_ned, vel_ned, yaw_ready)
@@ -125,9 +145,9 @@ class Controller:
         ramp = min((now_s - self.started_at_s - STARTUP_HOLD_S) / COMMAND_RAMP_S, 1.0)
         sim_vz = 0.0
         mode = "nav" if detection is not None else "idle"
-        pitch_rate = navigation_pitch_rate(command, ramp)
-        self._log_debug(now_s, mode, detection, command, ramp, sim_vz, pitch_rate, pos_ned, vel_ned, yaw_ready)
-        update_navigation_rate_control(self.sim_conn, self.system_boot_ms, command, ramp)
+        pitch_angle = navigation_pitch_angle(command, ramp)
+        self._log_debug(now_s, mode, detection, command, ramp, sim_vz, pitch_angle, pos_ned, vel_ned, yaw_ready)
+        update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, command, ramp, yaw_rad)
 
         time.sleep(1.0 / CONTROL_HZ)
 
