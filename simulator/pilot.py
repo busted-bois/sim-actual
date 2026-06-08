@@ -216,14 +216,12 @@ class Pilot:
         if detection is None:
             self._search.on_gate_lost()
         cmd = self._search.next_command(drone_state, dt_s)
-        if cmd.phase == "SWEEP":
-            return ControlSetpoint(
-                mode="attitude", vel_ned=None, yaw_rate=cmd.yaw_rate_cmd, thrust=None
-            )
-        # EXPAND phase — velocity mode, no yaw
         vn, ve = body_to_ned_velocity(
             cmd.forward_vel_mps, cmd.lateral_vel_mps, drone_state.yaw_rad
         )
         return ControlSetpoint(
-            mode="velocity", vel_ned=(vn, ve, 0.0), yaw_rate=0.0, thrust=None
+            mode="velocity",
+            vel_ned=(vn, ve, 0.0),
+            yaw_rate=cmd.yaw_rate_cmd,
+            thrust=None,
         )

@@ -96,15 +96,13 @@ def update_position_flight_control(
     yaw_rate=0.0,
 ):
     now_ms = int(time.time() * 1000)
+    # Always unmask velocity + yaw_rate — pilot explicitly controls these.
+    # Zero velocity means "hold position on this axis", not "ignore".
     mask = VELOCITY_POSITION_MASK
-    if vx != 0.0:
-        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
-    if vy != 0.0:
-        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
-    if vz != 0.0:
-        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-    if yaw_rate != 0.0:
-        mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 
     mavlink_conn.mav.set_position_target_local_ned_send(
         now_ms - system_boot_ms,
