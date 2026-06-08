@@ -107,9 +107,18 @@ class Pilot:
         return (p[0], p[1], p[2])
 
     def _approach_dir(self, gates, idx, drone_pos):  # type: ignore[no-untyped-def]
+        """Down-track through-direction for gate `idx`.
+
+        Derived from gate-to-gate geometry (NOT gate-minus-drone), so it always points
+        forward toward the next gate and never flips backward when the drone overshoots —
+        that flip was what made the drone yaw ~180 deg ("scanning backward") after a gate.
+        """
         center = self._gate_center(gates[idx])
-        if idx > 0:
-            prev = self._gate_center(gates[idx - 1])
+        if idx + 1 < len(gates):
+            nxt = self._gate_center(gates[idx + 1])  # exit toward the next gate
+            d = (nxt[0] - center[0], nxt[1] - center[1], nxt[2] - center[2])
+        elif idx > 0:
+            prev = self._gate_center(gates[idx - 1])  # last gate: entry from previous
             d = (center[0] - prev[0], center[1] - prev[1], center[2] - prev[2])
         else:
             d = (center[0] - drone_pos[0], center[1] - drone_pos[1], center[2] - drone_pos[2])
@@ -193,14 +202,12 @@ class Pilot:
 
         ex, ey = carrot[0] - pos[0], carrot[1] - pos[1]
 
-        # Yaw: hold a FIXED down-track heading (the approach direction). This stops the
-        # drone slewing sideways into a gate edge while chasing the center up close.
-        desired_yaw = math.atan2(approach[1], approach[0])
-        yaw_err = _wrap_pi(desired_yaw - yaw)
-        if abs(yaw_err) < YAW_DEADBAND_RAD:
-            yaw_rate = 0.0
-        else:
-            yaw_rate = _clamp(KP_YAW * yaw_err, -MAX_YAW_RATE, MAX_YAW_RATE)
+        # Yaw: DON'T. The drone starts facing down-track (-X, toward every gate) and the
+        # body-frame velocity controller below translates in any direction via roll+pitch,
+        # so no rotation is needed. Commanding yaw actively spun the drone around — the
+        # sim's yaw-rate response is inverted/positive-feedback, so any heading error grew
+        # until it faced backwards. Holding heading keeps the camera forward and is stable.
+        yaw_rate = 0.0
 
         # Desired horizontal velocity: toward the carrot, at a speed that tapers down with
         # distance to the gate so we cross slowly and precisely.
