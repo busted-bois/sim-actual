@@ -116,7 +116,7 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        pass
+        self.data["armed"] = bool(msg.base_mode & 0b10000000)
 
     def on_timesync(self, msg):
         pass
@@ -125,6 +125,14 @@ class MAVLinkRX:
         self.data["yaw_rad"] = msg.yaw
         self.data["yaw_rate"] = msg.yawspeed
         self.data["att_time_ms"] = msg.time_boot_ms
+        self.data["attitude"] = {
+            "roll": msg.roll,
+            "pitch": msg.pitch,
+            "yaw": msg.yaw,
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
+        }
 
     def on_local_position_ned(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
@@ -140,6 +148,21 @@ class MAVLinkRX:
         self.data["yaw_rad"] = yaw
         self.data["yaw_rate"] = msg.yawspeed
         self.data["has_position"] = True
+        self.data["odometry"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+            "qx": qx,
+            "qy": qy,
+            "qz": qz,
+            "qw": qw,
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
+        }
 
     def on_highres_imu(self, msg):
         pass
@@ -167,6 +190,11 @@ class MAVLinkRX:
         self.data["active_gate_index"] = active_gate_index
         self.data["race_started"] = race_start_boot_time_ms >= 0
         self.data["race_finish_time_ns"] = race_finish_time_ns
+        self.data["race_status"] = {
+            "active_gate_index": active_gate_index,
+            "race_start_boot_time_ms": race_start_boot_time_ms,
+            "sim_boot_time_ms": sim_boot_time_ms,
+        }
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
@@ -222,6 +250,15 @@ class MAVLinkRX:
             )
             payload = payload[38:]
         self.data["gates"] = gates
+        self.data["track_gates"] = [
+            {
+                "position_ned": g.pos_ned,
+                "orientation_ned": g.orient_quat,
+                "width": g.width_m,
+                "height": g.height_m,
+            }
+            for g in gates
+        ]
 
     def on_actuator_output_status(self, msg):
         pass
@@ -233,3 +270,9 @@ class MAVLinkRX:
             msg.horizontal_minimum_delta,
             msg.time_usec,
         )
+        self.data["collision"] = {
+            "id": msg.id,
+            "threat_level": msg.threat_level,
+            "delta": msg.horizontal_minimum_delta,
+            "time_usec": msg.time_usec,
+        }

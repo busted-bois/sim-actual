@@ -1,227 +1,188 @@
-"""Pilot orchestrator — produces control setpoints per cycle.
+"""Pilot — attitude-mode gate racer with altitude PID.
 
-Integrates gate estimator, expanding search, and state machine to drive the
-drone through a sequence of gates. Called at ~250 Hz by the controller loop.
-Reads shared_data (populated by telemetry / vision) and outputs a single
-ControlSetpoint per cycle — either velocity or attitude, never both.
+Called at ~250 Hz by controller.update(). Uses ATTITUDE mode with pitch_rate
+for forward motion and an altitude PID for thrust control. Reads shared_data
+(written by mavlink_rx and vision_rx) and sets controller commands directly.
 """
 
 from __future__ import annotations
 
+import math
 import time as _time
-from dataclasses import dataclass
 
-from simulator.config import (
-    DEADBAND_PX,
-    DETECTION_AGE_OUT_MS,
-    FORWARD_BASE_SPEED_MPS,
-    FORWARD_GAIN_PER_AREA,
-    LATERAL_KP,
-    MAX_YAW_RATE,
-    TAKEOFF_THRUST,
-    YAW_KP,
-    DroneState,
-    GateDetection,
-)
-from simulator.gate_estimator import GateEstimator
-from simulator.search import ExpandingSearch
-from simulator.state_machine import PilotState, transition
-from simulator.transforms import body_to_ned_velocity
+# --------------------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------------------
+HOVER_THRUST = 0.5
+CRUISE_THRUST = 0.55
+CRUISE_PITCH_RATE = -0.2
+COLLISION_THRUST = 0.4
+COLLISION_HOLD_S = 2.0
 
-_IMG_W = 640.0
-_IMG_H = 480.0
+ALTITUDE_TRIM = 0.55
+KP_Z = 0.25
+KI_Z = 0.035
+KD_Z = 0.12
+Z_TARGET_NED = -5.0
+
+VISION_YAW_GAIN = math.radians(40)
+VISION_CENTER_DEADBAND = 0.14
+VISION_PROXIMITY_R_FRAC = 0.10
+VISION_MAX_AGE_S = 0.5
+
+TELEMETRY_YAW_GAIN = 1.0
+
+CONTROL_DT_S = 1 / 250
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-@dataclass
-class ControlSetpoint:
-    mode: str  # "velocity" | "attitude"
-    vel_ned: tuple[float, float, float] | None
-    yaw_rate: float | None
-    thrust: float | None
-
-
 class Pilot:
-    """Gate-traversal pilot. Read-only consumer of shared_data."""
+    """Gate-traversal pilot using ATTITUDE mode + altitude PID."""
 
-    def __init__(self, shared_data: dict):  # type: ignore[type-arg]
-        self._shared_data = shared_data
-        self._estimator = GateEstimator()
-        self._search = ExpandingSearch()
-        self._state = PilotState.TAKEOFF
-        self._last_detection: GateDetection | None = None
-        self._last_det_time_ns: int = 0
-        self._last_gate_idx: int = -1
-        self._elapsed: float = 0.0
-
-    def on_frame(self, detection: GateDetection | None) -> None:
-        self._last_detection = detection
-        self._last_det_time_ns = detection.sim_time_ns if detection else 0
-        if detection is not None:
-            self._search.reset()
-
-    def update(self, dt_s: float) -> ControlSetpoint:
-        # 1. Read drone state from shared_data
-        _d = self._shared_data
-        pos_ned = _d.get("pos_ned", (0, 0, 0))  # type: ignore[assignment]
-        vel_ned = _d.get("vel_ned", (0, 0, 0))  # type: ignore[assignment]
-        yaw_rad = _d.get("yaw_rad", 0.0)  # type: ignore[assignment]
-        yaw_rate = _d.get("yaw_rate", 0.0)  # type: ignore[assignment]
-        att_time_ms = _d.get("att_time_ms", 0)  # type: ignore[assignment]
-        has_position = _d.get("has_position", False)  # type: ignore[assignment]
-        active_gate_idx = _d.get("active_gate_index", 0)  # type: ignore[assignment]
-        gates = _d.get("gates", [])  # type: ignore[assignment]
-
-        # 2. Build DroneState
-        drone_state = DroneState(
-            pos_ned=pos_ned,
-            vel_ned=vel_ned,
-            yaw_rad=yaw_rad,
-            yaw_rate=yaw_rate,
-            time_boot_ms=att_time_ms,
-            has_position=has_position,
-        )
-
-        # 3. Frame-reuse check — age out stale detections
-        effective_det: GateDetection | None = None
-        if self._last_detection is not None:
-            now_ns = int(_time.time() * 1e9)
-            age_ms = (now_ns - self._last_det_time_ns) / 1e6
-            effective_det = (
-                self._last_detection if age_ms < DETECTION_AGE_OUT_MS else None
-            )
-
-        # 4. Gate estimate
-        estimate = self._estimator.update(
-            effective_det, drone_state, gates, active_gate_idx
-        )
-
-        # 5. Track active_gate_index changes
-        idx_changed = (
-            active_gate_idx != self._last_gate_idx and self._last_gate_idx >= 0
-        )
-        self._last_gate_idx = active_gate_idx
-
-        # 6. State transition
-        prev_state = self._state
-        self._elapsed += dt_s
-        new_state = transition(
-            self._state,
-            effective_det,
-            estimate,
-            drone_state,
-            idx_changed,
-            self._elapsed,
-        )
-        if new_state != prev_state:
-            self._state = new_state
-            self._elapsed = 0.0
-
-        # 7. Produce ControlSetpoint
-        return self._control_for_state(effective_det, estimate, drone_state, dt_s)
+    def __init__(self, controller, data):  # type: ignore[type-arg]
+        self.controller = controller
+        self.data = data
+        self._z_integral = 0.0
+        self._collision_time: float | None = None
+        controller.set_control_mode("attitude")
+        controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
 
     # ------------------------------------------------------------------
-    # Per-state control logic
+    # Main tick — called every cycle at 250 Hz
     # ------------------------------------------------------------------
+    def tick(self) -> None:
+        armed = self.data.get("armed", False)
 
-    def _control_for_state(
-        self,
-        detection: GateDetection | None,
-        estimate,
-        drone_state: DroneState,
-        dt_s: float,
-    ) -> ControlSetpoint:
-        if self._state == PilotState.TAKEOFF:
-            return ControlSetpoint(
-                mode="attitude", vel_ned=None, yaw_rate=0.0, thrust=TAKEOFF_THRUST
-            )
+        if not armed:
+            self._hover()
+            return
 
-        if self._state == PilotState.CHASE:
-            return self._chase_control(detection, estimate, drone_state)
+        # Collision hold
+        if self._collision_time is not None:
+            elapsed = _time.monotonic() - self._collision_time
+            if elapsed < COLLISION_HOLD_S:
+                self.controller.set_control_mode("attitude")
+                self.controller.set_attitude_rates(0, 0, 0, COLLISION_THRUST)
+                return
+            self._collision_time = None
 
-        if self._state == PilotState.ADVANCE:
-            return self._advance_control(detection, drone_state)
+        # Check for new collision
+        collision = self.data.get("collision")
+        if collision is not None:
+            self._collision_time = _time.monotonic()
 
-        if self._state == PilotState.SEARCH:
-            return self._search_control(detection, drone_state, dt_s)
+        # No gate data → hover
+        track_gates = self.data.get("track_gates")
+        if not track_gates:
+            self._hover()
+            return
 
-        # Fallback: hover
-        return ControlSetpoint(
-            mode="velocity", vel_ned=(0.0, 0.0, 0.0), yaw_rate=0.0, thrust=None
+        # Gate from vision
+        gate_target = self.data.get("gate_target")
+        cam = self.data.get("camera")
+        if gate_target and gate_target.get("detected"):
+            if cam is not None:
+                age = _time.monotonic() - cam.get("received_at", 0)
+                if age < VISION_MAX_AGE_S:
+                    self._fly_toward_gate_vision(gate_target)
+                    return
+
+        # Gate from telemetry
+        race_status = self.data.get("race_status", {})
+        active_idx = race_status.get("active_gate_index", 0)
+        odometry = self.data.get("odometry")
+        if odometry is not None and len(track_gates) > active_idx:
+            self._fly_toward_gate_telemetry(track_gates[active_idx], odometry)
+            return
+
+        # Nothing → cruise forward
+        self._cruise_forward()
+
+    # ------------------------------------------------------------------
+    # Flight primitives
+    # ------------------------------------------------------------------
+    def _hover(self, z_target: float | None = None) -> None:
+        thrust = self._altitude_thrust(HOVER_THRUST, z_target)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, 0, 0, thrust)
+
+    def _cruise_forward(self) -> None:
+        thrust = self._altitude_thrust(CRUISE_THRUST)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, CRUISE_PITCH_RATE, 0, thrust)
+
+    def _fly_toward_gate_vision(self, gate_target: dict) -> None:  # type: ignore[type-arg]
+        nx = gate_target.get("nx", 0.0)
+        ny = gate_target.get("ny", 0.0)
+        r_frac = gate_target.get("r_frac", 0.0)
+
+        yaw_rate = _clamp(VISION_YAW_GAIN * nx, -2.0, 2.0)
+
+        near = r_frac >= VISION_PROXIMITY_R_FRAC
+        centered = (
+            near
+            and abs(nx) < VISION_CENTER_DEADBAND
+            and abs(ny) < VISION_CENTER_DEADBAND
         )
 
-    def _chase_control(
-        self,
-        detection: GateDetection | None,
-        estimate,
-        drone_state: DroneState,
-    ) -> ControlSetpoint:
-        # Gate lost in chase — notify search module
-        if detection is None:
-            self._search.on_gate_lost()
-            return ControlSetpoint(
-                mode="velocity", vel_ned=(0.0, 0.0, 0.0), yaw_rate=0.0, thrust=None
-            )
-
-        # Yaw: center the gate in the image
-        offset = detection.centroid_x_px - _IMG_W / 2.0
-        if abs(offset) < DEADBAND_PX:
-            yaw_rate = 0.0
+        if centered:
+            pitch = 0.0
+            thrust = self._altitude_thrust(HOVER_THRUST)
         else:
-            yaw_rate = _clamp(YAW_KP * offset, -MAX_YAW_RATE, MAX_YAW_RATE)
+            alignment = max(0.0, 1.0 - abs(nx))
+            pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+            thrust = self._altitude_thrust(CRUISE_THRUST)
 
-        # Forward speed — ramp up as gate gets closer (area grows)
-        area_norm = detection.area_px / (_IMG_W * _IMG_H)
-        forward = FORWARD_BASE_SPEED_MPS * (
-            1.0 + FORWARD_GAIN_PER_AREA * min(area_norm, 1.0)
-        )
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
-        # Lateral correction
-        if estimate.lateral_offset_m is not None:
-            lateral = LATERAL_KP * estimate.lateral_offset_m
-        else:
-            # Pixel-ratio mode: bearing_rad is normalized offset, NOT radians
-            lateral = LATERAL_KP * estimate.bearing_rad * FORWARD_BASE_SPEED_MPS
+    def _fly_toward_gate_telemetry(self, gate: dict, odometry: dict) -> None:  # type: ignore[type-arg]
+        gx, gy, gz = gate["position_ned"]
+        ox, oy = odometry["x"], odometry["y"]
 
-        vn, ve = body_to_ned_velocity(forward, lateral, drone_state.yaw_rad)
-        return ControlSetpoint(
-            mode="velocity", vel_ned=(vn, ve, 0.0), yaw_rate=yaw_rate, thrust=None
-        )
+        dx = gx - ox
+        dy = gy - oy
 
-    def _advance_control(
-        self,
-        detection: GateDetection | None,
-        drone_state: DroneState,
-    ) -> ControlSetpoint:
-        forward = FORWARD_BASE_SPEED_MPS * 1.5
-        yaw_rate = 0.0
-        if detection is not None:
-            offset = detection.centroid_x_px - _IMG_W / 2.0
-            if abs(offset) > DEADBAND_PX:
-                yaw_rate = _clamp(YAW_KP * offset * 0.5, -MAX_YAW_RATE, MAX_YAW_RATE)
-        vn, ve = body_to_ned_velocity(forward, 0.0, drone_state.yaw_rad)
-        return ControlSetpoint(
-            mode="velocity", vel_ned=(vn, ve, 0.0), yaw_rate=yaw_rate, thrust=None
-        )
+        # Yaw from quaternion in odometry
+        qw = odometry.get("qw", 1.0)
+        qx = odometry.get("qx", 0.0)
+        qy = odometry.get("qy", 0.0)
+        qz = odometry.get("qz", 0.0)
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
-    def _search_control(
-        self,
-        detection: GateDetection | None,
-        drone_state: DroneState,
-        dt_s: float,
-    ) -> ControlSetpoint:
-        if detection is None:
-            self._search.on_gate_lost()
-        cmd = self._search.next_command(drone_state, dt_s)
-        vn, ve = body_to_ned_velocity(
-            cmd.forward_vel_mps, cmd.lateral_vel_mps, drone_state.yaw_rad
-        )
-        return ControlSetpoint(
-            mode="velocity",
-            vel_ned=(vn, ve, 0.0),
-            yaw_rate=cmd.yaw_rate_cmd,
-            thrust=None,
-        )
+        # Bearing error: angle from drone heading to gate direction
+        bearing_to_gate = math.atan2(dy, dx)
+        bearing_error = bearing_to_gate - yaw
+        # Normalize to [-pi, pi]
+        bearing_error = (bearing_error + math.pi) % (2 * math.pi) - math.pi
+
+        yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_error, -2.0, 2.0)
+        alignment = max(0.0, 1.0 - abs(bearing_error) / math.pi)
+        pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+        thrust = self._altitude_thrust(CRUISE_THRUST)
+
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
+
+    # ------------------------------------------------------------------
+    # Altitude PID
+    # ------------------------------------------------------------------
+    def _altitude_thrust(self, fallback: float, z_target: float | None = None) -> float:
+        odometry = self.data.get("odometry")
+        if odometry is None:
+            return fallback
+
+        z = odometry.get("z", 0.0)
+        vz = odometry.get("vz", 0.0)
+        target = z_target if z_target is not None else Z_TARGET_NED
+
+        error = target - z
+        self._z_integral += error * CONTROL_DT_S
+        # Anti-windup
+        self._z_integral = _clamp(self._z_integral, -2.0, 2.0)
+
+        thrust = ALTITUDE_TRIM + KP_Z * error + KI_Z * self._z_integral + KD_Z * vz
+        return _clamp(thrust, 0.0, 1.0)

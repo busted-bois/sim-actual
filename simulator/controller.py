@@ -2,17 +2,16 @@ import time
 
 from pymavlink import mavutil
 
-from simulator.config import TAKEOFF_THRUST
-from simulator.pilot import ControlSetpoint, Pilot
+from simulator.pilot import Pilot
 
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
+# --------------------------------------------------------------------------------------
 MAVLINK_CMD_SIM_RESET = 31000
 
 # --------------------------------------------------------------------------------------
 # MOTOR CONTROLS
 # --------------------------------------------------------------------------------------
-
 MOTOR_FRONT_LEFT = 0
 MOTOR_FRONT_RIGHT = 1
 MOTOR_BACK_LEFT = 0
@@ -42,21 +41,16 @@ def update_motor_control(mavlink_conn, system_boot_ms):
 # --------------------------------------------------------------------------------------
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
-PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
-ROLL_RATE = 0.0
-YAW_RATE = 0.0
-THRUST = 0.6  # 0.0 - 1.0
-
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
 
-def update_attitude_flight_control(
+def _send_attitude_rates(
     mavlink_conn,
     system_boot_ms,
-    roll_rate=ROLL_RATE,
-    pitch_rate=PITCH_RATE,
-    yaw_rate=YAW_RATE,
-    thrust=THRUST,
+    roll_rate=0.0,
+    pitch_rate=0.0,
+    yaw_rate=0.0,
+    thrust=0.6,
 ):
     now_ms = int(time.time() * 1000)
     mavlink_conn.mav.set_attitude_target_send(
@@ -73,7 +67,7 @@ def update_attitude_flight_control(
 
 
 # --------------------------------------------------------------------------------------
-# POSITION CONTROLS
+# POSITION / VELOCITY CONTROLS
 # --------------------------------------------------------------------------------------
 VELOCITY_POSITION_MASK = (
     mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
@@ -83,11 +77,10 @@ VELOCITY_POSITION_MASK = (
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
 
 
-def update_position_flight_control(
+def _send_velocity_ned(
     mavlink_conn,
     system_boot_ms,
     vx=0.0,
@@ -96,13 +89,10 @@ def update_position_flight_control(
     yaw_rate=0.0,
 ):
     now_ms = int(time.time() * 1000)
-    # Always unmask velocity + yaw_rate — pilot explicitly controls these.
-    # Zero velocity means "hold position on this axis", not "ignore".
     mask = VELOCITY_POSITION_MASK
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
     mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 
     mavlink_conn.mav.set_position_target_local_ned_send(
         now_ms - system_boot_ms,
@@ -127,7 +117,6 @@ def update_position_flight_control(
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
-
 CONTROL_HZ = 250
 
 
@@ -136,34 +125,59 @@ class Controller:
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
-        self.pilot = Pilot(data)
-        self.data["pilot"] = self.pilot
+        self.control_mode = "motor"
+        self._roll_rate = 0.0
+        self._pitch_rate = 0.0
+        self._yaw_rate = 0.0
+        self._thrust = 0.0
+        self._vx = 0.0
+        self._vy = 0.0
+        self._vz = 0.0
+        self.pilot = Pilot(self, data)
+
+    def set_control_mode(self, mode):
+        self.control_mode = mode
+
+    def set_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        self._roll_rate = roll_rate
+        self._pitch_rate = pitch_rate
+        self._yaw_rate = yaw_rate
+        self._thrust = thrust
+
+    def set_velocity_ned(self, vx, vy, vz, yaw_rate):
+        self._vx = vx
+        self._vy = vy
+        self._vz = vz
+        self._yaw_rate = yaw_rate
+
+    def disarm(self):
+        pass
 
     def update(self):
-        dt_s = 1.0 / CONTROL_HZ
-        cs: ControlSetpoint = self.pilot.update(dt_s)
+        self.pilot.tick()
 
-        if cs.mode == "attitude":
-            update_attitude_flight_control(
+        if self.control_mode == "motor":
+            update_motor_control(self.sim_conn, self.system_boot_ms)
+        elif self.control_mode == "attitude":
+            _send_attitude_rates(
                 self.sim_conn,
                 self.system_boot_ms,
-                roll_rate=0.0,
-                pitch_rate=0.0,
-                yaw_rate=cs.yaw_rate or 0.0,
-                thrust=cs.thrust or TAKEOFF_THRUST,
+                roll_rate=self._roll_rate,
+                pitch_rate=self._pitch_rate,
+                yaw_rate=self._yaw_rate,
+                thrust=self._thrust,
             )
-        elif cs.mode == "velocity":
-            vx, vy, vz = cs.vel_ned if cs.vel_ned else (0.0, 0.0, 0.0)
-            update_position_flight_control(
+        elif self.control_mode == "position":
+            _send_velocity_ned(
                 self.sim_conn,
                 self.system_boot_ms,
-                vx=vx,
-                vy=vy,
-                vz=vz,
-                yaw_rate=cs.yaw_rate or 0.0,
+                vx=self._vx,
+                vy=self._vy,
+                vz=self._vz,
+                yaw_rate=self._yaw_rate,
             )
 
-        time.sleep(dt_s)
+        time.sleep(1.0 / CONTROL_HZ)
 
     # -------------------------------
     # Arm the drone

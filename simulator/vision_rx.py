@@ -89,15 +89,33 @@ class VisionRX:
 
     def process_frame(self, frame_id, img, sim_time_ns=0):
         try:
+            import time as _time
+
             from simulator.gate_detector import detect_gate
 
+            h, w = img.shape[:2]
+
             detection = detect_gate(img, frame_id, sim_time_ns)
-            self.data["last_detection"] = detection
-            self.data["detection_time_ns"] = sim_time_ns
+
+            self.data["camera"] = {"received_at": _time.monotonic()}
+
             if detection is not None:
-                pilot = self.data.get("pilot")
-                if pilot is not None:
-                    pilot.on_frame(detection)
+                nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
+                ny = (detection.centroid_y_px - h / 2.0) / (h / 2.0)
+                r_frac = detection.area_px / (w * h)
+                self.data["gate_target"] = {
+                    "detected": True,
+                    "nx": nx,
+                    "ny": ny,
+                    "r_frac": r_frac,
+                }
+            else:
+                self.data["gate_target"] = {
+                    "detected": False,
+                    "nx": 0.0,
+                    "ny": 0.0,
+                    "r_frac": 0.0,
+                }
         except Exception as e:
             from simulator import config
 
