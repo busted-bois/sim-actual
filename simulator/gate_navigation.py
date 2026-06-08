@@ -6,6 +6,7 @@ DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
 ENABLE_LATERAL_CONTROL = False
 ENABLE_VERTICAL_CONTROL = False
+ENABLE_SEARCH_SCAN = False
 
 STALE_DETECTION_S = 0.15
 LOST_FRAMES = 6
@@ -36,7 +37,7 @@ class GateNavigator:
         self.coast_frames = 0
         self.pass_missing_frames = 0
         self.near_pass_candidate = False
-        self.last_command = VelocityCommand(0.5, 0.0, 0.0, 0.0)
+        self.last_command = VelocityCommand(0.0, 0.0, 0.0, 0.0)
         self.last_ex = 0.0
         self.scan_direction = 1.0
         self.last_scan_flip_s = 0.0
@@ -99,10 +100,10 @@ class GateNavigator:
             self.coast_frames += 1
             self._set_state("coast")
             return VelocityCommand(
-                max(self.last_command.vx * 0.8, 0.5),
                 0.0,
                 0.0,
-                self.last_command.yaw_rate * 0.5,
+                0.0,
+                0.0,
             )
 
         if self.lost_frames >= RESET_HISTORY_FRAMES:
@@ -112,6 +113,8 @@ class GateNavigator:
         return self._scan(now_s)
 
     def _scan(self, now_s):
+        if not ENABLE_SEARCH_SCAN:
+            return VelocityCommand(0.0, 0.0, 0.0, 0.0)
         if self.last_ex != 0.0:
             self.scan_direction = 1.0 if self.last_ex > 0.0 else -1.0
         elif now_s - self.last_scan_flip_s >= 2.0:
