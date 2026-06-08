@@ -146,6 +146,16 @@ class Pilot:
             else:
                 self._post_gate_time = None
 
+        track_gates = self.data.get("track_gates")
+        odometry = self.data.get("odometry")
+
+        if track_gates and odometry is not None:
+            nearest_id = self._find_nearest_gate(track_gates, odometry)
+            if nearest_id is not None:
+                gid = self._gate_id(nearest_id)
+                if gid and gid != self._last_gate_id:
+                    self._last_gate_id = gid
+
         # Vision first (real-time camera — highest priority)
         gate_target = self.data.get("gate_target")
         cam = self.data.get("camera")
@@ -158,8 +168,6 @@ class Pilot:
                     return
 
         # Telemetry fallback — find nearest gate by 3D distance
-        track_gates = self.data.get("track_gates")
-        odometry = self.data.get("odometry")
         if track_gates and odometry is not None:
             nearest = self._find_nearest_gate(track_gates, odometry)
             if nearest is not None:
