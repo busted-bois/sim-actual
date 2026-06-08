@@ -116,6 +116,35 @@ class VisionRX:
                     "ny": 0.0,
                     "r_frac": 0.0,
                 }
+
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+            obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
+            if detection is not None:
+                cv2.circle(
+                    obs_mask,
+                    (int(detection.centroid_x_px), int(detection.centroid_y_px)),
+                    int(max(detection.width_px, detection.height_px)),
+                    0,
+                    -1,
+                )
+            obs_contours, _ = cv2.findContours(
+                obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            obstacles = []
+            for oc in obs_contours:
+                oa = cv2.contourArea(oc)
+                if oa < 200:
+                    continue
+                om = cv2.moments(oc)
+                om00 = max(om["m00"], 1e-6)
+                ocx = om["m10"] / om00
+                ocy = om["m01"] / om00
+                onx = (ocx - w / 2.0) / (w / 2.0)
+                ony = (ocy - h / 2.0) / (h / 2.0)
+                orf = oa / (w * h)
+                obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
+            self.data["obstacles"] = obstacles
         except Exception as e:
             from simulator import config
 

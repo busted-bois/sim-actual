@@ -37,6 +37,8 @@ VISION_ALIGN_PITCH_RATE = -0.15
 TELEMETRY_YAW_GAIN = 1.0
 TELEMETRY_PROXIMITY_M = 3.0
 
+OBSTACLE_CLEAR_ZONE = 0.25
+
 CONTROL_DT_S = 1 / 250
 
 _LOG_INTERVAL = 2.0
@@ -230,11 +232,24 @@ class Pilot:
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_now + ny_offset)
             else:
-                alignment = max(0.0, 1.0 - abs(nx))
-                pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-                thrust = self._altitude_thrust(
-                    CRUISE_THRUST, z_target=z_now + ny_offset
+                obstacles = self.data.get("obstacles", [])
+                obstacle_blocking = any(
+                    abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.005
+                    for o in obstacles
                 )
+                if obstacle_blocking:
+                    nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
+                    yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
+                    pitch = 0.0
+                    thrust = self._altitude_thrust(
+                        HOVER_THRUST, z_target=z_now + ny_offset
+                    )
+                else:
+                    alignment = max(0.0, 1.0 - abs(nx))
+                    pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+                    thrust = self._altitude_thrust(
+                        CRUISE_THRUST, z_target=z_now + ny_offset
+                    )
         else:
             # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
@@ -297,9 +312,20 @@ class Pilot:
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
             else:
-                alignment = max(0.0, 1.0 - abs(nx_telemetry))
-                pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
-                thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gz)
+                obstacles = self.data.get("obstacles", [])
+                obstacle_blocking = any(
+                    abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.005
+                    for o in obstacles
+                )
+                if obstacle_blocking:
+                    nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
+                    yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
+                    pitch = 0.0
+                    thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
+                else:
+                    alignment = max(0.0, 1.0 - abs(nx_telemetry))
+                    pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+                    thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gz)
         else:
             # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
