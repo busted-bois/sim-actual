@@ -47,7 +47,7 @@ SEARCH_SWEEP_PERIOD_S = 2.0
 SEARCH_FORWARD_PITCH = -0.08
 
 # Passed-gate rejection — position-based internal map
-PASSED_GATE_NEAR_M = 3.0          # Within this dist of a passed gate, reject all
+PASSED_GATE_NEAR_M = 3.0  # Within this dist of a passed gate, reject all
 PASSED_GATE_ANGLE_RAD = math.radians(45)  # Angular match window
 
 CONTROL_DT_S = 1 / 250
@@ -220,7 +220,10 @@ class Pilot:
                 self._searching = True
                 self._search_start_time = _time.monotonic()
                 self._search_yaw_dir = 1.0
-                print("[pilot] POST-GATE hover done, entering SEARCH for next gate", flush=True)
+                print(
+                    "[pilot] POST-GATE hover done, entering SEARCH for next gate",
+                    flush=True,
+                )
 
         track_gates = self.data.get("track_gates")
         odometry = self.data.get("odometry")
@@ -244,7 +247,10 @@ class Pilot:
                     if self._searching:
                         self._searching = False
                         self._search_start_time = None
-                        print(f"[pilot] SEARCH → new gate acquired (nx={nx:+.3f})", flush=True)
+                        print(
+                            f"[pilot] SEARCH → new gate acquired (nx={nx:+.3f})",
+                            flush=True,
+                        )
                     self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
                     return
@@ -252,7 +258,9 @@ class Pilot:
                     self._searching = True
                     self._search_start_time = _time.monotonic()
                     self._search_yaw_dir = 1.0
-                    print("[pilot] Passed gate re-detected, entering SEARCH", flush=True)
+                    print(
+                        "[pilot] Passed gate re-detected, entering SEARCH", flush=True
+                    )
 
         if self._searching:
             self._mode_str = "search"
