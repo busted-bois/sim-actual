@@ -26,7 +26,7 @@ KD_Z = 0.20
 Z_TARGET_NED = -5.0
 
 VISION_YAW_GAIN = math.radians(40)
-VISION_CENTER_DEADBAND = 0.14
+VISION_CENTER_DEADBAND = 0.30
 VISION_PROXIMITY_R_FRAC = 0.10
 VISION_MAX_AGE_S = 0.5
 VISION_VY_GAIN = 6.0
@@ -57,6 +57,7 @@ class Pilot:
         self._collision_time: float | None = None
         self._stabilize_start: float | None = None
         self._advancing: bool = False
+        self._prev_r_frac: float = 0.0
         self._last_gate_id: str | None = None
         self._mode_str = "???"
         controller.set_control_mode("attitude")
@@ -182,6 +183,15 @@ class Pilot:
 
         centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
         z_target = z_now + ny_offset
+
+        # Detect gate fly-through: area was large then suddenly small = passed it
+        if (
+            hasattr(self, "_prev_r_frac")
+            and self._prev_r_frac > 0.10
+            and r_frac < self._prev_r_frac * 0.4
+        ):
+            self._reset_approach_state()
+        self._prev_r_frac = r_frac
 
         if self._advancing:
             # ADVANCE phase — flying forward through gate
