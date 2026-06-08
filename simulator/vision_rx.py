@@ -42,12 +42,17 @@ class VisionRX:
             # jpeg_size - full size of jpeg data
             # payload_size - size of this packet
             # sim_time_ns - frame's epoch timestamp in ns on the server
-            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(
-                header_format, header
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
+                struct.unpack(header_format, header)
             )
 
             if frame_id not in frames:
-                frames[frame_id] = {"chunks": {}, "total": total_chunks, "size": jpeg_size, "time": sim_time_ns}
+                frames[frame_id] = {
+                    "chunks": {},
+                    "total": total_chunks,
+                    "size": jpeg_size,
+                    "time": sim_time_ns,
+                }
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
@@ -76,17 +81,25 @@ class VisionRX:
                 img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                 image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                 if image is not None:
-                    self.process_frame(frame_id, image)
+                    self.process_frame(frame_id, image, sim_time_ns)
                 else:
                     print(f"Failed to decode frame: {frame_id}")
 
                 del frames[frame_id]
 
-    def process_frame(self, frame_id, img):
-        #
-        #
-        # Success!
-        # image is your FPV camera frame in JPEG format
-        #
-        #
-        pass
+    def process_frame(self, frame_id, img, sim_time_ns=0):
+        try:
+            from simulator.gate_detector import detect_gate
+
+            detection = detect_gate(img, frame_id, sim_time_ns)
+            self.data["last_detection"] = detection
+            self.data["detection_time_ns"] = sim_time_ns
+            if detection is not None:
+                pilot = self.data.get("pilot")
+                if pilot is not None:
+                    pilot.on_frame(detection)
+        except Exception as e:
+            from simulator import config
+
+            if config.DEBUG:
+                print(f"[vision_rx] process_frame error: {e}")
