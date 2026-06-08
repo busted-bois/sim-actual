@@ -41,6 +41,14 @@ OBSTACLE_CLEAR_ZONE = 0.25
 
 POST_GATE_HOVER_S = 1.5
 
+# Search mode — yaw scan to find next gate after fly-through
+SEARCH_SWEEP_YAW_RATE = 0.8
+SEARCH_SWEEP_PERIOD_S = 2.0
+
+# Passed-gate rejection — position-based internal map
+PASSED_GATE_NEAR_M = 3.0          # Within this dist of a passed gate, reject all
+PASSED_GATE_ANGLE_RAD = math.radians(45)  # Angular match window
+
 CONTROL_DT_S = 1 / 250
 
 
@@ -64,10 +72,15 @@ class Pilot:
         self._last_gate_id: str | None = None
         self._completed_gates: set[str] = set()
         self._vision_suppress_until: float = 0.0
+        self._passed_gate_positions: list[tuple[float, float, float]] = []
+        self._gates_passed: int = 0
+        self._searching: bool = False
+        self._search_yaw_dir: float = 1.0
+        self._search_start_time: float | None = None
         self._mode_str = "???"
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
-        print("[pilot] init done, waiting for armed + track_gates", flush=True)
+        print("[pilot] init done, waiting for armed + vision/telemetry", flush=True)
 
     # ------------------------------------------------------------------
     # Gate selection
@@ -111,6 +124,60 @@ class Pilot:
             return None
         return f"{pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}"
 
+    def _get_position(self) -> tuple[float, float, float] | None:
+        odometry = self.data.get("odometry")
+        if odometry is not None:
+            return (odometry["x"], odometry["y"], odometry["z"])
+        pos_ned = self.data.get("pos_ned")
+        if pos_ned is not None and len(pos_ned) >= 3:
+            return (pos_ned[0], pos_ned[1], pos_ned[2])
+        return None
+
+    def _is_passed_gate(self, nx: float) -> bool:
+        """True if a detected gate at camera offset nx coincides with a gate we already flew through."""
+        drone_pos = self._get_position()
+        if drone_pos is None or not self._passed_gate_positions:
+            return False
+
+        yaw = self.data.get("yaw_rad", 0.0)
+        detected_bearing = yaw + math.atan(nx)
+
+        for pgx, pgy, _pgz in self._passed_gate_positions:
+            dx = pgx - drone_pos[0]
+            dy = pgy - drone_pos[1]
+            dist = math.sqrt(dx * dx + dy * dy)
+
+            if dist < PASSED_GATE_NEAR_M:
+                return True
+
+            passed_dir = math.atan2(dy, dx)
+            diff = detected_bearing - passed_dir
+            diff = (diff + math.pi) % (2 * math.pi) - math.pi
+
+            if abs(diff) < PASSED_GATE_ANGLE_RAD:
+                return True
+
+        return False
+
+    def _do_search(self) -> None:
+        now = _time.monotonic()
+        elapsed = now - (self._search_start_time or now)
+        period_count = int(elapsed / SEARCH_SWEEP_PERIOD_S)
+        new_dir = 1.0 if period_count % 2 == 0 else -1.0
+
+        if new_dir != self._search_yaw_dir:
+            self._search_yaw_dir = new_dir
+            print(
+                f"[pilot] SEARCH sweep dir={'CW' if new_dir > 0 else 'CCW'} "
+                f"elapsed={elapsed:.1f}s gates_passed={self._gates_passed}",
+                flush=True,
+            )
+
+        yaw_rate = SEARCH_SWEEP_YAW_RATE * self._search_yaw_dir
+        thrust = self._altitude_thrust(HOVER_THRUST)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, 0, yaw_rate, thrust)
+
     # ------------------------------------------------------------------
     # Main tick — called every cycle at 250 Hz
     # ------------------------------------------------------------------
@@ -146,6 +213,10 @@ class Pilot:
                 return
             else:
                 self._post_gate_time = None
+                self._searching = True
+                self._search_start_time = _time.monotonic()
+                self._search_yaw_dir = 1.0
+                print("[pilot] POST-GATE hover done, entering SEARCH for next gate", flush=True)
 
         track_gates = self.data.get("track_gates")
         odometry = self.data.get("odometry")
@@ -157,22 +228,32 @@ class Pilot:
                 if gid and gid != self._last_gate_id:
                     self._last_gate_id = gid
 
-        # Vision first (real-time camera — highest priority)
+        # Vision — real-time camera (highest priority)
         gate_target = self.data.get("gate_target")
         cam = self.data.get("camera")
-        if gate_target and gate_target.get("detected"):
-            if track_gates and odometry is not None:
-                nearest = self._find_nearest_gate(track_gates, odometry)
-                if nearest is not None:
-                    gid = self._gate_id(nearest)
-                    if gid:
-                        self._last_gate_id = gid
-            if cam is not None:
-                age = _time.monotonic() - cam.get("received_at", 0)
-                if age < VISION_MAX_AGE_S and _time.monotonic() >= self._vision_suppress_until:
+        if gate_target and gate_target.get("detected") and cam is not None:
+            age = _time.monotonic() - cam.get("received_at", 0)
+            if age < VISION_MAX_AGE_S:
+                nx = gate_target.get("nx", 0.0)
+
+                if not self._is_passed_gate(nx):
+                    if self._searching:
+                        self._searching = False
+                        self._search_start_time = None
+                        print(f"[pilot] SEARCH → new gate acquired (nx={nx:+.3f})", flush=True)
                     self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
                     return
+                elif not self._searching:
+                    self._searching = True
+                    self._search_start_time = _time.monotonic()
+                    self._search_yaw_dir = 1.0
+                    print("[pilot] Passed gate re-detected, entering SEARCH", flush=True)
+
+        if self._searching:
+            self._mode_str = "search"
+            self._do_search()
+            return
 
         # Telemetry fallback — find nearest gate by 3D distance
         if track_gates and odometry is not None:
@@ -223,6 +304,12 @@ class Pilot:
         self._peak_r_frac = max(self._peak_r_frac, r_frac)
 
         if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.6:
+            self._gates_passed += 1
+
+            drone_pos = self._get_position()
+            if drone_pos is not None:
+                self._passed_gate_positions.append(drone_pos)
+
             gate_id = self._last_gate_id
             track_gates = self.data.get("track_gates")
             odometry = self.data.get("odometry")
@@ -230,13 +317,21 @@ class Pilot:
                 nearest = self._find_nearest_gate(track_gates, odometry)
                 if nearest is not None:
                     gate_id = self._gate_id(nearest)
-            self._reset_approach_state()
-            self._post_gate_time = _time.monotonic()
-            self._vision_suppress_until = _time.monotonic() + POST_GATE_HOVER_S + 1.0
             if gate_id:
                 self._completed_gates.add(gate_id)
-            print(f"[pilot] Gate {gate_id} marked COMPLETE, total passed: {len(self._completed_gates)}", flush=True)
-            print("[pilot] FLY-THROUGH detected, hovering to re-acquire", flush=True)
+
+            self._reset_approach_state()
+            self._post_gate_time = _time.monotonic()
+
+            print(
+                f"[pilot] Gate {gate_id} marked COMPLETE, "
+                f"total passed: {self._gates_passed}",
+                flush=True,
+            )
+            print(
+                f"[pilot] FLY-THROUGH at pos={drone_pos}, hovering to re-acquire",
+                flush=True,
+            )
             pitch = abs(CRUISE_PITCH_RATE) * 0.5
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             self.controller.set_control_mode("attitude")
