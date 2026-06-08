@@ -41,14 +41,13 @@
 - [x] Convert velocity intent to pitch/roll/thrust/yaw-rate; avoid `MAV_FRAME_BODY_NED` velocity climb.
 - [x] Horizontal control: yaw-rate primary, small `vy` assist.
 - [x] Errors: `ex=(target_x-cx)/cx`, `ey=(target_y-cy)/cy`.
-- [x] `yaw_rate=1.2*ex`, clamp `+-1.0 rad/s`.
-- [x] `vy=0.8*ex`, clamp `+-1.0 m/s`.
-- [x] `vz=0.8*ey`, clamp `+-0.8 m/s`; verify sign in sim. `vz` down, positive `ey` means descend.
-- [x] `vx` range `0.8-5.0 m/s`.
-- [x] No lock: `0.5 m/s`.
-- [x] Weak/off-center lock: `1.0-2.0 m/s`.
-- [x] Strong centered lock and range `>5m`: `4.0-5.0 m/s`.
-- [x] Near `<2m`: cap `2.0 m/s`; very near `<1m`: `1.0-1.5 m/s`.
+- [x] `yaw_rate=0.7*ex`, clamp `+-0.6 rad/s`.
+- [x] `vy=0.2*ex`, clamp `+-0.25 m/s`.
+- [x] `vz=0.0`; vertical image correction disabled until sign verified.
+- [x] Conservative `vx` range `0.3-1.5 m/s`.
+- [x] No/weak lock: `0.25-0.3 m/s`.
+- [x] Strong centered lock and range `>5m`: `1.5 m/s`.
+- [x] Near `<2m`: cap `0.7 m/s`; very near `<1m`: `0.4 m/s`.
 
 ## Phase 3 - Gate Lifecycle
 
@@ -60,7 +59,7 @@
 - [x] Coast last command damped for `10` frames (`0.33s`).
 - [x] Scan after coast.
 - [x] Reset lock history after `30` lost frames (`1s`).
-- [x] Scan: `vx=0.5 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.5 rad/s`.
+- [x] Scan: `vx=0.25 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.3 rad/s`.
 - [x] Scan toward last known horizontal error sign.
 - [x] If no history, alternate direction every `2s`.
 

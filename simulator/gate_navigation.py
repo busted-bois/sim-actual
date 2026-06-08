@@ -4,6 +4,11 @@ from simulator.gate_detector import FRAME_HEIGHT, FRAME_WIDTH, LOCK_CONFIDENCE
 
 DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
+YAW_GAIN = 0.7
+LATERAL_GAIN = 0.2
+ENABLE_VERTICAL_CONTROL = False
+SCAN_FORWARD_SPEED = 0.25
+SCAN_YAW_RATE = 0.3
 
 STALE_DETECTION_S = 0.15
 LOST_FRAMES = 6
@@ -76,9 +81,9 @@ class GateNavigator:
         if detection.strong_lock and centered and self._near_pass(detection):
             self.near_pass_candidate = True
 
-        yaw_rate = clamp(1.2 * detection.ex, -1.0, 1.0)
-        vy = clamp(0.8 * detection.ex, -1.0, 1.0)
-        vz = clamp(0.8 * detection.ey, -0.8, 0.8)
+        yaw_rate = clamp(YAW_GAIN * detection.ex, -0.6, 0.6)
+        vy = clamp(LATERAL_GAIN * detection.ex, -0.25, 0.25)
+        vz = clamp(0.8 * detection.ey, -0.8, 0.8) if ENABLE_VERTICAL_CONTROL else 0.0
         vx = self._forward_speed(detection, centered)
 
         self._set_state("track")
@@ -97,9 +102,9 @@ class GateNavigator:
             self.coast_frames += 1
             self._set_state("coast")
             return VelocityCommand(
-                max(self.last_command.vx * 0.8, 0.5),
+                max(self.last_command.vx * 0.5, SCAN_FORWARD_SPEED),
                 self.last_command.vy * 0.5,
-                self.last_command.vz * 0.5,
+                0.0,
                 self.last_command.yaw_rate * 0.5,
             )
 
@@ -115,20 +120,20 @@ class GateNavigator:
         elif now_s - self.last_scan_flip_s >= 2.0:
             self.scan_direction *= -1.0
             self.last_scan_flip_s = now_s
-        return VelocityCommand(0.5, 0.0, 0.0, 0.5 * self.scan_direction)
+        return VelocityCommand(SCAN_FORWARD_SPEED, 0.0, 0.0, SCAN_YAW_RATE * self.scan_direction)
 
     def _forward_speed(self, detection, centered):
         if detection.confidence < LOCK_CONFIDENCE:
-            return 0.5
+            return 0.3
         if detection.range_m < 1.0:
-            return 1.2
+            return 0.4
         if detection.range_m < 2.0:
-            return 2.0
+            return 0.7
         if detection.strong_lock and centered and detection.range_m > 5.0:
-            return 5.0
+            return 1.5
         if detection.confidence >= 0.75 and centered:
-            return 3.5
-        return 1.5
+            return 1.0
+        return 0.6
 
     def _near_pass(self, detection):
         _, _, w, h = detection.bbox
