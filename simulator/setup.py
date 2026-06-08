@@ -1,12 +1,21 @@
 from pymavlink import mavutil
 
+from simulator.config import load_config
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
 
 
-def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
+def setup_components(
+    shared_data, system_boot_ms, server_ip, server_udp_port, config=None
+):
+    # -------------------------------
+    # Load autonomy/vision/safety config (settings.json deep-merged over defaults)
+    # -------------------------------
+    if config is None:
+        config = load_config()
+    shared_data["config"] = config
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
@@ -37,12 +46,12 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Connect Vision receiver
     # -------------------------------
-    vision_rx = VisionRX(shared_data)
+    vision_rx = VisionRX(shared_data, config)
 
     # -------------------------------
     # Main control loop
     # -------------------------------
-    controller = Controller(sim_conn, shared_data, system_boot_ms)
+    controller = Controller(sim_conn, shared_data, system_boot_ms, config)
 
     return {
         "vision_rx": vision_rx,

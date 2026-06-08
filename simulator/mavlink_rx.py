@@ -38,7 +38,9 @@ class MAVLinkRX:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                print("WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.")
+                print(
+                    "WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port."
+                )
                 return
 
             if msg is None:
@@ -189,7 +191,10 @@ class MAVLinkRX:
             return
         raw_payload = raw_payload[3:]
         self.track_chunks[transfer_id][msg.seqnr] = raw_payload
-        if len(self.track_chunks[transfer_id]) == self.expected_num_track_chunks[transfer_id]:
+        if (
+            len(self.track_chunks[transfer_id])
+            == self.expected_num_track_chunks[transfer_id]
+        ):
             full_payload = bytes()
             for i in range(len(self.track_chunks[transfer_id])):
                 full_payload = full_payload + self.track_chunks[transfer_id][i]
@@ -237,4 +242,6 @@ class MAVLinkRX:
         collision_id = msg.id
 
         threat_level = msg.threat_level  # 1-2 with 2 being higher impact collision
-        impact = msg.horizontal_minimum_delta  # this is not a delta - it is the impulse magnitude in kg m/s
+        impact = (
+            msg.horizontal_minimum_delta
+        )  # this is not a delta - it is the impulse magnitude in kg m/s
