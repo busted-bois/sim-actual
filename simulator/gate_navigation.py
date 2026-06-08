@@ -4,6 +4,8 @@ from simulator.gate_detector import FRAME_HEIGHT, FRAME_WIDTH, LOCK_CONFIDENCE
 
 DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
+ENABLE_LATERAL_CONTROL = False
+ENABLE_VERTICAL_CONTROL = False
 
 STALE_DETECTION_S = 0.15
 LOST_FRAMES = 6
@@ -77,8 +79,8 @@ class GateNavigator:
             self.near_pass_candidate = True
 
         yaw_rate = clamp(1.2 * detection.ex, -1.0, 1.0)
-        vy = clamp(0.8 * detection.ex, -1.0, 1.0)
-        vz = clamp(0.8 * detection.ey, -0.8, 0.8)
+        vy = clamp(0.8 * detection.ex, -1.0, 1.0) if ENABLE_LATERAL_CONTROL else 0.0
+        vz = clamp(0.8 * detection.ey, -0.8, 0.8) if ENABLE_VERTICAL_CONTROL else 0.0
         vx = self._forward_speed(detection, centered)
 
         self._set_state("track")
@@ -98,8 +100,8 @@ class GateNavigator:
             self._set_state("coast")
             return VelocityCommand(
                 max(self.last_command.vx * 0.8, 0.5),
-                self.last_command.vy * 0.5,
-                self.last_command.vz * 0.5,
+                0.0,
+                0.0,
                 self.last_command.yaw_rate * 0.5,
             )
 

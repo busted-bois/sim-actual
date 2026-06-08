@@ -39,11 +39,11 @@
 - [x] Optimize reliability before lap time.
 - [x] MAVLink: `SET_POSITION_TARGET_LOCAL_NED` with `MAV_FRAME_BODY_NED`.
 - [x] Ignore position/accel/yaw; send `vx` forward, `vy` right, `vz` down, `yaw_rate`.
-- [x] Horizontal control: yaw-rate primary, small `vy` assist.
+- [x] Horizontal control: yaw-rate primary; `vy` disabled after sim showed upward drift.
 - [x] Errors: `ex=(target_x-cx)/cx`, `ey=(target_y-cy)/cy`.
 - [x] `yaw_rate=1.2*ex`, clamp `+-1.0 rad/s`.
-- [x] `vy=0.8*ex`, clamp `+-1.0 m/s`.
-- [x] `vz=0.8*ey`, clamp `+-0.8 m/s`; verify sign in sim. `vz` down, positive `ey` means descend.
+- [x] `vy` held at `0.0`.
+- [x] `vz` held at `0.0`; vertical control disabled until sim frame/sign is verified.
 - [x] `vx` range `0.8-5.0 m/s`.
 - [x] No lock: `0.5 m/s`.
 - [x] Weak/off-center lock: `1.0-2.0 m/s`.
