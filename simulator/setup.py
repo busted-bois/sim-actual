@@ -13,6 +13,7 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     shared_data.setdefault("latest_detection", None)
     shared_data.setdefault("latest_frame_id", None)
     shared_data.setdefault("latest_vision_time", None)
+    shared_data.setdefault("yaw_ready", False)
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
