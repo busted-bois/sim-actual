@@ -82,7 +82,7 @@ class GateDetector:
             self.previous_target = None
             return None
 
-        candidates.sort(key=lambda item: (item.confidence + min(item.area_ratio * 20.0, 1.0) * 0.25), reverse=True)
+        candidates.sort(key=self._selection_score, reverse=True)
         detection = candidates[0]
         detection = GateDetection(
             frame_id=detection.frame_id,
@@ -200,3 +200,10 @@ class GateDetector:
         px, py = self.previous_target
         dist = ((target_x - px) ** 2 + (target_y - py) ** 2) ** 0.5
         return max(0.0, 1.0 - dist / 120.0)
+
+    def _selection_score(self, detection):
+        _, _, w, h = detection.bbox
+        bbox_ratio = (w * h) / (FRAME_WIDTH * FRAME_HEIGHT)
+        area_bonus = min(bbox_ratio / 0.010, 1.0) * 0.55
+        stability_bonus = self._stability_score(detection.target_x, detection.target_y) * 0.15
+        return detection.confidence + area_bonus + stability_bonus
