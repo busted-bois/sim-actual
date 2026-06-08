@@ -4,10 +4,6 @@ from simulator.gate_detector import FRAME_HEIGHT, FRAME_WIDTH, LOCK_CONFIDENCE
 
 DEBUG_NAVIGATION = False
 DEBUG_LOG_HZ = 5.0
-ENABLE_LATERAL_CONTROL = False
-ENABLE_VERTICAL_CONTROL = False
-ENABLE_FORWARD_CONTROL = False
-ENABLE_SEARCH_SCAN = False
 
 STALE_DETECTION_S = 0.15
 LOST_FRAMES = 6
@@ -38,7 +34,7 @@ class GateNavigator:
         self.coast_frames = 0
         self.pass_missing_frames = 0
         self.near_pass_candidate = False
-        self.last_command = VelocityCommand(0.0, 0.0, 0.0, 0.0)
+        self.last_command = VelocityCommand(0.5, 0.0, 0.0, 0.0)
         self.last_ex = 0.0
         self.scan_direction = 1.0
         self.last_scan_flip_s = 0.0
@@ -81,9 +77,9 @@ class GateNavigator:
             self.near_pass_candidate = True
 
         yaw_rate = clamp(1.2 * detection.ex, -1.0, 1.0)
-        vy = clamp(0.8 * detection.ex, -1.0, 1.0) if ENABLE_LATERAL_CONTROL else 0.0
-        vz = clamp(0.8 * detection.ey, -0.8, 0.8) if ENABLE_VERTICAL_CONTROL else 0.0
-        vx = self._forward_speed(detection, centered) if ENABLE_FORWARD_CONTROL else 0.0
+        vy = clamp(0.8 * detection.ex, -1.0, 1.0)
+        vz = clamp(0.8 * detection.ey, -0.8, 0.8)
+        vx = self._forward_speed(detection, centered)
 
         self._set_state("track")
         return VelocityCommand(vx, vy, vz, yaw_rate)
@@ -101,10 +97,10 @@ class GateNavigator:
             self.coast_frames += 1
             self._set_state("coast")
             return VelocityCommand(
-                0.0,
-                0.0,
-                0.0,
-                0.0,
+                max(self.last_command.vx * 0.8, 0.5),
+                self.last_command.vy * 0.5,
+                self.last_command.vz * 0.5,
+                self.last_command.yaw_rate * 0.5,
             )
 
         if self.lost_frames >= RESET_HISTORY_FRAMES:
@@ -114,8 +110,6 @@ class GateNavigator:
         return self._scan(now_s)
 
     def _scan(self, now_s):
-        if not ENABLE_SEARCH_SCAN:
-            return VelocityCommand(0.0, 0.0, 0.0, 0.0)
         if self.last_ex != 0.0:
             self.scan_direction = 1.0 if self.last_ex > 0.0 else -1.0
         elif now_s - self.last_scan_flip_s >= 2.0:

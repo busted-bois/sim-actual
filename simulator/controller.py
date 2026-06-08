@@ -32,6 +32,10 @@ PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
 ROLL_RATE = 0.0
 YAW_RATE = 0.0
 THRUST = 0.6  # 0.0 - 1.0
+HOVER_THRUST = 0.5
+PITCH_RATE_PER_M_S = 0.08
+ROLL_RATE_PER_M_S = 0.08
+THRUST_PER_DOWN_M_S = 0.08
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
@@ -63,6 +67,25 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
         PITCH_RATE,
         YAW_RATE,
         THRUST,
+    )
+
+
+def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command):
+    now_ms = int(time.time() * 1000)
+    pitch_rate = -PITCH_RATE_PER_M_S * command.vx
+    roll_rate = ROLL_RATE_PER_M_S * command.vy
+    thrust = max(0.0, min(HOVER_THRUST - THRUST_PER_DOWN_M_S * command.vz, 1.0))
+
+    mavlink_conn.mav.set_attitude_target_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        RATES_ATTITUDE_MASK,
+        [1, 0, 0, 0],
+        roll_rate,
+        pitch_rate,
+        command.yaw_rate,
+        thrust,
     )
 
 
@@ -144,7 +167,7 @@ class Controller:
         now_s = time.monotonic()
         detection_age_s = now_s - vision_time if vision_time is not None else float("inf")
         command = self.navigator.update(frame_id, detection, detection_age_s, now_s)
-        update_position_flight_control(self.sim_conn, self.system_boot_ms, command)
+        update_navigation_attitude_control(self.sim_conn, self.system_boot_ms, command)
 
         time.sleep(1.0 / CONTROL_HZ)
 

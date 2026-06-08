@@ -37,14 +37,13 @@
 - [x] Camera tilt compensation deferred until sign/behavior verified in sim.
 - [x] Adaptive speed: faster when centered/confident/far-mid range; slower when close/off-center/low confidence.
 - [x] Optimize reliability before lap time.
-- [x] MAVLink: `SET_POSITION_TARGET_LOCAL_NED` with `MAV_FRAME_BODY_NED`.
-- [x] Ignore position/accel/yaw; send `vx` forward, `vy` right, `vz` down, `yaw_rate`.
-- [x] Horizontal control: yaw-rate primary; `vy` disabled after sim showed upward drift.
+- [x] MAVLink: use attitude-rate targets for flight, matching manual-control branch.
+- [x] Convert velocity intent to pitch/roll/thrust/yaw-rate; avoid `MAV_FRAME_BODY_NED` velocity climb.
+- [x] Horizontal control: yaw-rate primary, small `vy` assist.
 - [x] Errors: `ex=(target_x-cx)/cx`, `ey=(target_y-cy)/cy`.
 - [x] `yaw_rate=1.2*ex`, clamp `+-1.0 rad/s`.
-- [x] `vy` held at `0.0`.
-- [x] `vz` held at `0.0`; vertical control disabled until sim frame/sign is verified.
-- [x] `vx` held at `0.0`; forward control disabled after sim showed `BODY_NED vx` caused climb.
+- [x] `vy=0.8*ex`, clamp `+-1.0 m/s`.
+- [x] `vz=0.8*ey`, clamp `+-0.8 m/s`; verify sign in sim. `vz` down, positive `ey` means descend.
 - [x] `vx` range `0.8-5.0 m/s`.
 - [x] No lock: `0.5 m/s`.
 - [x] Weak/off-center lock: `1.0-2.0 m/s`.
@@ -54,14 +53,16 @@
 ## Phase 3 - Gate Lifecycle
 
 - [x] Detect pass by vision: gate grows/clips/disappears after near centered lock.
-- [x] On loss/no detection: hold still; search scan disabled after sim showed unintended climb.
+- [x] On loss: short memory coast, then yaw scan.
 - [x] Pass candidate: strong/centered lock and range `<0.8m` or outer bbox covers `>60%` frame width/height.
 - [x] Declare pass when candidate then gate disappears/clips for `5` frames.
 - [x] Lost after `6` consecutive no-detect frames (`0.2s` at 30Hz).
 - [x] Coast last command damped for `10` frames (`0.33s`).
-- [x] Scan disabled until MAVLink frame behavior is verified.
+- [x] Scan after coast.
 - [x] Reset lock history after `30` lost frames (`1s`).
-- [x] No-detection command: `vx=0`, `vy=0`, `vz=0`, `yaw_rate=0`.
+- [x] Scan: `vx=0.5 m/s`, `vy=0`, `vz=0`, `yaw_rate=0.5 rad/s`.
+- [x] Scan toward last known horizontal error sign.
+- [x] If no history, alternate direction every `2s`.
 
 ## Phase 4 - Model Fallback
 
