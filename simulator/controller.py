@@ -33,7 +33,12 @@ ROLL_RATE = 0.0
 YAW_RATE = 0.0
 THRUST = 0.6  # 0.0 - 1.0
 NAV_THRUST = 0.48
+SAFE_THRUST = 0.42
 NAV_PITCH_RATE_PER_M_S = 0.03
+ALTITUDE_KP = 0.08
+ALTITUDE_KD = 0.04
+MIN_NAV_THRUST = 0.35
+MAX_NAV_THRUST = 0.58
 
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
@@ -68,7 +73,7 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
     )
 
 
-def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp=1.0):
+def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ramp=1.0, thrust=NAV_THRUST):
     now_ms = int(time.time() * 1000)
     pitch_rate = -NAV_PITCH_RATE_PER_M_S * command.vx * ramp
     yaw_rate = command.yaw_rate * ramp
@@ -81,7 +86,7 @@ def update_navigation_attitude_control(mavlink_conn, system_boot_ms, command, ra
         0.0,
         pitch_rate,
         yaw_rate,
-        NAV_THRUST,
+        thrust,
     )
 
 
@@ -101,16 +106,19 @@ class Controller:
         self.system_boot_ms = system_boot_ms
         self.navigator = GateNavigator()
         self.started_at_s = time.monotonic()
+        self.target_z = None
 
     def update(self):
-        frame_id, detection, vision_time, _yaw_rad, yaw_ready = self._latest_detection()
+        frame_id, detection, vision_time, _yaw_rad, yaw_ready, pos_ned, vel_ned = self._latest_detection()
         now_s = time.monotonic()
-        if not yaw_ready or now_s - self.started_at_s < STARTUP_HOLD_S:
+        thrust = self._altitude_thrust(pos_ned, vel_ned)
+        if not yaw_ready or pos_ned is None or now_s - self.started_at_s < STARTUP_HOLD_S:
             update_navigation_attitude_control(
                 self.sim_conn,
                 self.system_boot_ms,
                 self.navigator.last_command,
                 ramp=0.0,
+                thrust=thrust,
             )
             time.sleep(1.0 / CONTROL_HZ)
             return
@@ -122,9 +130,20 @@ class Controller:
             self.system_boot_ms,
             command,
             ramp=ramp,
+            thrust=thrust,
         )
 
         time.sleep(1.0 / CONTROL_HZ)
+
+    def _altitude_thrust(self, pos_ned, vel_ned):
+        if pos_ned is None:
+            return SAFE_THRUST
+        z = float(pos_ned[2])
+        vz = float(vel_ned[2]) if vel_ned is not None else 0.0
+        if self.target_z is None:
+            self.target_z = z
+        thrust = NAV_THRUST + ALTITUDE_KP * (z - self.target_z) + ALTITUDE_KD * vz
+        return max(MIN_NAV_THRUST, min(thrust, MAX_NAV_THRUST))
 
     def _latest_detection(self):
         with self.data["lock"]:
@@ -134,6 +153,8 @@ class Controller:
                 self.data.get("latest_vision_time"),
                 self.data.get("yaw_rad", 0.0),
                 self.data.get("yaw_ready", False),
+                self.data.get("pos_ned"),
+                self.data.get("vel_ned"),
             )
 
     # -------------------------------
