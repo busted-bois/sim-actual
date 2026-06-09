@@ -93,3 +93,26 @@ class TrackGate:
     orient_quat: tuple[float, float, float, float]
     width_m: float
     height_m: float
+
+
+# Known Round-1 qualifier track (NED, relative to the start pad). The sim broadcasts the
+# live gate table only ONCE at race start, so a pilot that connects mid-race never receives
+# it. The course is fixed and these positions are identical across every clean run, so we
+# fall back to them when live `track_gates` is absent (see pilot.py). Same dict shape that
+# mavlink_rx builds for `track_gates`.
+_R1_ORIENT = (0.7071067094802856, 0.0, -8.657315930804543e-08, 0.7071067690849304)
+_R1_W = 2.7200000286102295
+ROUND1_GATES = [
+    {"position_ned": (-23.2979679107666, -0.39990234375, -0.03195800632238388),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+    {"position_ned": (-46.89374923706055, -2.499990224838257, 5.068041801452637),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+    {"position_ned": (-74.59375, 1.2000097036361694, 13.668041229248047),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+    {"position_ned": (-111.49374389648438, -5.099989891052246, 24.56804084777832),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+    {"position_ned": (-135.49374389648438, -0.7999902367591858, 25.355653762817383),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+    {"position_ned": (-159.19374084472656, -4.399990081787109, 25.968040466308594),
+     "orientation_ned": _R1_ORIENT, "width": _R1_W, "height": _R1_W},
+]

@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import time
 
+from simulator.config import ROUND1_GATES
 from simulator.transforms import ned_velocity_to_body
 
 CONTROL_DT_S = 1 / 250
@@ -85,6 +86,7 @@ class Pilot:
         self._last_z_target: float | None = None
         self._last_index: int | None = None
         self._race_done = False
+        self._used_fallback = False
         self._last_pos: tuple[float, float, float] | None = None
         self._last_vel_t: float = 0.0
         self._vel_est: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -171,6 +173,15 @@ class Pilot:
         if not armed or odometry is None:
             self._level_hover()
             return
+
+        # Fallback to the known Round-1 track if the live gate table wasn't received. The sim
+        # broadcasts it only once at race start, so a pilot started mid-race never gets it —
+        # but race_status (active_gate_index) keeps streaming, so idx tells us the race is on.
+        if not gates and idx is not None:
+            gates = ROUND1_GATES
+            if not self._used_fallback:
+                self._used_fallback = True
+                print("[pilot] no live track data — using known Round-1 gates", flush=True)
 
         if not gates or idx is None:
             self._level_hover()  # connected, race not started
