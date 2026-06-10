@@ -26,6 +26,7 @@ pyproject.toml          # Dependencies (uv)
 uv.lock                 # Lockfile
 skills-lock.json        # Agent skills lockfile
 ```
+<img width="2203" height="959" alt="ANDURIL team pic" src="https://github.com/user-attachments/assets/e4d5c707-7f95-4caf-91de-04f9e5022625" />
 
 ## More Info
 
