@@ -38,6 +38,8 @@ skills-lock.json        # Agent skills lockfile
 
 ## More Info
 
+See [SPEC.md](SPEC.md) for the flight implementation spec (architecture, interfaces, tuning, validation).
+
 See [Instructions.md](docs/Instructions.md) for full setup details, system requirements, competition timeline, and technical specifications.
 
 See [qualifier-playbook.md](docs/qualifier-playbook.md) for live-run troubleshooting and diagnostics.
