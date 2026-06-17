@@ -12,8 +12,20 @@ dependencies = [
     "pymavlink>=2.4.49",
 ]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
     "lefthook>=2.1.9",
+    "pytest>=8.0.0",
     "ruff>=0.15.15",
+]
+# RL training/deploy deps. Kept out of the default install so `make sim` and the bare
+# pilot need no heavy ML wheels. Install with:  uv sync --group rl
+rl = [
+    "torch>=2.2.0",
+    "stable-baselines3>=2.3.0",
+    "gymnasium>=0.29.0",
 ]

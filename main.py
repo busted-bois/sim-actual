@@ -39,6 +39,7 @@ while is_running:
 # exit
 ts_loop.get_thread_for_join().join(timeout=1.0)
 mavlink_rx.get_thread_for_join().join(timeout=1.0)
-vision_rx.get_thread_for_join().join(timeout=1.0)
+if vision_rx is not None:
+    vision_rx.get_thread_for_join().join(timeout=1.0)
 
 print("Client exited!", flush=True)

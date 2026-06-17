@@ -1,0 +1,37 @@
+Waiting for heartbeat...
+Connected to system: 1
+Setting up MAVLink rx...
+Setting up Timesync loop...
+[setup] vision/color detector disabled (config.ENABLE_VISION=False)
+[pilot] waypoint-yaw-steer init; waiting for armed + track data
+resetting sim for a clean start...
+[pilot] TARGET gate 0/5
+    [trace] t=  0.0s idx=0 pos=(-0.0,+0.0,+0.0)
+  gate idx -> 0  t=  0.0s  pos=(-0.0, 0.0, 0.0)
+    [trace] t=  0.5s idx=0 pos=(-1.4,+0.0,-3.4)
+    [trace] t=  1.0s idx=0 pos=(-3.3,+0.0,-5.9)
+    [trace] t=  1.5s idx=0 pos=(-4.9,+0.0,-6.1)
+    [trace] t=  2.0s idx=0 pos=(-5.9,+0.1,-4.8)
+    [trace] t=  2.5s idx=0 pos=(-4.0,+0.4,-4.2)
+    [trace] t=  3.0s idx=0 pos=(+1.1,+1.1,-4.5)
+    [trace] t=  3.5s idx=0 pos=(+7.0,+1.8,-4.8)
+    [trace] t=  4.0s idx=0 pos=(+12.5,+2.6,-5.0)
+    [trace] t=  4.5s idx=0 pos=(+18.1,+3.5,-5.1)
+    [trace] t=  5.0s idx=0 pos=(+22.6,+4.3,-5.1)
+    [trace] t=  5.5s idx=0 pos=(+26.5,+5.0,-5.0)
+    [trace] t=  6.0s idx=0 pos=(+29.3,+5.5,-5.0)
+    [trace] t=  6.5s idx=0 pos=(+31.5,+5.6,-4.9)
+    [trace] t=  7.0s idx=0 pos=(+32.4,+5.5,-4.8)
+    [trace] t=  7.5s idx=0 pos=(+31.9,+5.0,-4.8)
+    [trace] t=  8.0s idx=0 pos=(+29.5,+4.5,-4.7)
+    [trace] t=  8.5s idx=0 pos=(+25.9,+4.1,-4.8)
+    [trace] t=  9.0s idx=0 pos=(+22.2,+3.8,-5.0)
+    [trace] t=  9.6s idx=0 pos=(+18.9,+3.5,-5.0)
+    [trace] t= 10.1s idx=0 pos=(+16.5,+3.2,-4.9)
+    [trace] t= 10.6s idx=0 pos=(+15.9,+3.0,-4.7)
+    [trace] t= 11.1s idx=0 pos=(+17.8,+3.2,-4.5)
+    [trace] t= 11.6s idx=0 pos=(+22.3,+4.2,-4.6)
+    [trace] t= 12.1s idx=0 pos=(+27.5,+5.6,-4.8)
+[pilot] FLY-AWAY GUARD: far from gate 0 (pos=(31.6, 6.9, -5.0)); arresting to hover
+    [trace] t= 12.6s idx=0 pos=(+31.6,+6.9,-5.0)
+    [trace] t= 13.1s idx=0 pos=(-0.0,+0.0,+0.0)
