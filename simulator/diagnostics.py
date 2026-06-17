@@ -48,9 +48,7 @@ class TelemetryProbe:
             orient = g.get("orientation_ned")
             w = g.get("width")
             h = g.get("height")
-            self._emit(
-                f"  gate[{i}] pos={pos} orient_wxyz={orient} w={w} h={h}"
-            )
+            self._emit(f"  gate[{i}] pos={pos} orient_wxyz={orient} w={w} h={h}")
 
     def _check_index_transition(self) -> None:
         idx = self.data.get("active_gate_index")

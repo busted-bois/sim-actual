@@ -1,0 +1,15 @@
+Waiting for heartbeat...
+Connected to system: 1
+Setting up MAVLink rx...
+Setting up Timesync loop...
+[setup] vision/color detector disabled (config.ENABLE_VISION=False)
+[pilot] waypoint-yaw-steer init; waiting for armed + track data
+resetting sim for a clean start...
+[pilot] TARGET gate 0/5
+  gate idx -> 0  t=  0.0s  pos=(-0.0, -0.0, 0.0)
+  gate idx -> 1  t=  8.4s  pos=(-23.8, -0.2, -1.3)
+[pilot] TARGET gate 1/5
+  gate idx -> 0  t= 33.9s  pos=(0.0, 0.0, -0.0)
+[pilot] TARGET gate 0/5
+
+STALLED: no progress for 60s; reached gate 0 of 6.

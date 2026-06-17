@@ -24,3 +24,17 @@
 - Makefile is the centralized calling file with scripts, NOT pyproject.toml. If needed, install it in powershell with `choco install make`. On MacOS / Linux, it should automatically work by default.
 - Before commiting any files, use the deslop skill to verify the changes and ensure we aren't going overboard.
 - All simulator code logic should be written within the simulator/ directory, and then called from main.py. The main.py should not have command-line arguments for new functionality. The new functionality added should work with the default settings, just from running `make sim` (`uv run sim`).
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues in `busted-bois/sim-actual`, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles map 1:1 to GitHub labels of the same name (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

@@ -1,5 +1,6 @@
 from pymavlink import mavutil
 
+from simulator import config
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.timesync import TimeSync
@@ -35,9 +36,17 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     ts_loop = TimeSync(sim_conn, shared_data)
 
     # -------------------------------
-    # Connect Vision receiver
+    # Connect Vision receiver (color detector) — OFF by default for the telemetry-based
+    # Round-2 pilot. See config.ENABLE_VISION.
     # -------------------------------
-    vision_rx = VisionRX(shared_data)
+    if getattr(config, "ENABLE_VISION", False):
+        vision_rx = VisionRX(shared_data)
+    else:
+        vision_rx = None
+        print(
+            "[setup] vision/color detector disabled (config.ENABLE_VISION=False)",
+            flush=True,
+        )
 
     # -------------------------------
     # Main control loop
