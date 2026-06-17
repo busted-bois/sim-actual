@@ -23,7 +23,7 @@ For research patterns see [docs/autonomous-drone-racing-research.md](docs/autono
 12. [Design principles & anti-patterns](#12-design-principles--anti-patterns)
 13. [Current status & known gaps](#13-current-status--known-gaps)
 14. [Definition of done (VQ Round 1)](#14-definition-of-done-vq-round-1)
-15. [Planning decisions](#15-planning-decisions-for-team-discussion)
+15. [Team decisions (locked)](#15-team-decisions-locked)
 16. [Development workflow](#16-development-workflow)
 17. [References](#17-references)
 
@@ -326,7 +326,7 @@ Per tick (`Pilot._fly_race` → `_fly_forward_attitude`):
 4. **Attitude** — `direct_gate_attitude()` (IBVS + map yaw) or `blue_corridor_attitude()` when blue lines dominate.
 5. **Align-before-pitch** — no forward pitch until bearing within ~40° (`ALIGN_PITCH_THRESHOLD_RAD`).
 6. **Altitude** — thrust PID on NED z vs gate altitude; vz clamped (`ALTITUDE_VZ_CLAMP`).
-7. **Gate pass** — local plane-crossing detection (`gate_pass.py`) vs sim `active_gate_index`.
+7. **Gate pass** — sim `active_gate_index` drives targeting; local plane-crossing logged for DoD/telemetry only (see [§15](#15-team-decisions-locked)).
 
 ### 5.4 Finish
 
@@ -380,9 +380,11 @@ Gating: range 2–5 m, min corners, oblique reject, IMU saturation reduces blend
 `blue_line_guidance.py` — HSV blue band detection for VQ1 track highlights.  
 Used for: corridor centering during flight, **collision recovery** (corridor phase before retrace/align).
 
-### 6.5 Round 2 (optional)
+### 6.5 Round 2 / parallel YOLO spike
 
-`VISION_YOLO=1` enables YOLOv8-Pose (`gate_pose_detector.py`, `models/gate_pose.pt`). Requires `uv sync --group vision`.
+**VQ1 default path:** HSV orange + MonoRace PnP (`make sim` unchanged; `VISION_YOLO` off).
+
+**Parallel VQ2 work:** YOLOv8-Pose may be developed in parallel (`VISION_YOLO=1`, `uv sync --group vision`, `models/gate_pose.pt`) without changing the default pilot. Do not flip YOLO to default until VQ1 DoD is met (see [§13](#13-current-status--known-gaps)).
 
 ### 6.6 Vision freshness tiers
 
@@ -410,6 +412,8 @@ HIGHRES_IMU → propagate position/velocity (body accel, gravity removed)
 | Health | Requires `MIN_IMU_SAMPLES_FOR_HEALTHY` IMU samples, no huge IMU gaps |
 | IMU saturation | `imu_saturation.py` — damp accel when thrust-induced saturation suspected |
 | Logging | `logs/tracking_state_*.csv` at `TRACKING_LOG_HZ` (10 Hz) |
+
+**Team decision (locked):** hybrid pose — healthy `LocalTracker` for horizontal pose/yaw; sim `LOCAL_POSITION_NED` preferred for altitude PID; `LOCAL_NED_BLEND` tunable in `flight_config.py`. See [§15](#15-team-decisions-locked).
 
 **Known issue (VQ1):** IMU-only z drifts without NED blend; altitude PID uses sim NED z when available. See [docs/vq1-validation-report.md](docs/vq1-validation-report.md).
 
@@ -472,6 +476,8 @@ stateDiagram-v2
 | `reset` | immediate | `reset_sim()` when `COLLISION_RESET=1` + high threat |
 
 Path history: `path_history.py` records pose waypoints for retrace.
+
+**Team decision (locked):** default `make sim` uses retrace recovery; `make sim COLLISION_RESET=1` opt-in for sim reset after high-threat hits only.
 
 ---
 
@@ -634,6 +640,16 @@ Derived from VQ1 flight logs and competition research — see [docs/autonomous-d
 - Collision recovery state machine + optional sim reset.
 - Flight + tracking telemetry, frame capture, broad test coverage.
 
+### VQ1 success gate (before raising ambition)
+
+Do **not** raise `V_MAX_BODY`, enable YOLO by default, or start sim-to-real work until:
+
+- First **full lap** without intervention
+- `[RACE] status=COMPLETE`
+- `make validate-log` altitude stable **YES**
+
+Record baseline `last_gate_race_time` from console after that lap.
+
 ### Open / in progress (VQ1 DoD)
 
 | Item | Status |
@@ -662,17 +678,23 @@ See [docs/vq1-validation-report.md](docs/vq1-validation-report.md) and [docs/qua
 
 ---
 
-## 15. Planning decisions (for team discussion)
+## 15. Team decisions (locked)
 
-Questions to close before locking flight implementation:
+Locked 2026-06-16 via team review. Changes require explicit re-decision and changelog entry.
 
-1. **Pose source of truth** — tracker-only vs NED blend weights for VQ1; acceptable drift between gates?
-2. **Gate pass authority** — trust sim `active_gate_index` vs local plane-crossing for progress / logging?
-3. **Speed target** — current `V_MAX_BODY=3.8` vs reliability; lap-time vs pass-rate tradeoff?
-4. **Vision in desert** — lean on blue lines between gates vs map bearing only?
-5. **Collision policy** — retrace vs `COLLISION_RESET=1` for qualifier runs?
-6. **VQ2 readiness** — when to enable YOLO pose vs improve HSV/PnP?
-7. **Sim-to-real** — which abstractions (rate limits, latency model) to add before hardware?
+| Decision | Choice | Implementation notes |
+|----------|--------|----------------------|
+| **Pose source** | Hybrid | Tracker xy/yaw when healthy; sim NED for altitude; `LOCAL_NED_BLEND` in `flight_config.py` |
+| **Gate progress** | Sim-authoritative | `race_status.active_gate_index` drives `active_gate()` / navigation; local plane-crossing is telemetry + DoD only |
+| **Speed (VQ1)** | Reliability-first | Keep `V_MAX_BODY ≤ 3.8`; full lap + clean passes over lap time |
+| **Desert navigation** | Map primary | `track_gates` + IMU bearing between gates; blue corridor optional when detected |
+| **Collision** | Retrace default | `make sim`; `COLLISION_RESET=1` opt-in for debug / fast iteration |
+| **VQ2 / YOLO** | Parallel spike | HSV/PnP remains default; YOLO behind `VISION_YOLO=1` — see [§6.5](#65-round-2--parallel-yolo-spike) |
+| **Sim-to-real** | Deferred | Stub only until VQ1 DoD met — see below |
+
+### Sim-to-real (deferred)
+
+Document after first clean VQ1 lap: hardware MAVLink parity, vision pipeline latency, removal of sim-only aids (`track_gates` availability on real drone TBD per AGP rules). No implementation commitment in current sprint.
 
 ---
 
@@ -730,5 +752,6 @@ make sim COLLISION_RESET=1   # optional auto-reset
 |------|--------|
 | 2026-06-16 | Initial team spec |
 | 2026-06-16 | Full improvement pass: conventions, schemas, diagrams, validation criteria, test map, glossary |
+| 2026-06-16 | Locked team decisions in §15; VQ1 success gate in §13; parallel YOLO note in §6.5 |
 
 *Update this spec when interfaces, defaults, or DoD change. Add a one-line changelog entry per substantive edit.*
