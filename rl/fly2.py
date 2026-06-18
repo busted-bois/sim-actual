@@ -3,7 +3,7 @@
 Measured facts:
   * Attitude is a pure rate integrator with NO auto-leveling -> must actively
     regulate roll/pitch/yaw ANGLES via rate commands.
-  * Hover thrust ~0.19 (very powerful: thrust-accel ~51 m/s^2).
+  * Hover thrust ~0.27 (very powerful: thrust-accel ~36 m/s^2). [HOVER_T]
   * Yaw-rate command sign is INVERTED (positive cmd -> yaw decreases).
 
 Modes:
@@ -28,7 +28,7 @@ from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator.transforms import quat_to_yaw
 
 HOVER_T = 0.27
-KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~51/unit)
+KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
 K_ATT = 0.6  # attitude-angle P -> rate command
 K_YAW = 0.4
 # Measured command-sign conventions (pitch normal; roll + yaw inverted).
@@ -68,10 +68,17 @@ def main():
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
     ap.add_argument("--klat", type=float, default=0.04, help="cross-track roll gain")
-    ap.add_argument("--no-wait", dest="wait", action="store_false",
-                    help="launch immediately instead of waiting for ENTER")
-    ap.add_argument("--reset", action="store_true",
-                    help="send a sim reset before launching (else rely on race restart)")
+    ap.add_argument(
+        "--no-wait",
+        dest="wait",
+        action="store_false",
+        help="launch immediately instead of waiting for ENTER",
+    )
+    ap.add_argument(
+        "--reset",
+        action="store_true",
+        help="send a sim reset before launching (else rely on race restart)",
+    )
     args = ap.parse_args()
 
     gate_map = json.load(open(GATE_MAP_PATH))["gates"]

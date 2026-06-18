@@ -130,7 +130,11 @@ def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0):
     model.save(ZIP_PATH)
     print(f"[ppo] saved SB3 model -> {ZIP_PATH}", flush=True)
     std = export_policy(model)
-    _verify_export(model, std)
+    err = _verify_export(model, std)
+    assert err < 1e-4, (
+        f"export parity failed (max_abs_action_diff={err:.5f}); policy.pt would "
+        f"not match the trained SB3 actor"
+    )
     return model
 
 
