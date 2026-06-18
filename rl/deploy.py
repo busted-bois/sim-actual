@@ -59,11 +59,18 @@ def _gate_normal(g):
 def _passed(p, prev_signed, g):
     """Return (passed, new_signed)."""
     gc = np.asarray(g["pos"], float)
-    n = _gate_normal(g)
+    R = spec.quat_to_R(np.asarray(g["quat"], float))
+    n = R[:, 0]  # gate normal (through-axis)
     signed = float(n @ (p - gc))
     if prev_signed < 0.0 <= signed:
-        lateral = p - gc - signed * n
-        return (np.linalg.norm(lateral) < spec.GATE_HALF), signed
+        # Square opening: offsets along the gate's local right/down axes vs its
+        # reported w/h, not an inscribed circle.
+        rel = p - gc
+        dy = abs(float(R[:, 1] @ rel))  # width axis (right)
+        dz = abs(float(R[:, 2] @ rel))  # height axis (down)
+        hw = 0.5 * float(g.get("w", spec.GATE_SIZE_M))
+        hh = 0.5 * float(g.get("h", spec.GATE_SIZE_M))
+        return (dy < hw and dz < hh), signed
     return False, signed
 
 
