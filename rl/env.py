@@ -196,9 +196,18 @@ class GateRacingEnv(gym.Env):
         terminated = False
         # Gate plane crossing: signed dist flips - to + while within opening.
         if self._prev_signed < 0.0 <= signed:
-            lateral = self.p - gc - signed * n
-            if np.linalg.norm(lateral) < spec.GATE_HALF:  # passed through opening
-                rew += 10.0 + 3.0 * (1.0 - np.linalg.norm(lateral) / spec.GATE_HALF)
+            # Square opening: check offsets in the gate's local right/down axes
+            # against its reported w/h, not an inscribed circle.
+            g = self.gate_map[self.gate_idx]
+            R = spec.quat_to_R(np.array(g["quat"]))
+            rel = self.p - gc
+            dy = abs(float(R[:, 1] @ rel))  # width axis (right)
+            dz = abs(float(R[:, 2] @ rel))  # height axis (down)
+            hw = 0.5 * float(g.get("w", spec.GATE_SIZE_M))
+            hh = 0.5 * float(g.get("h", spec.GATE_SIZE_M))
+            if dy < hw and dz < hh:  # passed through opening
+                margin = min(1.0 - dy / hw, 1.0 - dz / hh)  # 0 at edge, 1 centered
+                rew += 10.0 + 3.0 * margin
                 self.gate_idx += 1
                 info["gate_passed"] = True
                 if self.gate_idx >= len(self.gate_map):
