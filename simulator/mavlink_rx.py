@@ -165,7 +165,16 @@ class MAVLinkRX:
         }
 
     def on_highres_imu(self, msg):
-        pass
+        # Accel (m/s^2) + gyro (rad/s) in body FRD; consumed by the EKF (Module 5).
+        self.data["imu"] = {
+            "ax": msg.xacc,
+            "ay": msg.yacc,
+            "az": msg.zacc,
+            "gx": msg.xgyro,
+            "gy": msg.ygyro,
+            "gz": msg.zgyro,
+            "time_us": msg.time_usec,
+        }
 
     def on_encapsulated_data(self, msg):
         if msg:

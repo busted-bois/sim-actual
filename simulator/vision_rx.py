@@ -98,6 +98,13 @@ class VisionRX:
             detection = detect_gate(img, frame_id, sim_time_ns)
 
             self.data["camera"] = {"received_at": _time.monotonic()}
+            # Raw BGR frame for dataset generation (Module 2) / GateNet inference.
+            self.data["frame"] = {
+                "img": img,
+                "frame_id": frame_id,
+                "sim_time_ns": sim_time_ns,
+                "received_at": _time.monotonic(),
+            }
 
             if detection is not None:
                 nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
