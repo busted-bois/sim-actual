@@ -170,11 +170,12 @@ def _selftest():
     )
     print(f"[selftest] drone world-pos err mean={dpx.mean():.3f}m max={dpx.max():.3f}m")
     assert errs.mean() < 0.25, "range estimate should be accurate"
-    # World-pos error scales with gate size (mask pixel-quantization -> metric),
-    # so the bound tracks GATE_SIZE_M rather than a fixed 0.25 m.
-    assert dpx.mean() < 0.18 * spec.GATE_SIZE_M, (
-        "world position recovery should be accurate"
-    )
+    # World-pos error is dominated by corner pixel-quantization, whose metric
+    # size is ~range/focal -- independent of gate size, NOT proportional to it.
+    # So use a fixed metric bound; tying it to GATE_SIZE_M just inflates the
+    # threshold for bigger gates and weakens the regression guard. (Measured
+    # mean ~0.28 m at the real 2.72 m gate with this fixed seed.)
+    assert dpx.mean() < 0.30, "world position recovery should be accurate"
     print("[selftest] OK — PnP recovers range + drone world position")
 
 

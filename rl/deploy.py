@@ -33,19 +33,21 @@ from rl.train_ppo import POLICY_PT, StandalonePolicy
 
 
 def load_policy(path: str = POLICY_PT, device: str = "cpu"):
-    ckpt = torch.load(path, map_location=device)
+    dev = torch.device(device)
+    ckpt = torch.load(path, map_location=dev)
     net = StandalonePolicy(
         obs_dim=ckpt.get("obs_dim", spec.OBS_DIM),
         act_dim=ckpt.get("act_dim", spec.ACTION_DIM),
         arch=ckpt.get("arch", [64, 64, 64]),
     )
     net.load_state_dict(ckpt["state_dict"])
+    net.to(dev)
     net.eval()
 
     @torch.no_grad()
     def act(obs: np.ndarray) -> np.ndarray:
-        x = torch.from_numpy(np.asarray(obs, np.float32)[None])
-        return np.clip(net(x)[0].numpy(), -1.0, 1.0)
+        x = torch.from_numpy(np.asarray(obs, np.float32)[None]).to(dev)
+        return np.clip(net(x)[0].cpu().numpy(), -1.0, 1.0)
 
     return act
 

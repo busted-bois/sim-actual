@@ -194,9 +194,17 @@ class SimInterface:
         )
 
     def close(self):
-        for rx in (self.mavlink_rx, self.vision_rx):
+        """Stop the receiver + timesync loops and join their threads.
+
+        ``get_thread_for_join`` sets ``is_running = False`` and returns the
+        thread; the RX/timesync threads are non-daemon, so we must actually
+        join them (and include timesync, which was previously left running).
+        """
+        for rx in (self.mavlink_rx, self.vision_rx, self.timesync):
             try:
-                rx.get_thread_for_join()
+                thread = rx.get_thread_for_join()
+                if thread is not None:
+                    thread.join(timeout=2.0)
             except Exception:
                 pass
 

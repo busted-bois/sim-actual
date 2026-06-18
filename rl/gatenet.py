@@ -110,7 +110,11 @@ def _to_tensor(img_bgr: np.ndarray) -> torch.Tensor:
 class GateDataset(Dataset):
     def __init__(self, root: str, train: bool = True):
         self.imgs = sorted(glob.glob(os.path.join(root, "images", "*.png")))
-        self.masks = [p.replace("images", "masks") for p in self.imgs]
+        # Build mask paths from the basename + explicit masks dir; str.replace
+        # would corrupt any earlier path segment that contains "images".
+        self.masks = [
+            os.path.join(root, "masks", os.path.basename(p)) for p in self.imgs
+        ]
         self.train = train
         if not self.imgs:
             raise FileNotFoundError(f"no images under {root}/images")
