@@ -194,19 +194,11 @@ class SimInterface:
         )
 
     def close(self):
-        """Stop the receiver + timesync loops and join their threads.
-
-        ``get_thread_for_join`` sets ``is_running = False`` and returns the
-        thread; the RX/timesync threads are non-daemon, so we must actually
-        join them (and include timesync, which was previously left running).
-        """
+        """Stop the RX + timesync loops and join their (non-daemon) threads."""
         for rx in (self.mavlink_rx, self.vision_rx, self.timesync):
-            try:
-                thread = rx.get_thread_for_join()
-                if thread is not None:
-                    thread.join(timeout=2.0)
-            except Exception:
-                pass
+            thread = rx.get_thread_for_join()  # sets is_running=False, returns thread
+            if thread is not None:
+                thread.join(timeout=2.0)
 
 
 def load_gate_map(path: str = GATE_MAP_PATH) -> list:
