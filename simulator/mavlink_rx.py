@@ -3,6 +3,7 @@ import time
 import threading
 
 from simulator.config import TrackGate
+from simulator.imu_kalman import ImuKalmanPredictor
 from simulator.transforms import quat_to_yaw
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
@@ -15,6 +16,8 @@ class MAVLinkRX:
         self.data = data
         self.thread = None
         self.is_running = False
+        self.imu_predictor = ImuKalmanPredictor()
+        self.last_imu_time_us = None
 
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
@@ -175,6 +178,38 @@ class MAVLinkRX:
             "gz": msg.zgyro,
             "time_us": msg.time_usec,
         }
+
+        if self.last_imu_time_us is None:
+            self.last_imu_time_us = msg.time_usec
+            return
+
+        dt_s = max(1e-4, (msg.time_usec - self.last_imu_time_us) * 1e-6)
+        self.last_imu_time_us = msg.time_usec
+
+        pred = self.imu_predictor.predict(
+            accel_body_mps2=(msg.xacc, msg.yacc, msg.zacc),
+            gyro_body_rps=(msg.xgyro, msg.ygyro, msg.zgyro),
+            dt_s=dt_s,
+        )
+
+        self.data["imu_prediction"] = {
+            "dt_s": pred.dt_s,
+            "roll_rad": pred.roll_rad,
+            "pitch_rad": pred.pitch_rad,
+            "yaw_rad": pred.yaw_rad,
+            "pos_ned": pred.pos_ned,
+            "vel_ned": pred.vel_ned,
+            "accel_ned": pred.accel_ned,
+            "covariance_trace": pred.covariance_trace,
+        }
+
+        # IMU-only attitude estimate (high-rate). No GPS/camera correction yet.
+        self.data["attitude_imu"] = {
+            "roll": pred.roll_rad,
+            "pitch": pred.pitch_rad,
+            "yaw": pred.yaw_rad,
+        }
+        self.data["yaw_rad_imu"] = pred.yaw_rad
 
     def on_encapsulated_data(self, msg):
         if msg:
