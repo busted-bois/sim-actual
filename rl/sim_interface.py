@@ -207,20 +207,30 @@ def load_gate_map(path: str = GATE_MAP_PATH) -> list:
 
 
 def _smoke():
+    import sys
+
     sim = SimInterface()
     if not sim.wait_for_telemetry():
-        print("[sim] no telemetry within timeout — is the simulator running?")
-        return
-    sim.capture_gate_map()
+        print("[sim] no telemetry within timeout - is the race running?", flush=True)
+        sys.stdout.flush()
+        os._exit(1)
     snap = sim.snapshot()
-    print("armed:", snap.armed)
-    print("pos_ned:", snap.pos_ned)
-    print("vel_ned:", snap.vel_ned)
-    print("quat:", snap.quat)
-    print("ang_vel:", snap.ang_vel)
-    print("imu:", snap.imu)
-    print("frame:", None if snap.frame is None else snap.frame.shape)
-    print("gates:", len(snap.gates))
+    print("=== telemetry snapshot ===", flush=True)
+    print("armed     :", snap.armed, flush=True)
+    print("pos_ned   :", snap.pos_ned, flush=True)
+    print("vel_ned   :", snap.vel_ned, flush=True)
+    print("quat      :", snap.quat, flush=True)
+    print("ang_vel   :", snap.ang_vel, flush=True)
+    print("imu       :", snap.imu, flush=True)
+    print("frame     :", None if snap.frame is None else snap.frame.shape, flush=True)
+    # Gate map (track broadcast). Shorter wait since telemetry already confirmed.
+    gates = sim.capture_gate_map(timeout_s=8.0)
+    print("gates     :", len(gates), flush=True)
+    if gates:
+        for g in gates:
+            print(f"  gate {g['id']}: pos={g['pos']} w={g['w']} h={g['h']}", flush=True)
+    sys.stdout.flush()
+    os._exit(0)  # hard-exit past non-daemon receiver threads
 
 
 if __name__ == "__main__":
