@@ -100,16 +100,19 @@ class PolicyRunner:
 
         while True:
             snap = sim.snapshot()
-            now = snap.t_mono
 
-            # EKF predict on IMU.
+            # EKF predict on IMU — gate on the sensor timestamp, not the loop
+            # clock: the control loop (100 Hz) outruns the IMU rate, so keying
+            # off wall time would re-integrate the same sample and double the
+            # predicted drift between corrections.
             if snap.imu is not None:
-                if self._last_imu_t is not None:
-                    dt = now - self._last_imu_t
+                imu_t = snap.imu["time_us"]
+                if self._last_imu_t is not None and imu_t != self._last_imu_t:
+                    dt = (imu_t - self._last_imu_t) * 1e-6
                     accel = np.array([snap.imu["ax"], snap.imu["ay"], snap.imu["az"]])
                     gyro = np.array([snap.imu["gx"], snap.imu["gy"], snap.imu["gz"]])
                     self.ekf.predict(accel, gyro, dt)
-                self._last_imu_t = now
+                self._last_imu_t = imu_t
             # EKF update on odometry position + attitude.
             if snap.pos_ned is not None:
                 self.ekf.update_position(np.array(snap.pos_ned))

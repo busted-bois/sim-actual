@@ -41,9 +41,12 @@ DIST = np.zeros((5,), dtype=np.float64)  # no lens distortion (given)
 CAM_TILT_DEG = 20.0  # camera pitched up from body-forward
 
 # ----------------------------------------------------------------------------
-# Gate geometry — inner opening 1500 x 1500 mm.
+# Gate geometry — square opening, side GATE_SIZE_M (meters). Value matches the
+# w/h the sim broadcasts in the gate map (data/gate_map.json: 2.72 for all 6).
+# PnP (Module 4) and mask projection (Module 2) must use the REAL size or range
+# estimates scale by the wrong factor and the pass-through lateral gate is off.
 # ----------------------------------------------------------------------------
-GATE_SIZE_M = 1.5
+GATE_SIZE_M = 2.72
 GATE_HALF = GATE_SIZE_M / 2.0
 
 # Gate-local frame: +x = through-gate normal (travel dir), +y = right (width),
