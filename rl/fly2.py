@@ -68,6 +68,10 @@ def main():
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
     ap.add_argument("--klat", type=float, default=0.04, help="cross-track roll gain")
+    ap.add_argument("--no-wait", dest="wait", action="store_false",
+                    help="launch immediately instead of waiting for ENTER")
+    ap.add_argument("--reset", action="store_true",
+                    help="send a sim reset before launching (else rely on race restart)")
     args = ap.parse_args()
 
     gate_map = json.load(open(GATE_MAP_PATH))["gates"]
@@ -76,10 +80,17 @@ def main():
     if not sim.wait_for_telemetry():
         print("[f2] no telemetry", flush=True)
         os._exit(1)
-    sim.reset_sim()
-    time.sleep(3)
+    if args.reset:
+        sim.reset_sim()
+        time.sleep(3)
+    # Sync launch to the countdown: wait for the user to hit ENTER at "go".
+    if args.wait and args.mode == "course":
+        try:
+            input("[f2] READY -- press ENTER the moment the countdown hits 0...")
+        except EOFError:
+            pass
     sim.arm()
-    time.sleep(0.3)
+    time.sleep(0.2)
     s0 = sim.snapshot()
     hold_z = s0.pos_ned[2]
     hold_yaw = rpy(s0.quat)[2]
