@@ -125,8 +125,7 @@ class GateDataset(Dataset):
     def __getitem__(self, i):
         img = cv2.imread(self.imgs[i], cv2.IMREAD_COLOR)
         mask = cv2.imread(self.masks[i], cv2.IMREAD_GRAYSCALE)
-        # cv2.imread returns None on a missing/corrupt file; fail loudly with the
-        # offending path instead of feeding None into cv2.resize.
+        # cv2.imread returns None on a missing/corrupt file; fail with the path.
         if img is None:
             raise FileNotFoundError(f"could not read image: {self.imgs[i]}")
         if mask is None:

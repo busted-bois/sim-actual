@@ -196,8 +196,8 @@ class GateRacingEnv(gym.Env):
         terminated = False
         # Gate plane crossing: signed dist flips - to + while within opening.
         if self._prev_signed < 0.0 <= signed:
-            # Square opening: check offsets in the gate's local right/down axes
-            # against its reported w/h, not an inscribed circle.
+            # Square opening: offsets along the gate's local right/down axes
+            # vs its reported w/h.
             g = self.gate_map[self.gate_idx]
             R = spec.quat_to_R(np.array(g["quat"]))
             rel = self.p - gc

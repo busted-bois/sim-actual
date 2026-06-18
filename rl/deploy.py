@@ -64,7 +64,7 @@ def _passed(p, prev_signed, g):
     signed = float(n @ (p - gc))
     if prev_signed < 0.0 <= signed:
         # Square opening: offsets along the gate's local right/down axes vs its
-        # reported w/h, not an inscribed circle.
+        # reported w/h.
         rel = p - gc
         dy = abs(float(R[:, 1] @ rel))  # width axis (right)
         dz = abs(float(R[:, 2] @ rel))  # height axis (down)
