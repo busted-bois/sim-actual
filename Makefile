@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo train-ppo-quick bc-check fly-policy rl-test
 
 i install:
 	uv sync
@@ -42,8 +42,19 @@ train-gatenet:
 	uv run -m rl.gatenet
 
 # Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
+# (BC warm-start from the geometric expert, then PPO per-stage with success
+# reporting). Use train-ppo-quick for a fast end-to-end pipeline smoke.
 train-ppo:
 	uv run -m rl.train_ppo
+
+train-ppo-quick:
+	uv run -m rl.train_ppo --quick
+
+# Cheap pre-flight: BC warm-start only + closed-loop baseline on stages 0-1.
+# Run BEFORE train-ppo to confirm PPO starts from a competent base (action MSE
+# alone doesn't prove it — per-step error compounds over a trajectory).
+bc-check:
+	uv run -m rl.train_ppo --bc-only
 
 # Module 8: fly the trained policy on the live sim.
 fly-policy:

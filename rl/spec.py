@@ -69,7 +69,10 @@ MAX_PITCH_RATE = 4.0
 MAX_YAW_RATE = 3.0
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
-HOVER_THRUST = 0.5
+# Hover thrust on the REAL sim. 0.27 is a validated closed-loop trim (fly2.py
+# HOVER_T=0.27 + altitude PID cleared all 6 gates); open-loop sysID leaves the
+# true value uncertain (~0.19-0.33). Training randomizes around it (rl.env).
+HOVER_THRUST = 0.27
 
 # Policy emits 4 values in [-1, 1]; scale_action() maps to physical commands.
 ACTION_DIM = 4

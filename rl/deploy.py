@@ -12,6 +12,28 @@ position + attitude (loosely-coupled). If a trained gatenet.pt is present, the
 GateNet->PnP vision pose can be fused too (Modules 3-4); odometry is the
 robust default since the sim provides it directly.
 
+ROUND-2 RISKS (read before trusting this on the real sim):
+  * SIGN CHECK IS MANDATORY. The training env is canonical; the real sim has
+    INVERTED roll + yaw command signs (measured; see rl.fly2). We apply
+    SIGN_ROLL/SIGN_YAW below to match, but a flipped sign passes every offline
+    test and then crashes on the first real flight -- before any full policy
+    flight, run a low-altitude sign-check (command a small +roll then +yaw and
+    confirm the drone banks/rotates the expected way).
+  * NOT YET CAMERA-ONLY. The obs gate terms here are built from the privileged
+    `capture_gate_map()` broadcast, not GateNet->PnP->EKF. For a truly
+    camera-only (competition-legal) policy, replace the gate poses with the
+    vision estimate. policy.pt was trained on an injected-noise proxy, so expect
+    to RE-VALIDATE and likely fine-tune when the real perception is swapped in;
+    do not assume it transfers directly. VALIDATE THE PROXY: once GateNet->PnP->
+    EKF runs (even offline), log the real noise stats -- position error vs range,
+    attitude error magnitude, FOV-dropout frequency near gate crossings -- and
+    compare against the env bands (rl.env DR_*_NOISE_RANGE). Same ballpark =>
+    transfer is plausible; off by 2-3x => retrain before trusting policy.pt.
+  * GATE-FRAME CONVENTION. The live gate map uses local +y as the opening
+    normal; this module's `_gate_normal`/`_passed` assume +x. The env converts
+    via Rz(90) (rl.env._real_course_map) -- deployment must apply the same
+    conversion to the captured map, or gate progression will mis-detect.
+
     uv run -m rl.deploy                 # fly the policy on the live sim
     uv run -m rl.deploy --selftest      # closed-loop on internal env (no sim)
 """
@@ -30,6 +52,13 @@ from rl.ekf import ESKF
 from rl.env import GateRacingEnv
 from rl.observation import build_observation
 from rl.train_ppo import POLICY_PT, StandalonePolicy
+
+# Real-sim command-sign conventions (measured; see rl.fly2). The training env is
+# canonical, so we flip roll + yaw rate here at the actuation boundary. MUST be
+# validated live with a sign-check before any full flight (see module docstring).
+SIGN_ROLL = -1.0
+SIGN_PITCH = +1.0
+SIGN_YAW = -1.0
 
 
 def load_policy(path: str = POLICY_PT, device: str = "cpu"):
@@ -163,7 +192,10 @@ class PolicyRunner:
             action = self.act(obs)
             self.last_action = action
             roll, pitch, yaw, thrust = spec.scale_action(action)
-            sim.send_attitude_rates(roll, pitch, yaw, thrust)
+            # Canonical (training) -> real inverted sim. Verify live before trust.
+            sim.send_attitude_rates(
+                SIGN_ROLL * roll, SIGN_PITCH * pitch, SIGN_YAW * yaw, thrust
+            )
             time.sleep(1.0 / 100.0)
 
 
