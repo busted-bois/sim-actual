@@ -9,21 +9,21 @@ The AI controller has access to:
 * Pressure measurements  
 * Temperature measurements  
 * Heartbeat status  
-* Timing synchronization
+* Timing synchronization  
+* `ENCAPSULATED_DATA`  
+* 
 
 The AI controller does NOT have access to:
 
 * GPS  
-* Absolute global position  
-* Internal simulator state  
-* Ground-truth gate information
+* Absolute global position
 
 # Communication Protocol
 
 The simulator communicates using MAVLink.  
 Contestant code should communicate with the drone using MAVSDK-compatible libraries.
 
-**All methods from [https://github.com/mavlink/c\_library\_v2](https://github.com/mavlink/c_library_v2) are valid**
+**Some methods from [https://github.com/mavlink/c\_library\_v2](https://github.com/mavlink/c_library_v2) are valid**
 
 These 6 messages were in the specification pdf provided by the competition.  
 Other messages from MAVLink 2’s protocol should be supported as documented in [https://mavlink.io/en/messages/common.html](https://mavlink.io/en/messages/common.html) 
@@ -36,7 +36,7 @@ The heartbeat message shows that a system or component is present and responding
 
 **2\. ATTITUDE (MAVLink ID 30\)**  
 [https://mavlink.io/en/guide/mavlink\_2.html](https://mavlink.io/en/guide/mavlink_2.html)  
-Output vehicle attitude infomation. More specifically outputs the attitude in the aeronautical frame (right-handed, Z-down, Y-right, X-front, ZYX, intrinsic).
+Output vehicle attitude information. More specifically outputs the attitude in the aeronautical frame (right-handed, Z-down, Y-right, X-front, ZYX, intrinsic).
 
 | Field Name | Type | Units | Description |
 | :---- | :---- | :---- | :---- |
@@ -120,6 +120,8 @@ Reports the current commanded attitude of the vehicle as specified by the autopi
 | body\_pitch\_rate | float | rad/s |  | Body pitch rate |
 | body\_yaw\_rate | float | rad/s |  | Body yaw rate |
 | thrust | float |  |  | Collective thrust, normalized to 0 .. 1 (-1 .. 1 for vehicles capable of reverse thrust) |
+
+Current code uses `SET_ATTITUDE_TARGET (82)`
 
 # Vision Stream
 
