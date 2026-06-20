@@ -24,14 +24,6 @@ def _parse_args():
     )
     return parser.parse_args()
 
-# setup components
-components = setup_components(
-    shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT
-)
-controller = components["controller"]
-ts_loop = components["ts_loop"]
-mavlink_rx = components["mavlink_rx"]
-vision_rx = components["vision_rx"]
 
 def main():
     args = _parse_args()

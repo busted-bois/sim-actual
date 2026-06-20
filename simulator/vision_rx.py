@@ -1,12 +1,11 @@
 import socket
 import struct
 import threading
-import time
 
 import cv2
 import numpy as np
 
-from simulator.vision_processing import GateTargetFilter, detect_gate_target
+from simulator.vision_processing import GateTargetFilter
 
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
