@@ -108,7 +108,7 @@ class MAVLinkRX:
                 self.on_collision(msg)
 
             # --------------------------------------------------------------------------------------
-            # DATA_TRANSMISSION_HANDSHAKE - Repurposed and used for upcoming 'Track Data' packets
+            # DATA_TRANSMISSION_HANDSHAKE - repurposed for chunked track gate packets
             # --------------------------------------------------------------------------------------
             elif msg.get_type() == "DATA_TRANSMISSION_HANDSHAKE":
                 track_data_transfer_id = msg.width
@@ -189,7 +189,7 @@ class MAVLinkRX:
     def on_race_status(self, msg):
         raw_payload = bytes(msg.data)
         (
-            data_type,
+            _data_type,
             sim_boot_time_ms,
             race_start_boot_time_ms,
             race_finish_time_ns,
@@ -210,7 +210,7 @@ class MAVLinkRX:
         # header:
         #   data_type - ID of this message
         #   transfer_id - ID of the group of packets this chunk belongs to
-        data_type, transfer_id = struct.unpack_from("<BH", raw_payload)
+        _data_type, transfer_id = struct.unpack_from("<BH", raw_payload)
         if transfer_id not in self.expected_num_track_chunks:
             return
         raw_payload = raw_payload[3:]
