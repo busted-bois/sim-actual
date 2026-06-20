@@ -11,8 +11,9 @@ SIM_SERVER_UDP_PORT = 5600
 
 
 class VisionRX:
-    def __init__(self, data):
+    def __init__(self, data, vio=None):
         self.data = data
+        self.vio = vio
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -91,9 +92,10 @@ class VisionRX:
         try:
             import time as _time
 
-            from simulator.gate_detector import detect_gate
+            from simulator.gate_detector import build_gate_mask, detect_gate
 
             h, w = img.shape[:2]
+            gate_mask = build_gate_mask(img)
 
             detection = detect_gate(img, frame_id, sim_time_ns)
 
@@ -128,6 +130,19 @@ class VisionRX:
                     "ny": 0.0,
                     "r_frac": 0.0,
                 }
+
+            if self.vio is not None and gate_mask is not None:
+                updated = self.vio.update_from_gate_mask(
+                    gate_mask, frame_id, sim_time_ns
+                )
+                if updated:
+                    vio = self.data.get("vio", {})
+                    print(
+                        f"[vio] pos={vio.get('pos_ned')} "
+                        f"reproj={vio.get('reproj_err_px', 0):.2f}px "
+                        f"P={vio.get('P_trace', 0):.2f}",
+                        flush=True,
+                    )
 
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)

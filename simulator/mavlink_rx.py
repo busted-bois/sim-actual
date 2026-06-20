@@ -11,20 +11,21 @@ ENCAPSULATED_TRACK_INFO_MSG_ID = 2
 
 
 class MAVLinkRX:
-    def __init__(self, mavlink_connection, data):
+    def __init__(self, mavlink_connection, data, vio=None):
         self.mavlink_conn = mavlink_connection
         self.data = data
+        self.vio = vio
         self.thread = None
         self.is_running = False
-        self.imu_predictor = ImuKalmanPredictor()
+        self.imu_predictor = None if vio is not None else ImuKalmanPredictor()
         self.last_imu_time_us = None
 
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
 
     @classmethod
-    def create_mavlink_rx(cls, mavlink_connection, data):
-        rx = cls(mavlink_connection, data)
+    def create_mavlink_rx(cls, mavlink_connection, data, vio=None):
+        rx = cls(mavlink_connection, data, vio=vio)
         rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=False)
         rx.is_running = True
         rx.thread.start()
@@ -166,10 +167,12 @@ class MAVLinkRX:
             "pitch_speed": msg.pitchspeed,
             "yaw_speed": msg.yawspeed,
         }
+        if self.vio is not None:
+            self.vio.try_seed_from_telemetry()
 
     def on_highres_imu(self, msg):
-        # Accel (m/s^2) + gyro (rad/s) in body FRD; consumed by the EKF (Module 5).
-        self.data["imu"] = {
+        # Accel (m/s^2) + gyro (rad/s) in body FRD.
+        imu = {
             "ax": msg.xacc,
             "ay": msg.yacc,
             "az": msg.zacc,
@@ -178,6 +181,11 @@ class MAVLinkRX:
             "gz": msg.zgyro,
             "time_us": msg.time_usec,
         }
+        self.data["imu"] = imu
+
+        if self.vio is not None:
+            self.vio.predict_imu(imu)
+            return
 
         if self.last_imu_time_us is None:
             self.last_imu_time_us = msg.time_usec
