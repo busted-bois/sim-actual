@@ -10,8 +10,7 @@ The AI controller has access to:
 * Temperature measurements  
 * Heartbeat status  
 * Timing synchronization  
-* `ENCAPSULATED_DATA`  
-* 
+* `ENCAPSULATED_DATA`
 
 The AI controller does NOT have access to:
 
@@ -83,6 +82,15 @@ Time synchronization message. The message is used for both timesync requests and
 | target\_system [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | uint8\_t |  | Target system id. Request: 0 (broadcast) or id of specific system. Response must contain system id of the requesting component. |
 | target\_component [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | uint8\_t |  | Target component id. Request: 0 (broadcast) or id of specific component. Response must contain component id of the requesting component. |
 
+**ENCAPSULATED DATA (131)**
+
+Data packet for images sent using the Image Transmission Protocol: [https://mavlink.io/en/services/image\_transmission.html](https://mavlink.io/en/services/image_transmission.html).
+
+| Field Name | Type | Description |
+| :---- | :---- | :---- |
+| seqnr | uint16\_t | sequence number (starting with 0 on every transmission) |
+| data | uint8\_t\[253\] | image data bytes |
+
 MAVLink output message from the **client to simulator:**  
 **5\. SET\_POSITION\_TARGET\_LOCAL\_NED (84)**
 
@@ -107,21 +115,24 @@ Sets a desired vehicle position in a local north-east-down coordinate frame. Use
 | yaw | float | rad |  | yaw setpoint |
 | yaw\_rate | float | rad/s |  | yaw rate setpoint |
 
-**6\. ATTITUDE\_TARGET (83)**
+**6\. SET\_ATTITUDE\_TARGET (83)**
 
-Reports the current commanded attitude of the vehicle as specified by the autopilot. This should match the commands sent in a [SET\_ATTITUDE\_TARGET](https://mavlink.io/en/messages/common.html#SET_ATTITUDE_TARGET) message if the vehicle is being controlled this way.
+Sets a desired vehicle attitude. Used by an external controller to command the vehicle (manual controller or other system).
 
 | Field Name | Type | Units | Values | Description |
 | :---- | :---- | :---- | :---- | :---- |
 | time\_boot\_ms | uint32\_t | ms |  | Timestamp (time since system boot). |
+| target\_system | uint8\_t |  |  | System ID |
+| target\_component | uint8\_t |  |  | Component ID |
 | type\_mask | uint8\_t |  | [ATTITUDE\_TARGET\_TYPEMASK](https://mavlink.io/en/messages/common.html#ATTITUDE_TARGET_TYPEMASK) | Bitmap to indicate which dimensions should be ignored by the vehicle. |
-| q | float\[4\] |  |  | Attitude quaternion (w, x, y, z order, zero-rotation is 1, 0, 0, 0\) |
+| q | float\[4\] |  |  | Attitude quaternion (w, x, y, z order, zero-rotation is 1, 0, 0, 0\) from [MAV\_FRAME\_LOCAL\_NED](https://mavlink.io/en/messages/common.html#MAV_FRAME_LOCAL_NED) to [MAV\_FRAME\_BODY\_FRD](https://mavlink.io/en/messages/common.html#MAV_FRAME_BODY_FRD) |
 | body\_roll\_rate | float | rad/s |  | Body roll rate |
 | body\_pitch\_rate | float | rad/s |  | Body pitch rate |
 | body\_yaw\_rate | float | rad/s |  | Body yaw rate |
 | thrust | float |  |  | Collective thrust, normalized to 0 .. 1 (-1 .. 1 for vehicles capable of reverse thrust) |
+| thrust\_body [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | float\[3\] |  |  | 3D thrust setpoint in the body NED frame, normalized to \-1 .. 1 |
 
-Current code uses `SET_ATTITUDE_TARGET (82)`
+# 
 
 # Vision Stream
 
@@ -155,6 +166,8 @@ uint64 sim\_time\_ns
 followed by: 
 
 payload\_size bytes of JPEG data
+
+Vision packets should be grouped by frame\_id, reassembled in ascending chunk\_id order, duplicate chunks ignored, and any frame with missing chunks or invalid JPEG data discarded in its entirety.
 
 ## Software-in-the-Loop Bridge
 
