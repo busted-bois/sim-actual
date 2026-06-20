@@ -1,81 +1,40 @@
-# AI Grand Prix autonomous drone pilot — connects to FlightSim.exe via MAVLink + FPV vision.
+#
+# Sample Python client for the AI GP controller
+#
 
-import argparse
-import sys
 import time
 
-from simulator.preflight import wait_for_race_go, wait_for_track
 from simulator.setup import setup_components
 
-MAVLINK_UDP_IP = "127.0.0.1"
-MAVLINK_UDP_PORT = 14550
+# Modify these properties if you want to run the server remotely for example
+SIM_SERVER_UDP_IP = "127.0.0.1"
+SIM_SERVER_UDP_PORT = 14550
 
+# time since sim started ms
+system_boot_ms = int(time.time() * 1000)
 
-def _parse_args():
-    parser = argparse.ArgumentParser(description="AI GP autonomous drone pilot")
-    parser.add_argument(
-        "--collision-reset",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "After collision hold, call reset_sim on high-threat hits "
-            "(default: off, or set AUTO_RESET_ON_COLLISION=1)"
-        ),
-    )
-    return parser.parse_args()
+# arbitrary shared data between the various components
+shared_data = {}
 
+# setup components
+components = setup_components(
+    shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT
+)
+controller = components["controller"]
+ts_loop = components["ts_loop"]
+mavlink_rx = components["mavlink_rx"]
+vision_rx = components["vision_rx"]
 
-def main():
-    args = _parse_args()
-    system_boot_ms = int(time.time() * 1000)
-    shared_data = {}
+print("Arming drone...", flush=True)
+controller.arm()
+print("Starting control loop...", flush=True)
+is_running = True
+while is_running:
+    controller.update()
 
-    components = setup_components(
-        shared_data,
-        system_boot_ms,
-        MAVLINK_UDP_IP,
-        MAVLINK_UDP_PORT,
-        auto_reset_on_collision=args.collision_reset,
-    )
-    controller = components["controller"]
-    ts_loop = components["ts_loop"]
-    mavlink_rx = components["mavlink_rx"]
-    vision_rx = components["vision_rx"]
-    local_tracker = shared_data.get("_local_tracker")
+# exit
+ts_loop.get_thread_for_join().join(timeout=1.0)
+mavlink_rx.get_thread_for_join().join(timeout=1.0)
+vision_rx.get_thread_for_join().join(timeout=1.0)
 
-    if controller.pilot.auto_reset_on_collision:
-        print("Collision auto-reset: ON", flush=True)
-    else:
-        print("Collision auto-reset: OFF", flush=True)
-
-    if not wait_for_track(shared_data):
-        sys.exit(1)
-
-    race = shared_data.get("race_status") or {}
-    armed_sim_boot_ms = race.get("sim_boot_time_ms", 0)
-
-    print("Arming drone...", flush=True)
-    controller.arm()
-
-    if not wait_for_race_go(shared_data, armed_sim_boot_ms=armed_sim_boot_ms):
-        sys.exit(1)
-
-    print("Starting control loop...", flush=True)
-    try:
-        while True:
-            controller.update()
-    except KeyboardInterrupt:
-        print("Shutting down...", flush=True)
-    finally:
-        controller.disarm()
-        if local_tracker is not None:
-            local_tracker.flush_log()
-        ts_loop.get_thread_for_join().join(timeout=1.0)
-        mavlink_rx.get_thread_for_join().join(timeout=1.0)
-        vision_rx.get_thread_for_join().join(timeout=1.0)
-
-    print("Client exited!", flush=True)
-
-
-if __name__ == "__main__":
-    main()
+print("Client exited!", flush=True)

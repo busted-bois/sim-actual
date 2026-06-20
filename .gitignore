@@ -8,8 +8,3 @@ _backup
 __pycache__/
 *.pyc
 .venv/
-
-# Local debug artifacts
-logs/
-.tmp_fc.b64
-*.b64

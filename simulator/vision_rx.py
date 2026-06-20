@@ -5,52 +5,33 @@ import threading
 import cv2
 import numpy as np
 
-from simulator.vision_processing import GateTargetFilter
-
+# Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
-MAX_INCOMPLETE_FRAMES = 32
-SOCKET_TIMEOUT_S = 0.5
 
 
 class VisionRX:
     def __init__(self, data):
         self.data = data
-        self._gate_filter = GateTargetFilter()
-        self.sock = None
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
 
     def get_thread_for_join(self):
         self.is_running = False
-        if self.sock is not None:
-            self.sock.close()
         return self.thread
-
-    def _prune_frames(self, frames):
-        if len(frames) <= MAX_INCOMPLETE_FRAMES:
-            return
-        oldest_id = min(frames)
-        del frames[oldest_id]
 
     def _vision_loop(self):
         header_format = "<IHHIIQ"
         header_sz = struct.calcsize(header_format)
-        frames = {}
+        frames = {}  # frame_id -> received associated frame data
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(SOCKET_TIMEOUT_S)
-        self.sock.bind((SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT))
-        print("Listening for camera frames...", flush=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind((SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT))
+        print("Listening for camera frames...")
 
         while self.is_running:
-            try:
-                packet, _addr = self.sock.recvfrom(65536)
-            except TimeoutError:
-                continue
-            except OSError:
-                break
+            packet, addr = sock.recvfrom(65536)  # max UDP size
 
             header = packet[:header_sz]
             payload = packet[header_sz:]
