@@ -36,6 +36,7 @@ uv.lock                 # Lockfile
 skills-lock.json        # Agent skills lockfile
 ```
 
+
 ## More Info
 
 See [SPEC.md](SPEC.md) for the flight implementation spec (architecture, interfaces, tuning, validation).
@@ -43,3 +44,8 @@ See [SPEC.md](SPEC.md) for the flight implementation spec (architecture, interfa
 See [Instructions.md](docs/Instructions.md) for full setup details, system requirements, competition timeline, and technical specifications.
 
 See [qualifier-playbook.md](docs/qualifier-playbook.md) for live-run troubleshooting and diagnostics.
+See [Instructions.md](Instructions.md) for full setup details, system requirements, competition timeline, and technical specifications.
+
+# Team Members
+- Ryan Yang, Ram Rao, Samyak Kakatur, Kunal Shrivastav, Trung Ngyuen, David Vayntrub, Yat Chun Wong, Sameer Faisal
+<img width="2203" height="959" alt="ANDURIL team pic" src="https://github.com/user-attachments/assets/e4d5c707-7f95-4caf-91de-04f9e5022625" />

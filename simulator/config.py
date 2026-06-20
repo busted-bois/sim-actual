@@ -1,8 +1,38 @@
+import colorsys
+import numpy as np
 from dataclasses import dataclass
 
 GATE_HEX_COLOR = "#F3390F"
 
-HSV_TOLERANCE = 15
+HSV_TOLERANCE = 40  # wider to handle shadow/shading on gate
+
+# Compute HSV bounds from hex color at import time
+_hex_rgb = tuple(
+    int(GATE_HEX_COLOR.lstrip("#")[i : i + 2], 16) / 255.0 for i in (0, 2, 4)
+)
+_hsv_norm = colorsys.rgb_to_hsv(*_hex_rgb)
+_h = int(_hsv_norm[0] * 179)  # Scale to OpenCV range [0, 179]
+_s = int(_hsv_norm[1] * 255)
+_v = int(_hsv_norm[2] * 255)
+
+HSV_LOWER = np.array(
+    [
+        [
+            max(0, _h - HSV_TOLERANCE),
+            max(0, _s - HSV_TOLERANCE),
+            max(0, _v - HSV_TOLERANCE),
+        ]
+    ]
+)
+HSV_UPPER = np.array(
+    [
+        [
+            min(179, _h + HSV_TOLERANCE),
+            min(255, _s + HSV_TOLERANCE),
+            min(255, _v + HSV_TOLERANCE),
+        ]
+    ]
+)
 
 MORPH_KERNEL_SIZE = 5
 MORPH_ITERS = 2

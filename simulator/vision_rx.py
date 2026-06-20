@@ -56,12 +56,17 @@ class VisionRX:
             header = packet[:header_sz]
             payload = packet[header_sz:]
 
-            frame_id, chunk_id, total_chunks, jpeg_size, _payload_size, sim_time_ns = (
+            # frame_id - identifier for this vision frame
+            # chunk_id - identifier for this chunk packet of data of this frame
+            # total_chunks - total number of chunk packets that make up this frame
+            # jpeg_size - full size of jpeg data
+            # payload_size - size of this packet
+            # sim_time_ns - frame's epoch timestamp in ns on the server
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
                 struct.unpack(header_format, header)
             )
 
             if frame_id not in frames:
-                self._prune_frames(frames)
                 frames[frame_id] = {
                     "chunks": {},
                     "total": total_chunks,
@@ -71,38 +76,109 @@ class VisionRX:
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
-            if len(frames[frame_id]["chunks"]) != total_chunks:
-                continue
+            # Check if frame is complete
+            if len(frames[frame_id]["chunks"]) == total_chunks:
+                jpeg_bytes = bytearray()
 
-            jpeg_bytes = bytearray()
-            frame_complete = True
-            for i in range(total_chunks):
-                if i not in frames[frame_id]["chunks"]:
-                    print(f"Missing packet {i} in frame {frame_id}", flush=True)
-                    frame_complete = False
-                    break
-                jpeg_bytes.extend(frames[frame_id]["chunks"][i])
+                frame_complete = True
+                for i in range(total_chunks):
+                    if i not in frames[frame_id]["chunks"]:
+                        print(
+                            "Missing packet %s in frame %s"
+                            % (
+                                i,
+                                frame_id,
+                            )
+                        )
+                        frame_complete = False
+                        continue
+                    jpeg_bytes.extend(frames[frame_id]["chunks"][i])
 
-            del frames[frame_id]
-            if not frame_complete:
-                continue
+                if not frame_complete:
+                    del frames[frame_id]
+                    continue
 
-            img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-            image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            if image is not None:
-                self.process_frame(frame_id, image, sim_time_ns)
-            else:
-                print(f"Failed to decode frame: {frame_id}", flush=True)
+                img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if image is not None:
+                    self.process_frame(frame_id, image, sim_time_ns)
+                else:
+                    print(f"Failed to decode frame: {frame_id}")
+
+                del frames[frame_id]
 
     def process_frame(self, frame_id, img, sim_time_ns=0):
-        height, width = img.shape[:2]
-        received_at = time.time()
+        try:
+            import time as _time
 
-        self.data["camera"] = {
-            "frame_id": frame_id,
-            "sim_time_ns": sim_time_ns,
-            "width": width,
-            "height": height,
-            "received_at": received_at,
-        }
-        self.data["gate_target"] = self._gate_filter.apply(detect_gate_target(img))
+            from simulator.gate_detector import detect_gate
+
+            h, w = img.shape[:2]
+
+            detection = detect_gate(img, frame_id, sim_time_ns)
+
+            self.data["camera"] = {"received_at": _time.monotonic()}
+            # Raw BGR frame for dataset generation (Module 2) / GateNet inference.
+            self.data["frame"] = {
+                "img": img,
+                "frame_id": frame_id,
+                "sim_time_ns": sim_time_ns,
+                "received_at": _time.monotonic(),
+            }
+
+            if detection is not None:
+                nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
+                ny = (detection.centroid_y_px - h / 2.0) / (h / 2.0)
+                r_frac = detection.area_px / (w * h)
+                self.data["gate_target"] = {
+                    "detected": True,
+                    "nx": nx,
+                    "ny": ny,
+                    "r_frac": r_frac,
+                }
+                print(
+                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
+                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
+                    flush=True,
+                )
+            else:
+                self.data["gate_target"] = {
+                    "detected": False,
+                    "nx": 0.0,
+                    "ny": 0.0,
+                    "r_frac": 0.0,
+                }
+
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+            obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
+            if detection is not None:
+                cv2.circle(
+                    obs_mask,
+                    (int(detection.centroid_x_px), int(detection.centroid_y_px)),
+                    int(max(detection.width_px, detection.height_px)),
+                    0,
+                    -1,
+                )
+            obs_contours, _ = cv2.findContours(
+                obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            obstacles = []
+            for oc in obs_contours:
+                oa = cv2.contourArea(oc)
+                if oa < 200:
+                    continue
+                om = cv2.moments(oc)
+                om00 = max(om["m00"], 1e-6)
+                ocx = om["m10"] / om00
+                ocy = om["m01"] / om00
+                onx = (ocx - w / 2.0) / (w / 2.0)
+                ony = (ocy - h / 2.0) / (h / 2.0)
+                orf = oa / (w * h)
+                obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
+            self.data["obstacles"] = obstacles
+        except Exception as e:
+            from simulator import config
+
+            if config.DEBUG:
+                print(f"[vision_rx] process_frame error: {e}")
