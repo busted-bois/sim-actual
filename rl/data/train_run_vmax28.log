@@ -1,0 +1,71 @@
+[ppo] BC warm-start: collecting expert demos ...
+[bc] epoch  0 mse=0.0046
+[bc] epoch  5 mse=0.0007
+[bc] epoch 10 mse=0.0005
+[bc] epoch 15 mse=0.0004
+[bc] epoch 19 mse=0.0003
+[ppo] BC warm-start applied (78633 samples)
+[bc] baseline stage 0 success=50% gates=50% reward=4.3
+[bc] baseline stage 1 success=30% gates=30% reward=-2.4
+[ppo] === stage 0 (1 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 0 success=100% gates=100% reward=62.3 lap=0.8s
+[diag] stage 0 max_step_progress=0.296m (cap=0.560m, binds 0.0% of steps) mean|action|=1.514 mean|omega|=2.903rad/s
+[ppo] === stage 1 (1 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 1 success=100% gates=100% reward=70.3 lap=0.9s
+[diag] stage 1 max_step_progress=0.424m (cap=0.560m, binds 0.0% of steps) mean|action|=1.586 mean|omega|=3.461rad/s
+[ppo] === stage 2 (2 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 2 success=85% gates=92% reward=87.5 lap=1.2s
+[diag] stage 2 max_step_progress=0.424m (cap=0.560m, binds 0.0% of steps) mean|action|=1.621 mean|omega|=3.712rad/s
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 3 success=5% gates=43% reward=187.2 lap=7.2s
+[ppo] stage 3 < threshold 80%; repeating
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 1) ===
+[ppo] stage 3 success=60% gates=78% reward=314.8 lap=4.2s
+[ppo] stage 3 < threshold 80%; repeating
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 2) ===
+[ppo] stage 3 success=70% gates=85% reward=333.0 lap=4.1s
+[ppo] stage 3 < threshold 80%; repeating
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 3) ===
+[ppo] stage 3 success=100% gates=100% reward=388.7 lap=4.2s
+[diag] stage 3 max_step_progress=0.583m (cap=0.560m, binds 0.0% of steps) mean|action|=1.538 mean|omega|=3.161rad/s
+[ppo] === stage 4 (4 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 4 success=0% gates=68% reward=408.7 lap=n/a
+[ppo] stage 4 < threshold 80%; repeating
+[ppo] === stage 4 (4 gates) x 300000 steps (attempt 1) ===
+[ppo] stage 4 success=55% gates=84% reward=482.3 lap=6.5s
+[ppo] stage 4 < threshold 80%; repeating
+[ppo] === stage 4 (4 gates) x 300000 steps (attempt 2) ===
+[ppo] stage 4 success=60% gates=80% reward=453.7 lap=5.8s
+[ppo] stage 4 < threshold 80%; repeating
+[ppo] === stage 4 (4 gates) x 300000 steps (attempt 3) ===
+[ppo] stage 4 success=95% gates=95% reward=539.3 lap=5.6s
+[diag] stage 4 max_step_progress=0.602m (cap=0.560m, binds 0.0% of steps) mean|action|=1.526 mean|omega|=2.971rad/s
+[ppo] === stage 5 (5 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 5 success=0% gates=60% reward=475.9 lap=n/a
+[ppo] stage 5 < threshold 80%; repeating
+[ppo] === stage 5 (5 gates) x 300000 steps (attempt 1) ===
+[ppo] stage 5 success=0% gates=54% reward=408.8 lap=n/a
+[ppo] stage 5 < threshold 80%; repeating
+[ppo] === stage 5 (5 gates) x 300000 steps (attempt 2) ===
+[ppo] stage 5 success=0% gates=75% reward=563.5 lap=n/a
+[ppo] stage 5 < threshold 80%; repeating
+[ppo] === stage 5 (5 gates) x 300000 steps (attempt 3) ===
+[ppo] stage 5 success=0% gates=70% reward=539.7 lap=n/a
+[ppo] WARNING: stage 5 stuck below 80% after 3 retries; advancing anyway
+[diag] stage 5 max_step_progress=0.649m (cap=0.560m, binds 0.3% of steps) mean|action|=1.550 mean|omega|=2.834rad/s
+[ppo] === stage 6 (6 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 6 success=0% gates=61% reward=543.1 lap=n/a
+[ppo] stage 6 < threshold 80%; repeating
+[ppo] === stage 6 (6 gates) x 300000 steps (attempt 1) ===
+[ppo] stage 6 success=0% gates=57% reward=518.7 lap=n/a
+[ppo] stage 6 < threshold 80%; repeating
+[ppo] === stage 6 (6 gates) x 300000 steps (attempt 2) ===
+[ppo] stage 6 success=10% gates=66% reward=568.9 lap=12.6s
+[ppo] stage 6 < threshold 80%; repeating
+[ppo] === stage 6 (6 gates) x 300000 steps (attempt 3) ===
+[ppo] stage 6 success=0% gates=53% reward=454.9 lap=n/a
+[ppo] WARNING: stage 6 stuck below 80% after 3 retries; advancing anyway
+[diag] stage 6 max_step_progress=0.685m (cap=0.560m, binds 2.0% of steps) mean|action|=1.624 mean|omega|=3.148rad/s
+[ppo] saved SB3 model -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy_ppo.zip
+[ppo] exported standalone policy -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy.pt
+[ppo] export parity max_abs_action_diff=0.00000

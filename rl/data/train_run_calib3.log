@@ -1,0 +1,39 @@
+[ppo] BC warm-start: collecting expert demos ...
+[bc] epoch  0 mse=0.0056
+[bc] epoch  5 mse=0.0012
+[bc] epoch 10 mse=0.0008
+[bc] epoch 15 mse=0.0005
+[bc] epoch 19 mse=0.0004
+[ppo] BC warm-start applied (90361 samples)
+[bc] baseline stage 0 success=55% gates=55% reward=21.0
+[bc] baseline stage 1 success=50% gates=50% reward=20.4
+[ppo] === stage 0 (1 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 0 success=100% gates=100% reward=56.0 lap=0.8s
+[diag] stage 0 max_step_progress=0.308m (cap=0.140m, binds 15.2% of steps) mean|action|=1.569 mean|omega|=3.674rad/s
+[ppo] === stage 1 (1 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 1 success=100% gates=100% reward=60.5 lap=0.8s
+[diag] stage 1 max_step_progress=0.389m (cap=0.140m, binds 50.6% of steps) mean|action|=1.675 mean|omega|=4.218rad/s
+[ppo] === stage 2 (2 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 2 success=100% gates=100% reward=85.1 lap=1.4s
+[diag] stage 2 max_step_progress=0.366m (cap=0.140m, binds 55.7% of steps) mean|action|=1.693 mean|omega|=4.524rad/s
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 3 success=10% gates=17% reward=66.3 lap=6.8s
+[ppo] stage 3 < threshold 80%; repeating
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 1) ===
+[ppo] stage 3 success=35% gates=67% reward=171.9 lap=6.4s
+[ppo] stage 3 < threshold 80%; repeating
+[ppo] === stage 3 (3 gates) x 300000 steps (attempt 2) ===
+[ppo] stage 3 success=100% gates=100% reward=297.7 lap=6.1s
+[diag] stage 3 max_step_progress=0.447m (cap=0.140m, binds 62.9% of steps) mean|action|=1.649 mean|omega|=4.199rad/s
+[ppo] === stage 4 (4 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 4 success=80% gates=89% reward=359.4 lap=11.7s
+[diag] stage 4 max_step_progress=0.434m (cap=0.140m, binds 54.8% of steps) mean|action|=1.645 mean|omega|=4.245rad/s
+[ppo] === stage 5 (5 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 5 success=90% gates=96% reward=483.7 lap=10.9s
+[diag] stage 5 max_step_progress=0.450m (cap=0.140m, binds 61.0% of steps) mean|action|=1.666 mean|omega|=4.428rad/s
+[ppo] === stage 6 (6 gates) x 300000 steps (attempt 0) ===
+[ppo] stage 6 success=95% gates=98% reward=567.6 lap=10.9s
+[diag] stage 6 max_step_progress=0.503m (cap=0.140m, binds 76.6% of steps) mean|action|=1.655 mean|omega|=4.278rad/s
+[ppo] saved SB3 model -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy_ppo.zip
+[ppo] exported standalone policy -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy.pt
+[ppo] export parity max_abs_action_diff=0.00000
