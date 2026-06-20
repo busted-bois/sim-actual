@@ -24,6 +24,24 @@ _HUE_MAX_UPPER = np.array([[[179, 255, 255]]])
 _HUE_MIN_LOWER = np.array([[[0, 0, 0]]])
 
 
+def build_gate_mask(img: np.ndarray) -> np.ndarray | None:
+    """HSV gate mask for PnP / VIO (morphology-cleaned, 0/255)."""
+    if img is None or img.ndim != 3 or img.shape[2] != 3:
+        return None
+
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    if _HSV_LOWER[0][0] > _HSV_UPPER[0][0]:
+        mask1 = cv2.inRange(hsv, _HSV_LOWER, _HUE_MAX_UPPER)
+        mask2 = cv2.inRange(hsv, _HUE_MIN_LOWER, _HSV_UPPER)
+        mask = cv2.bitwise_or(mask1, mask2)
+    else:
+        mask = cv2.inRange(hsv, _HSV_LOWER, _HSV_UPPER)
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _KERNEL, iterations=MORPH_ITERS)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL, iterations=MORPH_ITERS)
+    return mask
+
+
 def detect_gate(
     img: np.ndarray, frame_id: int, sim_time_ns: int
 ) -> GateDetection | None:
@@ -41,25 +59,11 @@ def detect_gate(
         GateDetection for the largest valid contour, or None when no gate
         contour passes the filters / input is empty.
     """
-    if img is None or img.ndim != 3 or img.shape[2] != 3:
+    mask = build_gate_mask(img)
+    if mask is None:
         return None
 
-    # 1. Convert to HSV colorspace.
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # 2. Build color mask, handling hue wraparound across the 0/179 boundary.
-    if _HSV_LOWER[0][0] > _HSV_UPPER[0][0]:
-        mask1 = cv2.inRange(hsv, _HSV_LOWER, _HUE_MAX_UPPER)
-        mask2 = cv2.inRange(hsv, _HUE_MIN_LOWER, _HSV_UPPER)
-        mask = cv2.bitwise_or(mask1, mask2)
-    else:
-        mask = cv2.inRange(hsv, _HSV_LOWER, _HSV_UPPER)
-
-    # 3. Morphological cleanup: OPEN removes speckle noise, CLOSE fills gaps.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _KERNEL, iterations=MORPH_ITERS)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL, iterations=MORPH_ITERS)
-
-    # 4. Extract external contours.
+    # Extract external contours.
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # 5. Filter by area and aspect ratio; score by area / distance-to-center.
