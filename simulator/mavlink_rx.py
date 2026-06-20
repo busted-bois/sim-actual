@@ -183,14 +183,18 @@ class MAVLinkRX:
             self.last_imu_time_us = msg.time_usec
             return
 
-        dt_s = max(1e-4, (msg.time_usec - self.last_imu_time_us) * 1e-6)
+        dt_s = (msg.time_usec - self.last_imu_time_us) * 1e-6
         self.last_imu_time_us = msg.time_usec
+        if dt_s <= 0 or dt_s > 0.5:
+            return
 
         pred = self.imu_predictor.predict(
             accel_body_mps2=(msg.xacc, msg.yacc, msg.zacc),
             gyro_body_rps=(msg.xgyro, msg.ygyro, msg.zgyro),
             dt_s=dt_s,
         )
+        if pred is None:
+            return
 
         self.data["imu_prediction"] = {
             "dt_s": pred.dt_s,

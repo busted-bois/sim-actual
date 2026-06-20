@@ -58,3 +58,4 @@ rl-test:
 	uv run -m rl.observation --selftest
 	uv run -m rl.env --selftest
 	uv run -m rl.deploy --selftest
+	uv run -m simulator.imu_kalman

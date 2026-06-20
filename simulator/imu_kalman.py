@@ -7,6 +7,7 @@ import numpy as np
 
 
 GRAVITY_NED_MPS2 = 9.81
+G_WORLD = np.array([0.0, 0.0, GRAVITY_NED_MPS2])
 
 
 @dataclass
@@ -52,7 +53,9 @@ class ImuKalmanPredictor:
         accel_body_mps2: tuple[float, float, float],
         gyro_body_rps: tuple[float, float, float],
         dt_s: float,
-    ) -> ImuPrediction:
+    ) -> ImuPrediction | None:
+        if dt_s <= 0 or dt_s > 0.5:
+            return None
         dt_s = max(1e-4, min(0.05, dt_s))
 
         # Integrate attitude from gyro.
@@ -72,9 +75,9 @@ class ImuKalmanPredictor:
         yaw = float(self._x[8, 0])
         rot_bn = _rotation_body_to_ned(roll, pitch, yaw)
 
-        # Body specific force -> NED acceleration; add gravity in +Down axis.
-        accel_ned = rot_bn @ np.array([[ax], [ay], [az]], dtype=float)
-        accel_ned[2, 0] += GRAVITY_NED_MPS2
+        # Body specific force -> NED acceleration (same convention as rl/ekf.py).
+        accel_body = np.array([[ax], [ay], [az]], dtype=float)
+        accel_ned = rot_bn @ accel_body + G_WORLD.reshape(3, 1)
 
         # Integrate velocity/position.
         self._x[3:6, 0:1] += accel_ned * dt_s
@@ -104,3 +107,25 @@ class ImuKalmanPredictor:
             ),
             covariance_trace=float(np.trace(self._P)),
         )
+
+
+def _selftest() -> None:
+    predictor = ImuKalmanPredictor()
+    dt_s = 0.01
+    hover_accel = (0.0, 0.0, -GRAVITY_NED_MPS2)
+    for _ in range(200):
+        pred = predictor.predict(hover_accel, (0.0, 0.0, 0.0), dt_s)
+        assert pred is not None
+
+    speed = math.sqrt(pred.vel_ned[0] ** 2 + pred.vel_ned[1] ** 2 + pred.vel_ned[2] ** 2)
+    assert speed < 0.5, f"hover drift too high: {speed:.2f} m/s"
+    assert pred.covariance_trace > 0.0
+    print(
+        f"[selftest] IMU hover vel={speed:.3f} m/s P_trace={pred.covariance_trace:.3f}",
+        flush=True,
+    )
+    print("[selftest] OK - IMU predictor integrates without runaway", flush=True)
+
+
+if __name__ == "__main__":
+    _selftest()
