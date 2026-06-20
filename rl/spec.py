@@ -64,15 +64,18 @@ GATE_CORNERS_LOCAL = np.array(
 # ----------------------------------------------------------------------------
 # Control / action space — attitude-rate + thrust.
 # ----------------------------------------------------------------------------
-MAX_ROLL_RATE = 4.0  # rad/s
-MAX_PITCH_RATE = 4.0
-MAX_YAW_RATE = 3.0
+# rad/s. The real sim AMPLIFIES rate commands ~2.7x (measured, rl.rate_id), so
+# these command ceilings x that gain land at a controllable ~4 rad/s of actual
+# body rate. Were 4/4/3, which became ~11 rad/s on the real sim and tumbled.
+MAX_ROLL_RATE = 1.6
+MAX_PITCH_RATE = 1.6
+MAX_YAW_RATE = 1.3
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
-# Hover thrust on the REAL sim. 0.27 is a validated closed-loop trim (fly2.py
-# HOVER_T=0.27 + altitude PID cleared all 6 gates); open-loop sysID leaves the
-# true value uncertain (~0.19-0.33). Training randomizes around it (rl.env).
-HOVER_THRUST = 0.27
+# Hover thrust on the REAL sim. 0.24 is the direct open-loop measurement
+# (rl.thrust_id: thrust 0.27 -> -0.63 m/s^2, thrust_accel ~42 m/s^2). fly2 trims
+# 0.27 closed-loop. Training randomizes around it (rl.env DR_HOVER_RANGE).
+HOVER_THRUST = 0.24
 
 # Policy emits 4 values in [-1, 1]; scale_action() maps to physical commands.
 ACTION_DIM = 4

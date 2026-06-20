@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo train-ppo-quick bc-check fly-policy rl-test
+.PHONY: i install check sim capture-gates fly hover dynamics rate-id thrust-id capture dataset train-gatenet train-ppo train-ppo-quick bc-check sign-check fly-policy rl-test
 
 i install:
 	uv sync
@@ -28,6 +28,14 @@ hover:
 dynamics:
 	uv run -m rl.dynamics_id
 
+# Measure command-rate -> actual-body-rate mapping (for RL env calibration).
+rate-id:
+	uv run -m rl.rate_id
+
+# Measure thrust -> vertical-accel mapping (for RL env translation calibration).
+thrust-id:
+	uv run -m rl.thrust_id
+
 # --- RL pipeline (Modules 1-8) ------------------------------------------------
 # Module 1: connect to live sim, dump telemetry snapshot + gate map.
 capture:
@@ -56,7 +64,11 @@ train-ppo-quick:
 bc-check:
 	uv run -m rl.train_ppo --bc-only
 
-# Module 8: fly the trained policy on the live sim.
+# Module 8: fly the trained policy on the live sim. Run sign-check FIRST on a
+# fresh sim session to confirm roll/yaw signs (a flipped sign crashes flight 1).
+sign-check:
+	uv run -m rl.deploy --sign-check
+
 fly-policy:
 	uv run -m rl.deploy
 

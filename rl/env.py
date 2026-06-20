@@ -31,7 +31,17 @@ from rl.observation import build_observation
 MASS = 1.0
 THRUST_ACCEL = spec.GRAVITY / spec.HOVER_THRUST  # nominal ~36; expert (control.py) uses this
 RATE_TAU = 0.05  # body-rate first-order lag (s)
-DRAG = 0.1
+# The real sim amplifies a rate command into ~2.7x the body rate (measured,
+# rl.rate_id: cmd 0.3 -> ~0.76 rad/s, and hotter at higher cmd). Modeling this is
+# what lets the policy transfer -- without it the policy commanded rates the real
+# sim turned into an ~11 rad/s tumble.
+RATE_GAIN = 2.7
+SPEED_CAP = 9.0  # m/s hard plant cap: forces the policy to learn gentle, slow,
+# precise flight so it arrives at gates level (was clipping gates at ~20 m/s)
+# Linear velocity drag. The real sim cruised at a STEADY ~37 m/s under sustained
+# thrust (rl.deploy), i.e. far more drag at speed than the old 0.1 (which let the
+# model run to ~180 m/s). Nominal raised and DR widened to cover the real regime.
+DRAG = 0.4
 SIM_DT = 1 / 100.0
 DECISION_HZ = 50
 SUBSTEPS = int((1 / DECISION_HZ) / SIM_DT)
@@ -40,7 +50,8 @@ SUBSTEPS = int((1 / DECISION_HZ) / SIM_DT)
 # cover the open-loop measurement uncertainty (hover 0.19-0.33 -> accel ~30-52).
 DR_HOVER_RANGE = (0.19, 0.33)
 DR_RATE_TAU_RANGE = (0.04, 0.08)
-DR_DRAG_RANGE = (0.05, 0.15)
+DR_RATE_GAIN_RANGE = (2.2, 3.4)  # cmd->body-rate amplification (real ~2.5-3.0)
+DR_DRAG_RANGE = (0.15, 1.0)  # wide: real sim has high drag (~37 m/s terminal)
 DR_LATENCY_PROB = 0.5  # chance an episode applies a 1-step action latency
 
 # Perception-noise bands — privileged-obs training proxy for GateNet->PnP->EKF.
@@ -56,12 +67,20 @@ G_WORLD = np.array([0.0, 0.0, spec.GRAVITY])
 # THIS env's reward magnitudes (per-step shaping is O(0.01-0.6); gate events are
 # O(10-30)) and to our attitude-rate+thrust action space -- NOT the paper's raw
 # 5-motor-PWM Table 1 values. Retune against the real table when available.
-V_MAX = 15.0  # m/s; caps single-step progress reward (~0.3 m/step at 50 Hz)
+# m/s; caps single-step progress reward, which also regularizes cruise speed.
+# Lowered to 7: on the real sim it threaded gate centers but arrived too TILTED
+# and clipped the frame; slower + more level = cleaner passes. History: 15->10
+# tamed a 37 m/s overshoot; 28 collapsed completion 95%->0% (train_run_vmax28).
+V_MAX = 7.0
 DECISION_DT = 1.0 / DECISION_HZ
 PERC_ANGLE_THRESH = np.pi / 3.0  # 60deg: target-gate-off-axis penalty turns on
 LAMBDA_PERC = 0.05  # x theta_cam (rad, 1.05..pi) -> 0.05..0.16 when triggered
-LAMBDA_RATE = 5e-4  # x ||omega||^2 (omega rad/s, up to ~41) -> <=0.02
-LAMBDA_DRATE = 0.02  # x sum max(|du_i|-deadband, 0) over the 4 action dims
+LAMBDA_RATE = 1e-3  # x ||omega||^2; penalize spinning harder (cleaner attitude)
+LAMBDA_DRATE = 0.08  # x sum max(|du_i|-deadband, 0); stronger anti-bang-bang
+# (bang-bang rate commands tumble the real sim, which amplifies rates ~2.7x)
+LAMBDA_TILT = 0.4  # x max(0, TILT_OK - gravity_body_z): keep the drone LEVEL so it
+TILT_OK = 0.87  # threads gates flat. 0.87 ~ 30deg (was 0.5/~60deg, too permissive --
+# it still clipped gates tilted ~45-60deg, under the old threshold).
 DRATE_THRESH = 0.05  # per-dim normalized-action change allowed free per step
 
 # Camera optical axis (cam +z) in the body frame, for the gate-in-view penalty.
@@ -179,11 +198,13 @@ class GateRacingEnv(gym.Env):
             hover = self.np_random.uniform(lo, hi)
             self.thrust_accel = spec.GRAVITY / hover
             self.rate_tau = self.np_random.uniform(*DR_RATE_TAU_RANGE)
+            self.rate_gain = self.np_random.uniform(*DR_RATE_GAIN_RANGE)
             self.drag = self.np_random.uniform(*DR_DRAG_RANGE)
             self.latency = self.np_random.uniform() < DR_LATENCY_PROB
         else:
             self.thrust_accel = THRUST_ACCEL
             self.rate_tau = RATE_TAU
+            self.rate_gain = RATE_GAIN
             self.drag = DRAG
             self.latency = False
         self._delayed_action = np.zeros(4)
@@ -304,7 +325,11 @@ class GateRacingEnv(gym.Env):
         omega_cmd = np.array([roll_r, pitch_r, yaw_r])
 
         for _ in range(SUBSTEPS):
-            self.omega += (omega_cmd - self.omega) * (SIM_DT / self.rate_tau)
+            # Real sim amplifies the rate command ~2.7x (rl.rate_id); body rate
+            # relaxes toward rate_gain*command with a first-order lag.
+            self.omega += (
+                self.rate_gain * omega_cmd - self.omega
+            ) * (SIM_DT / self.rate_tau)
             self.q = _quat_norm(
                 _quat_mult(self.q, np.array([1.0, *(0.5 * self.omega * SIM_DT)]))
             )
@@ -313,6 +338,12 @@ class GateRacingEnv(gym.Env):
             f_body = np.array([0.0, 0.0, -self.thrust_accel * thrust])
             a = R @ f_body + G_WORLD - self.drag * self.v
             self.v += a * SIM_DT
+            # Hard speed cap: aggressive tilt/thrust buys NO extra speed past
+            # SPEED_CAP, so the policy learns gentle commands -> which stay slow on
+            # the real sim too (it was arriving at gates at ~20 m/s and clipping).
+            sp = float(np.linalg.norm(self.v))
+            if sp > SPEED_CAP:
+                self.v *= SPEED_CAP / sp
             self.p += self.v * SIM_DT
 
         self.steps += 1
@@ -363,6 +394,13 @@ class GateRacingEnv(gym.Env):
 
         # Body-rate magnitude penalty (MonoRace p_rate, ||Omega||^2).
         rew -= LAMBDA_RATE * float(self.omega @ self.omega)
+
+        # Extreme-tilt penalty: gravity_body_z = 1 upright, 0 at 90deg. Only bites
+        # past ~60deg, so normal racing bank is free but near-sideways is punished
+        # (it clipped a gate arriving rolled ~90deg).
+        gb_z = float((spec.quat_to_R(self.q).T @ np.array([0.0, 0, 1.0]))[2])
+        if gb_z < TILT_OK:
+            rew -= LAMBDA_TILT * (TILT_OK - gb_z)
 
         # Action smoothness (anti bang-bang). Our 4-D attitude-rate+thrust action
         # stands in for MonoRace's 5 motor PWMs; jerky rate commands are the same
