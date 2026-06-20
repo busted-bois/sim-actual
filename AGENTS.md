@@ -24,4 +24,3 @@
 - Makefile is the centralized calling file with scripts, NOT pyproject.toml. If needed, install it in powershell with `choco install make`. On MacOS / Linux, it should automatically work by default.
 - Before commiting any files, use the deslop skill to verify the changes and ensure we aren't going overboard.
 - All simulator code logic should be written within the simulator/ directory, and then called from main.py. The main.py should not have command-line arguments for new functionality. The new functionality added should work with the default settings, just from running `make sim` (`uv run sim`).
-- Exception: `--collision-reset` (and `AUTO_RESET_ON_COLLISION=1` / `make sim COLLISION_RESET=1`) is the only allowed CLI flag — pre-existing opt-in for sim collision recovery.
