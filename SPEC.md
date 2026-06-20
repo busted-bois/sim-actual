@@ -9,8 +9,7 @@ The AI controller has access to:
 * Pressure measurements  
 * Temperature measurements  
 * Heartbeat status  
-* Timing synchronization  
-* `ENCAPSULATED_DATA`
+* Timing synchronization
 
 The AI controller does NOT have access to:
 
@@ -81,15 +80,6 @@ Time synchronization message. The message is used for both timesync requests and
 | ts1 | int64\_t | ns | Time sync timestamp 2\. Timestamp of syncing component (mirrored in response). |
 | target\_system [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | uint8\_t |  | Target system id. Request: 0 (broadcast) or id of specific system. Response must contain system id of the requesting component. |
 | target\_component [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | uint8\_t |  | Target component id. Request: 0 (broadcast) or id of specific component. Response must contain component id of the requesting component. |
-
-**ENCAPSULATED DATA (131)**
-
-Data packet for images sent using the Image Transmission Protocol: [https://mavlink.io/en/services/image\_transmission.html](https://mavlink.io/en/services/image_transmission.html).
-
-| Field Name | Type | Description |
-| :---- | :---- | :---- |
-| seqnr | uint16\_t | sequence number (starting with 0 on every transmission) |
-| data | uint8\_t\[253\] | image data bytes |
 
 MAVLink output message from the **client to simulator:**  
 **5\. SET\_POSITION\_TARGET\_LOCAL\_NED (84)**
