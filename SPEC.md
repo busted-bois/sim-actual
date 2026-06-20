@@ -105,7 +105,7 @@ Sets a desired vehicle position in a local north-east-down coordinate frame. Use
 | yaw | float | rad |  | yaw setpoint |
 | yaw\_rate | float | rad/s |  | yaw rate setpoint |
 
-**6\. SET\_ATTITUDE\_TARGET (83)**
+**6\. SET\_ATTITUDE\_TARGET (82)**
 
 Sets a desired vehicle attitude. Used by an external controller to command the vehicle (manual controller or other system).
 
@@ -121,8 +121,6 @@ Sets a desired vehicle attitude. Used by an external controller to command the v
 | body\_yaw\_rate | float | rad/s |  | Body yaw rate |
 | thrust | float |  |  | Collective thrust, normalized to 0 .. 1 (-1 .. 1 for vehicles capable of reverse thrust) |
 | thrust\_body [\++](https://mavlink.io/en/messages/common.html#mav2_extension_field) | float\[3\] |  |  | 3D thrust setpoint in the body NED frame, normalized to \-1 .. 1 |
-
-# 
 
 # Vision Stream
 
@@ -189,10 +187,8 @@ Axis definitions:
 
 **Body to Camera:**
 
-The camera and the body frame have the same origin. The camera is tilted upwards by 20° upwards. Be aware that all coordinates are NED and you might need to rotate the camera frame into the camera coordinate convention of your specific image processing library.
+The camera and the body frame have the same origin. The camera is tilted upwards by 20°. Be aware that all coordinates are NED and you might need to rotate the camera frame into the camera coordinate convention of your specific image processing library.
 
 **Body to IMU:**
 
 The body to imu transformation is the identity map.			
-
-			
