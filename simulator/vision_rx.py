@@ -11,9 +11,10 @@ SIM_SERVER_UDP_PORT = 5600
 
 
 class VisionRX:
-    def __init__(self, data, vio=None):
+    def __init__(self, data, vio=None, gate_tracker=None):
         self.data = data
         self.vio = vio
+        self.gate_tracker = gate_tracker
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -117,10 +118,16 @@ class VisionRX:
                     "nx": nx,
                     "ny": ny,
                     "r_frac": r_frac,
+                    "quality": detection.quality,
+                    "reproj_err_px": detection.reproj_err_px,
+                    "width_px": detection.width_px,
+                    "height_px": detection.height_px,
+                    "corners_px": detection.corners_px,
                 }
                 print(
                     f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
+                    f"area={detection.area_px:.0f} q={detection.quality:.2f} "
+                    f"nx={nx:+.3f} ny={ny:+.3f}",
                     flush=True,
                 )
             else:
@@ -129,7 +136,21 @@ class VisionRX:
                     "nx": 0.0,
                     "ny": 0.0,
                     "r_frac": 0.0,
+                    "quality": 0.0,
                 }
+
+            if self.gate_tracker is not None:
+                updated = self.gate_tracker.process_detection(
+                    detection, frame_id, sim_time_ns
+                )
+                if updated:
+                    gt = self.data.get("gate_track", {})
+                    print(
+                        f"[gate] pos={gt.get('pos_ned')} "
+                        f"q={gt.get('quality', 0):.2f} "
+                        f"P={gt.get('P_trace', 0):.2f}",
+                        flush=True,
+                    )
 
             if self.vio is not None and gate_mask is not None:
                 updated = self.vio.update_from_gate_mask(
