@@ -6,18 +6,21 @@ the drone can navigate without GPS.
 """
 from __future__ import annotations
 
+import math
 import time as _time
 
 import numpy as np
 
 from rl.ekf import ESKF
-from rl.pnp import pose_from_mask
+from rl.pnp import estimate_pose, pose_from_mask
+from simulator.config import GateDetection
 
 BASE_VISION_SIGMA_M = 0.15
 MAX_REPROJ_ERR_PX = 15.0
 MAX_SEED_HORIZ_M = 500.0
 MAX_SEED_ALT_M = 80.0
 MAX_GATE_TRACK_DELTA_M = 15.0
+MIN_VISION_QUALITY = 0.15
 
 
 class VisualInertialOdometry:
@@ -37,24 +40,71 @@ class VisualInertialOdometry:
         """One-time bootstrap from sim odometry (not used for ongoing correction)."""
         if self._seeded_from_telemetry:
             return
-        odo = self.data.get("odometry")
-        if not odo or not self._odometry_sane(odo):
+        telem = self._read_telemetry()
+        if telem is None:
             return
-        self.ekf.p = np.array([odo["x"], odo["y"], odo["z"]], dtype=float)
-        self.ekf.v = np.array([odo["vx"], odo["vy"], odo["vz"]], dtype=float)
-        self.ekf.q = np.array(
-            [odo["qw"], odo["qx"], odo["qy"], odo["qz"]], dtype=float
-        )
+        p, v, q = telem
+        self.ekf.p = p
+        self.ekf.v = v
+        self.ekf.q = q
         self._initialized = True
         self._seeded_from_telemetry = True
         self._publish_state(vision_valid=False)
 
+    def _read_telemetry(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        odo = self.data.get("odometry")
+        if odo and self._odometry_sane(odo):
+            p = np.array([odo["x"], odo["y"], odo["z"]], dtype=float)
+            v = np.array([odo["vx"], odo["vy"], odo["vz"]], dtype=float)
+            q = np.array([odo["qw"], odo["qx"], odo["qy"], odo["qz"]], dtype=float)
+            return p, v, q
+
+        pos_ned = self.data.get("pos_ned")
+        if not pos_ned or not self.data.get("has_position"):
+            return None
+        p = np.asarray(pos_ned, dtype=float)
+        if not self._position_sane(p):
+            return None
+        vel = self.data.get("vel_ned") or (0.0, 0.0, 0.0)
+        v = np.asarray(vel, dtype=float)
+        return p, v, self._quat_from_data()
+
+    @staticmethod
+    def _position_sane(p: np.ndarray) -> bool:
+        if abs(float(p[2])) > MAX_SEED_ALT_M:
+            return False
+        return float(np.linalg.norm(p)) <= MAX_SEED_HORIZ_M
+
+    def _quat_from_data(self) -> np.ndarray:
+        odo = self.data.get("odometry")
+        if odo and "qw" in odo:
+            return np.array([odo["qw"], odo["qx"], odo["qy"], odo["qz"]], dtype=float)
+
+        att = self.data.get("attitude")
+        if att:
+            roll, pitch, yaw = att["roll"], att["pitch"], att["yaw"]
+            cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+            cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+            cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+            return np.array(
+                [
+                    cr * cp * cy + sr * sp * sy,
+                    sr * cp * cy - cr * sp * sy,
+                    cr * sp * cy + sr * cp * sy,
+                    cr * cp * sy - sr * sp * cy,
+                ],
+                dtype=float,
+            )
+
+        yaw = float(self.data.get("yaw_rad", 0.0))
+        half = yaw * 0.5
+        return np.array([math.cos(half), 0.0, 0.0, math.sin(half)], dtype=float)
+
     @staticmethod
     def _odometry_sane(odo: dict) -> bool:
-        x, y, z = float(odo["x"]), float(odo["y"]), float(odo["z"])
-        if abs(z) > MAX_SEED_ALT_M:
-            return False
-        return (x * x + y * y + z * z) ** 0.5 <= MAX_SEED_HORIZ_M
+        return VisualInertialOdometry._position_sane(
+            np.array([odo["x"], odo["y"], odo["z"]], dtype=float)
+        )
 
     def predict_imu(self, imu: dict) -> None:
         """High-rate IMU prediction step (Kalman predict)."""
@@ -78,6 +128,41 @@ class VisualInertialOdometry:
         if self._seeded_from_telemetry:
             self._publish_state(vision_valid=False)
 
+    def update_from_gate_detection(
+        self,
+        detection: GateDetection,
+        frame_id: int,
+        sim_time_ns: int,
+    ) -> bool:
+        """Vision update from detector corners (same PnP path as gate tracker)."""
+        self.try_seed_from_telemetry()
+        if not self._seeded_from_telemetry:
+            return False
+        if detection.corners_px is None or len(detection.corners_px) < 4:
+            return False
+        if detection.reproj_err_px is None:
+            return False
+        if detection.quality < MIN_VISION_QUALITY:
+            return False
+
+        gate = self._gate_world_for_pnp()
+        if gate is None:
+            return False
+
+        gate_pos, _gate_quat = gate
+        corners = np.asarray(detection.corners_px, dtype=float)
+        pose = estimate_pose(
+            corners,
+            drone_quat=self.ekf.q,
+            gate_world_pos=gate_pos,
+        )
+        return self._apply_vision_pose(
+            pose,
+            frame_id,
+            sim_time_ns,
+            float(detection.reproj_err_px),
+        )
+
     def update_from_gate_mask(
         self,
         mask: np.ndarray,
@@ -85,6 +170,7 @@ class VisualInertialOdometry:
         sim_time_ns: int,
     ) -> bool:
         """Vision update from a gate segmentation mask (Kalman correct)."""
+        self.try_seed_from_telemetry()
         if not self._seeded_from_telemetry:
             return False
 
@@ -100,8 +186,22 @@ class VisualInertialOdometry:
         )
         if pose is None:
             return False
+        return self._apply_vision_pose(
+            pose,
+            frame_id,
+            sim_time_ns,
+            float(pose.get("reproj_err_px", 99.0)),
+        )
 
-        reproj_err = float(pose.get("reproj_err_px", 99.0))
+    def _apply_vision_pose(
+        self,
+        pose: dict | None,
+        frame_id: int,
+        sim_time_ns: int,
+        reproj_err: float,
+    ) -> bool:
+        if pose is None or "drone_pos_world" not in pose:
+            return False
         if reproj_err > MAX_REPROJ_ERR_PX:
             return False
 

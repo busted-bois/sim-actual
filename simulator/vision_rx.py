@@ -152,10 +152,16 @@ class VisionRX:
                         flush=True,
                     )
 
-            if self.vio is not None and gate_mask is not None:
-                updated = self.vio.update_from_gate_mask(
-                    gate_mask, frame_id, sim_time_ns
-                )
+            if self.vio is not None:
+                updated = False
+                if detection is not None:
+                    updated = self.vio.update_from_gate_detection(
+                        detection, frame_id, sim_time_ns
+                    )
+                if not updated and gate_mask is not None:
+                    updated = self.vio.update_from_gate_mask(
+                        gate_mask, frame_id, sim_time_ns
+                    )
                 if updated:
                     vio = self.data.get("vio", {})
                     print(
