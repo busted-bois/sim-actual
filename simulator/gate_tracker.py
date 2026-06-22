@@ -92,6 +92,11 @@ class GateTracker:
             self._publish(detected=False, quality=0.0, frame_id=frame_id)
             return False
 
+        if not self.kf.initialized:
+            self._misses += 1
+            self._publish(detected=True, quality=detection.quality, frame_id=frame_id)
+            return False
+
         if detection.corners_px is None or len(detection.corners_px) < 4:
             self._misses += 1
             self._publish(detected=False, quality=detection.quality, frame_id=frame_id)
@@ -114,6 +119,12 @@ class GateTracker:
         ref_pos = self._active_track_gate_pos()
         if ref_pos is not None:
             jump = float(np.linalg.norm(meas["pos_ned"] - ref_pos))
+            if jump > MAX_MEASUREMENT_JUMP_M:
+                self._misses += 1
+                self._publish(detected=True, quality=detection.quality, frame_id=frame_id)
+                return False
+        else:
+            jump = float(np.linalg.norm(meas["pos_ned"] - self.kf.p))
             if jump > MAX_MEASUREMENT_JUMP_M:
                 self._misses += 1
                 self._publish(detected=True, quality=detection.quality, frame_id=frame_id)

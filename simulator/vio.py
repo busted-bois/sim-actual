@@ -153,7 +153,7 @@ class VisualInertialOdometry:
         corners = np.asarray(detection.corners_px, dtype=float)
         pose = estimate_pose(
             corners,
-            drone_quat=self.ekf.q,
+            drone_quat=self._drone_quat_for_pnp(),
             gate_world_pos=gate_pos,
         )
         return self._apply_vision_pose(
@@ -181,7 +181,7 @@ class VisualInertialOdometry:
         gate_pos, _gate_quat = gate
         pose = pose_from_mask(
             mask,
-            drone_quat=self.ekf.q,
+            drone_quat=self._drone_quat_for_pnp(),
             gate_world_pos=gate_pos,
         )
         if pose is None:
@@ -205,8 +205,14 @@ class VisualInertialOdometry:
         if reproj_err > MAX_REPROJ_ERR_PX:
             return False
 
+        p_vis = np.asarray(pose["drone_pos_world"], float)
+        telem = self._read_telemetry()
+        if telem is not None:
+            if float(np.linalg.norm(p_vis - telem[0])) > MAX_GATE_TRACK_DELTA_M:
+                return False
+
         sigma = BASE_VISION_SIGMA_M * (1.0 + reproj_err / 5.0)
-        self.ekf.update_position(np.asarray(pose["drone_pos_world"], float), sigma=sigma)
+        self.ekf.update_position(p_vis, sigma=sigma)
         self._initialized = True
         self._last_vision_mono = _time.monotonic()
         self._last_reproj_err_px = reproj_err
@@ -220,18 +226,27 @@ class VisualInertialOdometry:
         )
         return True
 
+    def _drone_quat_for_pnp(self) -> np.ndarray:
+        """Use live telemetry attitude for PnP, not IMU-propagated quaternion."""
+        return self._quat_from_data()
+
     def _gate_world_for_pnp(self) -> tuple[np.ndarray, np.ndarray] | None:
         track = self._active_gate_world()
-        if track is None:
-            return None
+        if track is not None:
+            track_pos, track_quat = track
+            gt = self.data.get("gate_track")
+            if gt and gt.get("initialized"):
+                gt_pos = np.asarray(gt["pos_ned"], dtype=float)
+                if np.linalg.norm(gt_pos - track_pos) <= MAX_GATE_TRACK_DELTA_M:
+                    return gt_pos, np.asarray(gt["quat"], dtype=float)
+            return track_pos, track_quat
 
-        track_pos, track_quat = track
         gt = self.data.get("gate_track")
         if gt and gt.get("initialized"):
-            gt_pos = np.asarray(gt["pos_ned"], dtype=float)
-            if np.linalg.norm(gt_pos - track_pos) <= MAX_GATE_TRACK_DELTA_M:
-                return gt_pos, np.asarray(gt["quat"], dtype=float)
-        return track_pos, track_quat
+            return np.asarray(gt["pos_ned"], dtype=float), np.asarray(
+                gt["quat"], dtype=float
+            )
+        return None
 
     def _active_gate_world(self) -> tuple[np.ndarray, np.ndarray] | None:
         track_gates = self.data.get("track_gates") or []
