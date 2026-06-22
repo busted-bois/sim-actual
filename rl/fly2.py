@@ -30,13 +30,13 @@ from simulator.transforms import quat_to_yaw
 HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
 K_ATT = 0.6  # attitude-angle P -> rate command
-K_YAW = 0.4
+K_YAW = 0.6  # was 0.4 — rotate onto next gate's heading quicker
 # Measured command-sign conventions (pitch normal; roll + yaw inverted).
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
 RATE_CLIP = 0.30
-YAW_CLIP = 0.5
+YAW_CLIP = 0.8  # was 0.5 — allow faster yaw to cut turn time between gates
 HZ = 150.0
 
 
@@ -67,7 +67,7 @@ def main():
         default=-1.0,
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
-    ap.add_argument("--klat", type=float, default=0.07, help="cross-track roll gain")  # was 0.04
+    ap.add_argument("--klat", type=float, default=0.11, help="cross-track roll gain")  # was 0.04
     ap.add_argument(
         "--no-wait",
         dest="wait",
@@ -138,10 +138,10 @@ def main():
             speed = float(np.linalg.norm(v[:2]))
             # Signed lateral (cross-track) offset from the line to the gate, body-right.
             e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-            align = max(0.0, 1.0 - abs(yaw_err) / 0.4)
+            align = max(0.0, 1.0 - abs(yaw_err) / 0.5)  # wider: don't kill speed for small heading errors
             # Slow down when off the gate line so there is time to thread the center:
             # stays fast on straight shots, eases off on turning/offset gates.
-            lat_align = max(0.3, 1.0 - abs(e_cross) / 3.0)
+            lat_align = max(0.3, 1.0 - abs(e_cross) / 2.5)  # slow sooner when off-line (was /3.0)
             # Reach full speed by ~5m out, but only when well-lined-up (lat_align).
             v_des = args.speed * align * lat_align * min(1.0, 0.4 + dist / 6.0)
             # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
