@@ -12,6 +12,9 @@ from simulator.config import (
     GateDetection,
 )
 from simulator.transforms import hex_to_hsv_lower_upper
+from rl.pnp import detect_corners, estimate_pose
+
+MAX_REPROJ_ERR_PX = 15.0
 
 # Compute HSV bounds and morphology kernel once at import time.
 _HSV_LOWER, _HSV_UPPER = hex_to_hsv_lower_upper(GATE_HEX_COLOR, HSV_TOLERANCE)
@@ -105,6 +108,24 @@ def detect_gate(
     _, _, w, h = cv2.boundingRect(best_contour)
     best_area = cv2.contourArea(best_contour)
 
+    corners_px = None
+    reproj_err_px = None
+    quality = 0.0
+
+    contour_mask = np.zeros_like(mask)
+    cv2.drawContours(contour_mask, [best_contour], -1, 255, -1)
+    corners = detect_corners(contour_mask)
+    if corners is not None:
+        corners_px = tuple((float(x), float(y)) for x, y in corners.reshape(4, 2))
+        pose = estimate_pose(corners)
+        if pose is not None:
+            reproj_err_px = float(pose["reproj_err_px"])
+            quality = max(0.0, 1.0 - reproj_err_px / MAX_REPROJ_ERR_PX)
+            aspect = w / max(h, 1)
+            area_frac = best_area / max(img_h * img_w, 1)
+            if MIN_ASPECT_RATIO <= aspect <= MAX_ASPECT_RATIO and area_frac < 0.15:
+                quality = min(1.0, quality * (0.5 + 0.5 * min(area_frac / 0.08, 1.0)))
+
     return GateDetection(
         frame_id=frame_id,
         sim_time_ns=sim_time_ns,
@@ -114,4 +135,7 @@ def detect_gate(
         width_px=float(w),
         height_px=float(h),
         contour_valid=True,
+        corners_px=corners_px,
+        reproj_err_px=reproj_err_px,
+        quality=quality,
     )

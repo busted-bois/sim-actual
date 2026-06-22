@@ -1,6 +1,7 @@
 from pymavlink import mavutil
 
 from simulator.controller import Controller
+from simulator.gate_tracker import GateTracker
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.timesync import TimeSync
 from simulator.vio import VisualInertialOdometry
@@ -25,7 +26,10 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
 
     vio = VisualInertialOdometry(shared_data)
     shared_data["vio_processor"] = vio
-    print("[setup] VIO enabled (IMU EKF predict + gate PnP update)", flush=True)
+    gate_tracker = GateTracker(shared_data)
+    shared_data["gate_tracker"] = gate_tracker
+    print("[setup] VIO enabled (drone: IMU + camera)", flush=True)
+    print("[setup] Gate tracker enabled (gate KF + detector)", flush=True)
 
     # -------------------------------
     # Setup Mavlink msg receiver
@@ -42,7 +46,7 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Connect Vision receiver
     # -------------------------------
-    vision_rx = VisionRX(shared_data, vio=vio)
+    vision_rx = VisionRX(shared_data, vio=vio, gate_tracker=gate_tracker)
 
     # -------------------------------
     # Main control loop
@@ -56,4 +60,5 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
         "sim_conn": sim_conn,
         "controller": controller,
         "vio": vio,
+        "gate_tracker": gate_tracker,
     }

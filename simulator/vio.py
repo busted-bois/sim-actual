@@ -15,6 +15,9 @@ from rl.pnp import pose_from_mask
 
 BASE_VISION_SIGMA_M = 0.15
 MAX_REPROJ_ERR_PX = 15.0
+MAX_SEED_HORIZ_M = 500.0
+MAX_SEED_ALT_M = 80.0
+MAX_GATE_TRACK_DELTA_M = 15.0
 
 
 class VisualInertialOdometry:
@@ -35,7 +38,7 @@ class VisualInertialOdometry:
         if self._seeded_from_telemetry:
             return
         odo = self.data.get("odometry")
-        if not odo:
+        if not odo or not self._odometry_sane(odo):
             return
         self.ekf.p = np.array([odo["x"], odo["y"], odo["z"]], dtype=float)
         self.ekf.v = np.array([odo["vx"], odo["vy"], odo["vz"]], dtype=float)
@@ -45,6 +48,13 @@ class VisualInertialOdometry:
         self._initialized = True
         self._seeded_from_telemetry = True
         self._publish_state(vision_valid=False)
+
+    @staticmethod
+    def _odometry_sane(odo: dict) -> bool:
+        x, y, z = float(odo["x"]), float(odo["y"]), float(odo["z"])
+        if abs(z) > MAX_SEED_ALT_M:
+            return False
+        return (x * x + y * y + z * z) ** 0.5 <= MAX_SEED_HORIZ_M
 
     def predict_imu(self, imu: dict) -> None:
         """High-rate IMU prediction step (Kalman predict)."""
@@ -65,9 +75,8 @@ class VisualInertialOdometry:
         accel = np.array([imu["ax"], imu["ay"], imu["az"]], dtype=float)
         gyro = np.array([imu["gx"], imu["gy"], imu["gz"]], dtype=float)
         self.ekf.predict(accel, gyro, dt_s)
-        if not self._initialized:
-            self._initialized = True
-        self._publish_state(vision_valid=False)
+        if self._seeded_from_telemetry:
+            self._publish_state(vision_valid=False)
 
     def update_from_gate_mask(
         self,
@@ -76,7 +85,10 @@ class VisualInertialOdometry:
         sim_time_ns: int,
     ) -> bool:
         """Vision update from a gate segmentation mask (Kalman correct)."""
-        gate = self._active_gate_world()
+        if not self._seeded_from_telemetry:
+            return False
+
+        gate = self._gate_world_for_pnp()
         if gate is None:
             return False
 
@@ -108,6 +120,19 @@ class VisualInertialOdometry:
         )
         return True
 
+    def _gate_world_for_pnp(self) -> tuple[np.ndarray, np.ndarray] | None:
+        track = self._active_gate_world()
+        if track is None:
+            return None
+
+        track_pos, track_quat = track
+        gt = self.data.get("gate_track")
+        if gt and gt.get("initialized"):
+            gt_pos = np.asarray(gt["pos_ned"], dtype=float)
+            if np.linalg.norm(gt_pos - track_pos) <= MAX_GATE_TRACK_DELTA_M:
+                return gt_pos, np.asarray(gt["quat"], dtype=float)
+        return track_pos, track_quat
+
     def _active_gate_world(self) -> tuple[np.ndarray, np.ndarray] | None:
         track_gates = self.data.get("track_gates") or []
         if not track_gates:
@@ -136,6 +161,7 @@ class VisualInertialOdometry:
         )
         self.data["vio"] = {
             "initialized": self._initialized,
+            "seeded_from_telemetry": self._seeded_from_telemetry,
             "pos_ned": tuple(float(x) for x in st["p"]),
             "vel_ned": tuple(float(x) for x in st["v"]),
             "quat": tuple(float(x) for x in st["q"]),

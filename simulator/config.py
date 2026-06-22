@@ -74,6 +74,9 @@ class GateDetection:
     width_px: float
     height_px: float
     contour_valid: bool
+    corners_px: tuple[tuple[float, float], ...] | None = None
+    reproj_err_px: float | None = None
+    quality: float = 0.0
 
 
 @dataclass
