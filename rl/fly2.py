@@ -56,8 +56,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["hover", "course"], default="course")
     ap.add_argument("--seconds", type=float, default=95.0)
-    ap.add_argument("--speed", type=float, default=2.8)
-    ap.add_argument("--lean", type=float, default=0.12, help="max forward lean (rad)")
+    ap.add_argument("--speed", type=float, default=4.0)  # was 2.8
+    ap.add_argument("--lean", type=float, default=0.18, help="max forward lean (rad)")  # was 0.12
     ap.add_argument(
         "--flipz", action="store_true", help="negate gate-map z (climb course)"
     )
@@ -67,7 +67,7 @@ def main():
         default=-1.0,
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
-    ap.add_argument("--klat", type=float, default=0.04, help="cross-track roll gain")
+    ap.add_argument("--klat", type=float, default=0.07, help="cross-track roll gain")  # was 0.04
     ap.add_argument(
         "--no-wait",
         dest="wait",
@@ -136,14 +136,22 @@ def main():
             bearing = math.atan2(dy, dx)
             yaw_err = wrap(bearing - yaw)
             speed = float(np.linalg.norm(v[:2]))
-            align = max(0.0, 1.0 - abs(yaw_err) / 0.4)
-            v_des = args.speed * align * min(1.0, 0.3 + dist / 10.0)
-            # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
-            lean = float(np.clip(0.05 * (v_des - speed), -0.05, args.lean))
-            tgt_pitch = -lean
-            # Cross-track roll control: bank toward the gate line (body-right error).
+            # Signed lateral (cross-track) offset from the line to the gate, body-right.
             e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-            tgt_roll = float(np.clip(args.klat * e_cross, -0.12, 0.12))
+            align = max(0.0, 1.0 - abs(yaw_err) / 0.4)
+            # Slow down when off the gate line so there is time to thread the center:
+            # stays fast on straight shots, eases off on turning/offset gates.
+            lat_align = max(0.3, 1.0 - abs(e_cross) / 3.0)
+            # Reach full speed by ~5m out, but only when well-lined-up (lat_align).
+            v_des = args.speed * align * lat_align * min(1.0, 0.4 + dist / 6.0)
+            # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
+            # Stronger accel gain (0.08, was 0.05) builds speed faster off each gate;
+            # a bit more brake authority (-0.07) keeps overshoot in check at speed.
+            lean = float(np.clip(0.08 * (v_des - speed), -0.07, args.lean))
+            tgt_pitch = -lean
+            # Cross-track roll control: bank toward the gate line (stronger + wider
+            # clip than before so it can re-center laterally at the higher speed).
+            tgt_roll = float(np.clip(args.klat * e_cross, -0.16, 0.16))
             # Track-data gate z appears sign-flipped vs odometry NED (course climbs).
             # zoff lifts the aim point so we clear the bottom border of the opening.
             tgt_z = (-g[2] if args.flipz else g[2]) + args.zoff
