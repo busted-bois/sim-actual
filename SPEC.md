@@ -262,7 +262,7 @@ Produced by `detect_gate_target()` in `vision_processing.py`, smoothed by `GateT
 | `r_frac` | float | Apparent gate size (fraction of min image dimension) |
 | `corners` | `[(x,y), …]` or null | Image-space quad corners (4 points) |
 | `pnp` | dict or null | PnP solve result (see below) |
-| `source` | str | `yolo`, `hsv`, or mono projected-match path |
+| `source` | str | `yolo` or `hsv` (MonoRace detections also tagged `hsv`) |
 
 `pnp` sub-fields when present:
 
