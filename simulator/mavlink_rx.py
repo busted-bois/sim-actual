@@ -143,6 +143,8 @@ class MAVLinkRX:
         self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
         self.data["pos_time_ms"] = msg.time_boot_ms
         self.data["has_position"] = True
+        if self.vio is not None:
+            self.vio.try_seed_from_telemetry()
 
     def on_odometry(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
