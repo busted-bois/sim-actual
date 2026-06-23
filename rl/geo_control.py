@@ -107,9 +107,15 @@ def velocity_to_action(
     # desired (vel_ned[2] > v_des_ned[2]) we need MORE thrust to correct, so
     # the error is (actual - desired), same polarity as fly2's altitude PD.
     vz_err = vel_ned[2] - v_des_ned[2]
+    # Tilt-compensated: a banked/leaned rotor loses cos(tilt) of its vertical
+    # lift, so the SAME hover_thrust no longer holds altitude once roll/pitch
+    # build up during cornering -- without this, sustained turns bleed
+    # altitude over a multi-gate course even though each turn looks fine in
+    # isolation. Clamp the divisor so near-90 deg tilt doesn't blow up thrust.
+    tilt_factor = max(math.cos(roll) * math.cos(pitch), 0.5)
     thrust = float(
         np.clip(
-            gains.hover_thrust + gains.k_vz * vz_err,
+            (gains.hover_thrust + gains.k_vz * vz_err) / tilt_factor,
             gains.thrust_min,
             gains.thrust_max,
         )
