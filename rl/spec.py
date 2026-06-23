@@ -10,8 +10,10 @@ Body   : FRD   (x=Forward, y=Right, z=Down). odometry quaternion (w,x,y,z)
 Camera : optical (x=Right, y=Down, z=Forward along optical axis). Mounted on
                 body, tilted CAM_TILT_DEG *up* from body-forward.
 
-Action space (resolved with user): attitude-rate + thrust, NOT velocity
-setpoints (this sim ignores SET_POSITION_TARGET velocity).
+Hybrid action space (feat/hybrid-control): policy outputs world-frame NED
+velocity setpoint + yaw rate; ``rl.geo_control.velocity_to_action`` maps
+that to attitude-rate + thrust for the sim. Training and deploy share the
+same inner loop.
 """
 
 from __future__ import annotations
@@ -62,19 +64,25 @@ GATE_CORNERS_LOCAL = np.array(
 )
 
 # ----------------------------------------------------------------------------
-# Control / action space — attitude-rate + thrust.
+# Control / action space — outer loop: velocity setpoint + yaw rate.
+# Inner loop (geo_control) converts to attitude-rate + thrust.
 # ----------------------------------------------------------------------------
-MAX_ROLL_RATE = 4.0  # rad/s
+MAX_ROLL_RATE = 4.0  # rad/s (legacy / observation scaling)
 MAX_PITCH_RATE = 4.0
 MAX_YAW_RATE = 3.0
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
-HOVER_THRUST = 0.5
+HOVER_THRUST = 0.5  # internal training model hover throttle
 
-# Policy emits 4 values in [-1, 1]; scale_action() maps to physical commands.
+# Outer-loop policy outputs: v_des NED (m/s) + yaw_rate_des (rad/s, pre sign-flip).
+MAX_V_HORIZ = 6.0  # m/s, north/east components
+MAX_V_VERT = 3.0  # m/s, down (+) / up (-) in NED
+MAX_YAW_RATE_CMD = 0.8  # rad/s, matches geo_control.GeoGains.yaw_clip
+
+# Policy emits 4 values in [-1, 1]; scale_velocity_action() -> physical setpoints.
 ACTION_DIM = 4
 ACTION_SCALE = np.array(
-    [MAX_ROLL_RATE, MAX_PITCH_RATE, MAX_YAW_RATE, 1.0], dtype=np.float64
+    [MAX_V_HORIZ, MAX_V_HORIZ, MAX_V_VERT, MAX_YAW_RATE_CMD], dtype=np.float64
 )
 
 OBS_DIM = 24
@@ -94,7 +102,7 @@ OBS_LAYOUT = {
     "yaw_align": slice(16, 17),  # heading error to gate-normal bearing (rad)
     "to_next_gate_body": slice(17, 20),  # unit vector to next gate (body)
     "dist_to_next_gate": slice(20, 21),  # meters
-    "last_action": slice(21, 24),  # last roll/pitch/yaw-rate command (normalized)
+    "last_action": slice(21, 24),  # last outer-loop cmd (v_des xyz normalized)
 }
 
 
@@ -174,8 +182,34 @@ def gate_corners_world(gate_pos: np.ndarray, gate_quat: np.ndarray) -> np.ndarra
     return gate_pos + GATE_CORNERS_LOCAL @ R.T
 
 
+def scale_velocity_action(a: np.ndarray) -> tuple[np.ndarray, float]:
+    """Map normalized policy action [-1,1]^4 -> (v_des_ned, yaw_rate_des)."""
+    a = np.clip(np.asarray(a, float), -1.0, 1.0)
+    v_des = a[:3] * ACTION_SCALE[:3]
+    yaw_rate_des = float(a[3] * MAX_YAW_RATE_CMD)
+    return v_des, yaw_rate_des
+
+
+def encode_velocity_action(v_des_ned: np.ndarray, yaw_rate_des: float) -> np.ndarray:
+    """Physical setpoints -> normalized policy action (for BC labels)."""
+    v_des_ned = np.asarray(v_des_ned, float)
+    return np.clip(
+        np.array(
+            [
+                v_des_ned[0] / MAX_V_HORIZ,
+                v_des_ned[1] / MAX_V_HORIZ,
+                v_des_ned[2] / MAX_V_VERT,
+                yaw_rate_des / MAX_YAW_RATE_CMD,
+            ],
+            dtype=np.float32,
+        ),
+        -1.0,
+        1.0,
+    )
+
+
 def scale_action(a: np.ndarray) -> np.ndarray:
-    """Map normalized policy action [-1,1]^4 -> (roll_rate,pitch_rate,yaw_rate,thrust)."""
+    """Legacy direct rate+thrust mapping (pre-hybrid controllers only)."""
     a = np.clip(a, -1.0, 1.0)
     roll = a[0] * MAX_ROLL_RATE
     pitch = a[1] * MAX_PITCH_RATE
