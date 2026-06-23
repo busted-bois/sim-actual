@@ -40,10 +40,19 @@ SUBSTEPS = int((1 / DECISION_HZ) / SIM_DT)
 G_WORLD = np.array([0.0, 0.0, spec.GRAVITY])
 
 # Inner-loop gains matched to the internal training plant (not live-sim 0.27).
+# k_lat/roll_max/brake_max are also raised above geo_control's live-sim
+# defaults: those were deliberately conservative for fly2.py's real-sim
+# deployment, but this internal model's curriculum (closer gate spacing +
+# yaw-rotated layouts in stages 1-2) needs more lateral authority to correct
+# drift before crossing a gate plane, and symmetric brake/lean authority to
+# recover from an overshoot instead of diverging.
 TRAIN_GAINS = GeoGains(
     hover_thrust=spec.HOVER_THRUST,
     thrust_min=0.0,
     thrust_max=1.0,
+    k_lat=0.2,
+    roll_max=0.22,
+    brake_max=0.18,
 )
 
 # Curriculum stages: (num_gates, first-gate distance, layout jitter).
@@ -314,7 +323,14 @@ def _selftest():
         steps += 1
     print(f"[selftest] random rollout {steps} steps reward={total:.1f} info={info}")
 
-    # Velocity-setpoint expert sanity (stage 0 must mostly clear; later stages logged).
+    # Velocity-setpoint expert sanity. This is a one-line straight-line
+    # pursuit heuristic with no lookahead/cornering anticipation -- it's a
+    # smoke test that geo_control + reward + gate-crossing logic are wired
+    # correctly (stage 0, a single gate, has no cornering to get wrong), not
+    # a claim that this heuristic should clear the full curriculum. Stages
+    # 1-2 chain turns through jittered/yaw-rotated gates that this expert
+    # can't reliably anticipate -- learning to corner well is what PPO is
+    # for; results are logged, not asserted, past stage 0.
     for stage in range(len(CURRICULUM)):
         passes = total_gates = 0
         trials = 6 if stage == 0 else 3
