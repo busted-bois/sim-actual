@@ -24,6 +24,7 @@ import time
 import numpy as np
 
 from rl import spec
+from rl.observation import build_observation
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator.transforms import quat_to_yaw
 
@@ -38,6 +39,13 @@ SIGN_YAW = -1.0
 RATE_CLIP = 0.30
 YAW_CLIP = 0.5
 HZ = 150.0
+# This controller is position/heading-based, not velocity-based, so it never
+# computes a "desired vertical velocity" on its own. For BC logging (--log)
+# we derive one: a closing rate proportional to remaining altitude error,
+# capped at a sane climb/descend speed. This is an approximation of intent,
+# not a value fly2 actually uses to fly.
+VZ_DES_GAIN = 0.5  # 1/s
+VZ_DES_CLIP = 2.0  # m/s
 
 
 def rpy(q):
@@ -79,6 +87,14 @@ def main():
         action="store_true",
         help="send a sim reset before launching (else rely on race restart)",
     )
+    ap.add_argument(
+        "--log",
+        type=str,
+        default=None,
+        help="JSONL path: append {obs, v_des_ned, yaw_rate_des} per tick for "
+        "behavior-cloning (rl.geo_control's outer-loop intent, derived from "
+        "this controller's own pursuit math -- see VZ_DES_GAIN comment).",
+    )
     args = ap.parse_args()
 
     gate_map = json.load(open(GATE_MAP_PATH))["gates"]
@@ -102,6 +118,9 @@ def main():
     hold_z = s0.pos_ned[2]
     hold_yaw = rpy(s0.quat)[2]
     print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
+
+    log_f = open(args.log, "a") if args.log else None
+    last_action = np.zeros(3)
 
     t0 = time.time()
     last_log = 0.0
@@ -148,6 +167,31 @@ def main():
             # zoff lifts the aim point so we clear the bottom border of the opening.
             tgt_z = (-g[2] if args.flipz else g[2]) + args.zoff
 
+            if log_f is not None:
+                obs = build_observation(
+                    p, v, snap.quat, snap.ang_vel, gate_map, active, last_action
+                )
+                v_des_ned = [
+                    v_des * math.cos(bearing),
+                    v_des * math.sin(bearing),
+                    float(
+                        np.clip(VZ_DES_GAIN * (tgt_z - z), -VZ_DES_CLIP, VZ_DES_CLIP)
+                    ),
+                ]
+                yaw_rate_des = K_YAW * yaw_err  # pre-sign-flip, real-world convention
+                log_f.write(
+                    json.dumps(
+                        {
+                            "t": time.time() - t0,
+                            "active_gate": active,
+                            "obs": obs.tolist(),
+                            "v_des_ned": v_des_ned,
+                            "yaw_rate_des": yaw_rate_des,
+                        }
+                    )
+                    + "\n"
+                )
+
         # Attitude-angle P -> rate commands, with measured sign conventions.
         roll_cmd = float(
             np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
@@ -158,6 +202,9 @@ def main():
         yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
         thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
         sim.send_attitude_rates(roll_cmd, pitch_cmd, yaw_cmd, thrust)
+        last_action = np.array(
+            [roll_cmd / RATE_CLIP, pitch_cmd / RATE_CLIP, yaw_cmd / YAW_CLIP]
+        )
 
         # Safety.
         gb_z = (spec.quat_to_R(snap.quat).T @ np.array([0.0, 0, 1.0]))[2]
@@ -180,6 +227,8 @@ def main():
         time.sleep(1 / HZ)
 
     sim.send_attitude_rates(0, 0, 0, HOVER_T)
+    if log_f is not None:
+        log_f.close()
     print(
         f"[f2] === DONE {reason} final={np.round(sim.snapshot().pos_ned, 1)} "
         f"active={sim.data.get('active_gate_index')} ===",
