@@ -1,10 +1,14 @@
-"""Module 8 (training) — PPO with a 3x64 MLP policy + curriculum.
+"""Module 8 (training) — BC warm-start + PPO with a 3x64 MLP + curriculum.
 
-Trains an SB3 PPO agent over the 24-D observation across the 3 curriculum
-stages (single gate -> two gates -> full 6-gate course), reusing weights
-between stages. Exports a dependency-light ``policy.pt`` (pure-torch
-deterministic actor) for deployment, plus the full SB3 zip for resuming.
+Trains an SB3 PPO agent over the 24-D observation with hybrid outer-loop
+actions (v_des NED + yaw rate -> geo_control inner loop in env.py).
 
+Optional BC warm-start from fly2 --log demos:
+    uv run -m rl.fly2 --mode course --log rl/data/demo.jsonl   # live sim
+    uv run -m rl.bc_dataset --demo rl/data/demo.jsonl
+    uv run -m rl.train_ppo --bc rl/data/demo.jsonl
+
+Full curriculum PPO:
     uv run -m rl.train_ppo                 # full curriculum
     uv run -m rl.train_ppo --quick         # tiny smoke run (verifies pipeline)
 """
@@ -21,13 +25,12 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from rl import spec
+from rl.bc_dataset import train_bc
 from rl.env import CURRICULUM, GateRacingEnv
+from rl.policy import NET_ARCH, POLICY_PT, StandalonePolicy
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 ZIP_PATH = os.path.join(DATA_DIR, "policy_ppo.zip")
-POLICY_PT = os.path.join(DATA_DIR, "policy.pt")
-
-NET_ARCH = [64, 64, 64]  # 3x64 MLP (shared depth for pi and vf)
 
 
 def _vec_env(stage, n_envs=8, seed=0):
@@ -36,20 +39,18 @@ def _vec_env(stage, n_envs=8, seed=0):
     )
 
 
-class StandalonePolicy(nn.Module):
-    """Pure-torch deterministic actor: obs(24) -> 3x64 tanh -> action(4)."""
-
-    def __init__(self, obs_dim=spec.OBS_DIM, act_dim=spec.ACTION_DIM, arch=NET_ARCH):
-        super().__init__()
-        layers, last = [], obs_dim
-        for h in arch:
-            layers += [nn.Linear(last, h), nn.Tanh()]
-            last = h
-        self.body = nn.Sequential(*layers)
-        self.head = nn.Linear(last, act_dim)
-
-    def forward(self, x):
-        return self.head(self.body(x))
+def load_bc_into_ppo(model: PPO, bc_path: str) -> None:
+    """Copy StandalonePolicy weights from BC checkpoint into SB3 actor."""
+    ckpt = torch.load(bc_path, map_location="cpu", weights_only=False)
+    std = StandalonePolicy(
+        obs_dim=ckpt.get("obs_dim", spec.OBS_DIM),
+        act_dim=ckpt.get("act_dim", spec.ACTION_DIM),
+        arch=ckpt.get("arch", NET_ARCH),
+    )
+    std.load_state_dict(ckpt["state_dict"])
+    model.policy.mlp_extractor.policy_net.load_state_dict(std.body.state_dict())
+    model.policy.action_net.load_state_dict(std.head.state_dict())
+    print(f"[ppo] loaded BC weights from {bc_path}", flush=True)
 
 
 def export_policy(model: PPO, out: str = POLICY_PT):
@@ -67,6 +68,7 @@ def export_policy(model: PPO, out: str = POLICY_PT):
             "arch": NET_ARCH,
             "obs_dim": spec.OBS_DIM,
             "act_dim": spec.ACTION_DIM,
+            "action_space": "velocity",
         },
         out,
     )
@@ -87,10 +89,20 @@ def _verify_export(model, std, n=64):
     return err
 
 
-def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0):
+def train(
+    total_per_stage=300_000,
+    n_envs=8,
+    quick=False,
+    seed=0,
+    bc_demo: str | None = None,
+    bc_epochs: int = 30,
+):
     os.makedirs(DATA_DIR, exist_ok=True)
     if quick:
         total_per_stage, n_envs = 4000, 4
+
+    if bc_demo and os.path.isfile(bc_demo):
+        train_bc(bc_demo, POLICY_PT, epochs=bc_epochs if not quick else 5)
 
     policy_kwargs = dict(net_arch=dict(pi=NET_ARCH, vf=NET_ARCH), activation_fn=nn.Tanh)
     env0 = _vec_env(0, n_envs, seed)
@@ -110,6 +122,9 @@ def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0):
         seed=seed,
         device="cpu",
     )
+
+    if bc_demo and os.path.isfile(bc_demo) and os.path.isfile(POLICY_PT):
+        load_bc_into_ppo(model, POLICY_PT)
 
     for stage in range(len(CURRICULUM)):
         model.set_env(_vec_env(stage, n_envs, seed + 1000 * stage))
@@ -158,5 +173,17 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=300_000, help="steps per stage")
     ap.add_argument("--envs", type=int, default=8)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument(
+        "--bc",
+        default=None,
+        help="fly2 --log JSONL for BC warm-start (also runs bc_dataset first)",
+    )
+    ap.add_argument("--bc-epochs", type=int, default=30)
     args = ap.parse_args()
-    train(total_per_stage=args.steps, n_envs=args.envs, quick=args.quick)
+    train(
+        total_per_stage=args.steps,
+        n_envs=args.envs,
+        quick=args.quick,
+        bc_demo=args.bc,
+        bc_epochs=args.bc_epochs,
+    )

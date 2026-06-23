@@ -2,15 +2,11 @@
 
 Closes the loop end-to-end on the real sim:
     IMU + odometry --EKF--> filtered state --Module6--> 24-D obs
-    --policy.pt--> action --scale_action--> attitude-rate + thrust --> MAVLink
+    --policy.pt--> outer-loop action --scale_velocity_action-->
+    geo_control.velocity_to_action--> attitude-rate + thrust --> MAVLink
 
 Gate progression mirrors the training env (signed-distance plane crossing),
 so the obs the policy sees in deployment matches what it saw in training.
-
-State estimation: the EKF predicts on IMU and updates on the sim's odometry
-position + attitude (loosely-coupled). If a trained gatenet.pt is present, the
-GateNet->PnP vision pose can be fused too (Modules 3-4); odometry is the
-robust default since the sim provides it directly.
 
     uv run -m rl.deploy                 # fly the policy on the live sim
     uv run -m rl.deploy --selftest      # closed-loop on internal env (no sim)
@@ -19,6 +15,7 @@ robust default since the sim provides it directly.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 
@@ -28,8 +25,12 @@ import torch
 from rl import spec
 from rl.ekf import ESKF
 from rl.env import GateRacingEnv
+from rl.geo_control import GeoGains, velocity_to_action
 from rl.observation import build_observation
-from rl.train_ppo import POLICY_PT, StandalonePolicy
+from rl.policy import POLICY_PT, StandalonePolicy
+
+# Live-sim inner loop (measured hover thrust 0.27).
+DEPLOY_GAINS = GeoGains()
 
 
 def load_policy(path: str = POLICY_PT, device: str = "cpu"):
@@ -50,6 +51,14 @@ def load_policy(path: str = POLICY_PT, device: str = "cpu"):
         return np.clip(net(x)[0].cpu().numpy(), -1.0, 1.0)
 
     return act
+
+
+def _quat_to_rpy(q):
+    w, x, y, z = q
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1, min(1, 2 * (w * y - z * x))))
+    yaw = math.atan2(2 * (w * y + x * z), 1 - 2 * (y * y + z * z))
+    return roll, pitch, yaw
 
 
 def _gate_normal(g):
@@ -144,7 +153,7 @@ class PolicyRunner:
                     )
                     if self.gate_idx >= len(gate_map):
                         print("[deploy] COURSE COMPLETE", flush=True)
-                        sim.send_attitude_rates(0, 0, 0, spec.HOVER_THRUST)
+                        sim.send_attitude_rates(0, 0, 0, DEPLOY_GAINS.hover_thrust)
                         return
                     g = gate_map[self.gate_idx]
                     self._prev_signed = float(
@@ -162,8 +171,18 @@ class PolicyRunner:
             )
             action = self.act(obs)
             self.last_action = action
-            roll, pitch, yaw, thrust = spec.scale_action(action)
-            sim.send_attitude_rates(roll, pitch, yaw, thrust)
+            v_des, yaw_rate_des = spec.scale_velocity_action(action)
+            roll, pitch, yaw = _quat_to_rpy(st["q"])
+            rates_thrust = velocity_to_action(
+                v_des,
+                yaw_rate_des,
+                st["v"],
+                roll,
+                pitch,
+                yaw,
+                DEPLOY_GAINS,
+            )
+            sim.send_attitude_rates(*rates_thrust)
             time.sleep(1.0 / 100.0)
 
 

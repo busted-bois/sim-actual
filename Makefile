@@ -45,12 +45,22 @@ train-gatenet:
 train-ppo:
 	uv run -m rl.train_ppo
 
+# BC from fly2 --log demos -> rl/data/policy.pt
+train-bc:
+	uv run -m rl.bc_dataset --demo rl/data/demo.jsonl
+
+# PPO with BC warm-start (record demo first: fly2 --log rl/data/demo.jsonl)
+train-hybrid:
+	uv run -m rl.train_ppo --bc rl/data/demo.jsonl
+
 # Module 8: fly the trained policy on the live sim.
 fly-policy:
 	uv run -m rl.deploy
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:
+	uv run -m rl.geo_control --selftest
+	uv run -m rl.bc_dataset --selftest
 	uv run -m rl.dataset --selftest
 	uv run -m rl.gatenet --selftest
 	uv run -m rl.pnp --selftest
