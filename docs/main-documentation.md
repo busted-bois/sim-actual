@@ -4,7 +4,7 @@ Living reference for what is **merged on `main`** today. Update this file when f
 
 | Field | Value |
 |-------|-------|
-| **Last updated** | 2026-06-23 |
+| **Last updated** | 2026-06-24 |
 | **Main commit** | `1d12c7a` — *Add SPEC.md (Yat's specs) (#6)* |
 | **Maintainer note** | Add a one-line entry to [Changelog](#changelog) per substantive merge to `main`. |
 
@@ -14,6 +14,8 @@ Living reference for what is **merged on `main`** today. Update this file when f
 
 1. [Purpose](#1-purpose)
 2. [Quickstart](#2-quickstart)
+   - [Choosing an entry point](#25-choosing-an-entry-point)
+   - [Troubleshooting](#26-troubleshooting)
 3. [Repository layout](#3-repository-layout)
 4. [System architecture](#4-system-architecture)
 5. [`shared_data` schema](#5-shared_data-schema)
@@ -60,7 +62,102 @@ make sim      # connect to FlightSim.exe and run the live pilot
 
 `make sim` waits for a MAVLink heartbeat, arms the drone, then runs the 250 Hz control loop until the process is killed.
 
-Other entry points (`make fly`, `make capture-gates`, the `rl.*` modules) target the same live sim or run offline — see [§10](#10-makefile-targets).
+For which command to run and what to do when something fails, see [§2.5](#25-choosing-an-entry-point) and [§2.6](#26-troubleshooting). Full target list: [§10](#10-makefile-targets).
+
+### 2.5 Choosing an entry point
+
+`main` ships several pilots and tools. Pick by goal — not every path needs vision or a saved gate map.
+
+| Goal | Command | Live sim? | Vision? | Gate map? | Notes |
+|------|---------|-----------|---------|-----------|-------|
+| **Default competition pilot** | `make sim` | Yes | Yes | From sim at race start | Vision-first gate racer; telemetry fallback. What `main.py` runs. |
+| Hover / controller sanity check | `make hover` | Yes | No | Optional | `rl.fly2 --mode hover`; good before debugging course logic. |
+| Full course, measured dynamics | `make fly` | Yes | No | `rl/data/gate_map.json` | `rl.fly2 --mode course`. Start the race first; uses odom + saved map. |
+| Full course, geometric controller | `uv run -m rl.fly_geometric` | Yes | No | `gate_map.json` | Cascaded geometric controller + odom. |
+| Full course, pilot-style + odom | `uv run -m rl.fly_odom` | Yes | No | `gate_map.json` | Same control style as `pilot.py`, driven by telemetry only. |
+| Capture gate map for offline tools | `make capture-gates` | Yes | No | **Writes** `gate_map.json` | Run **before** (re)starting the race; see [§2.6](#26-troubleshooting). |
+| Telemetry snapshot | `make capture` | Yes | Optional | From sim | Module 1 smoke — dumps live state once. |
+| Plant characterization | `make dynamics` | Yes | No | No | Open-loop thrust/rate ID for `fly2`. |
+| Train + fly learned policy | see recipe below | Mixed | Optional | `gate_map.json` for deploy | Offline training; live sim only for eval. |
+| Offline module smoke tests | `make rl-test` | No | No | No | Runs `rl.* --selftest` without FlightSim. |
+
+**Gate map:** The sim broadcasts the track once at race start. `make sim` receives it live into `shared_data["track_gates"]`. The `rl/` course scripts and `make fly` read a saved copy at `rl/data/gate_map.json` — capture it with `make capture-gates` if missing.
+
+**RL train-and-deploy recipe** (offline unless noted):
+
+```text
+make capture-gates          # live sim — start race while this listens
+make dataset                # live sim — records frames + auto-labeled masks
+make train-gatenet          # offline → rl/data/gatenet.pt (optional vision fusion)
+make train-ppo              # offline → rl/data/policy.pt
+make fly-policy             # live sim — EKF + policy; odom default, GateNet if present
+```
+
+`gatenet.pt` is optional; `make fly-policy` uses sim odometry by default. `policy.pt` is checked in, but retraining overwrites it.
+
+### 2.6 Troubleshooting
+
+#### Before you debug
+
+1. FlightSim.exe is running; you are logged in and in an **active qualifier / flight** (not the main menu).
+2. Ports **14550** (MAVLink) and **5600** (FPV JPEG) are free — no other pilot or capture tool bound.
+3. For `make fly` / `fly_odom` / `fly_geometric`: `rl/data/gate_map.json` exists (run `make capture-gates` first).
+4. For `make capture-gates`: start the tool **first**, then start or restart the race so the burst is not missed.
+
+#### Symptom → cause → fix
+
+| Symptom | Likely cause | What to do |
+|---------|--------------|------------|
+| Hangs on `Waiting for heartbeat...` | Sim not running, wrong session, or port 14550 taken | Launch sim, enter a flight, kill other MAVLink clients |
+| `Connected` then hovers; never chases gates | `track_gates` empty — race not started | Start/restart the race while the pilot is connected |
+| `make fly` errors or wanders | Missing or stale `gate_map.json` | `make capture-gates`, restart race during capture window |
+| `NO gate burst captured` | Race started before capture tool, or window expired | Run `make capture-gates` first; restart race within the listen window (default 150 s) |
+| Never enters vision mode | No frames on :5600 or HSV miss | Confirm `Listening for camera frames...`; point drone at orange gate; tune HSV in `config.py` |
+| `Failed to decode frame` | Corrupt/partial JPEG chunk | Usually transient; check nothing else is consuming :5600 |
+| Spins in place after a gate | Expected — search mode re-acquiring | Wait for `SEARCH → new gate acquired`; or check next gate is visible |
+| Collision then slow hover | `collision_hold` (2 s reduced thrust) | Normal; clears automatically |
+| `make fly-policy` drifts / weak | No `gatenet.pt`; policy trained on internal model | Train GateNet locally; re-run `make train-ppo`; expect sim-to-sim gap |
+| Process won't exit cleanly | No `KeyboardInterrupt` handler in `main.py` | Kill the terminal/process (known gap — see [§12](#12-current-capabilities--gaps)) |
+
+#### Expected console output
+
+**Startup (`make sim`):**
+
+```text
+Waiting for heartbeat...
+Connected to system: …
+Setting up MAVLink rx...
+Setting up Timesync loop...
+Listening for camera frames...
+Arming drone...
+Starting control loop...
+[pilot] init done, waiting for armed + vision/telemetry
+```
+
+**Healthy flight (`[pilot]` lines):**
+
+| Log line | Meaning |
+|----------|---------|
+| `NEW TARGET gate {id}` | Telemetry fallback locked onto next gate |
+| `GATE CENTERED, holding …` | Aligning before advancing through gate |
+| `ADVANCE → gate area large, bypassing stabilize` | Close enough; skipping hold phase |
+| `FLY-THROUGH at pos=…` | Passed gate; entering post-gate hover |
+| `POST-GATE hover done, entering SEARCH` | Scanning for next gate |
+| `SEARCH sweep dir=CW/CCW` | Yaw sweep during search |
+| `SEARCH → new gate acquired (nx=…)` | Vision re-acquired; back to vision mode |
+| `Passed gate re-detected, entering SEARCH` | Old gate still in frame after pass; ignoring until new gate found |
+
+**Vision thread:** `Listening for camera frames...` must appear. If absent, the vision thread failed to bind :5600.
+
+#### Race lifecycle (why `track_gates` matters)
+
+```text
+Enter flight session → start race → sim sends gate-map burst (type 2 ENCAPSULATED_DATA)
+                                 → mavlink_rx fills shared_data["track_gates"]
+                                 → race status updates active_gate_index / race_started
+```
+
+`make sim` needs the burst for telemetry fallback (`pilot.py` chases nearest gate from `track_gates`). Vision can work with only the camera, but course progress without a map is unreliable. Offline `rl/` scripts always need `gate_map.json` from `make capture-gates`.
 
 ---
 
@@ -390,6 +487,7 @@ Keep feature-branch-only detail out of this file until it ships on `main`.
 
 | Date | Commit / PR | Summary |
 |------|-------------|---------|
+| 2026-06-24 | — | Add §2.5 entry-point guide + §2.6 troubleshooting |
 | 2026-06-23 | — | Accuracy pass: race-status struct, repo layout, changelog cleanup |
 | 2026-06-22 | `1d12c7a` | Rewrote doc for `main` at `1d12c7a`: live `simulator/` gate racer + full `rl/` pipeline |
 | 2026-06-22 | `1d96afc` | Initial `main-documentation.md` + README link (scaffold through `a7dea83`) |
