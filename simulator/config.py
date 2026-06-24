@@ -63,6 +63,15 @@ LOST_FRAMES_THRESHOLD = 30
 TAKEOFF_TIMEOUT_S = 10.0
 DEBUG = False
 
+# Gate vs obstacle disambiguation
+GATE_CONFIDENCE_MIN_NAV = 0.35
+GATE_CONFIDENCE_AMBIGUOUS = 0.55
+GATE_TEMPORAL_MIN_STREAK = 2
+OBSTACLE_CONFIDENCE_AVOID = 0.40
+OBSTACLE_MIN_AREA_PX = 200
+OBSTACLE_GRAY_THRESH = 15
+OBSTACLE_BRIGHT_EXCLUDE = 80
+
 
 @dataclass
 class GateDetection:
@@ -77,6 +86,18 @@ class GateDetection:
     corners_px: tuple[tuple[float, float], ...] | None = None
     reproj_err_px: float | None = None
     quality: float = 0.0
+
+
+@dataclass
+class ObstacleDetection:
+    frame_id: int
+    sim_time_ns: int
+    centroid_x_px: float
+    centroid_y_px: float
+    area_px: float
+    width_px: float
+    height_px: float
+    confidence: float
 
 
 @dataclass

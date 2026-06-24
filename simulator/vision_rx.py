@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import socket
 import struct
 import threading
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from simulator.gate_classifier import ClassifiedGate
 
 # Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "0.0.0.0"
@@ -15,6 +21,11 @@ class VisionRX:
         self.data = data
         self.vio = vio
         self.gate_tracker = gate_tracker
+        from simulator.gate_classifier import GateClassifier
+        from simulator.obstacle_tracker import ObstacleTracker
+
+        self._gate_classifier = GateClassifier()
+        self._obstacle_tracker = ObstacleTracker()
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -38,12 +49,6 @@ class VisionRX:
             header = packet[:header_sz]
             payload = packet[header_sz:]
 
-            # frame_id - identifier for this vision frame
-            # chunk_id - identifier for this chunk packet of data of this frame
-            # total_chunks - total number of chunk packets that make up this frame
-            # jpeg_size - full size of jpeg data
-            # payload_size - size of this packet
-            # sim_time_ns - frame's epoch timestamp in ns on the server
             frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
                 struct.unpack(header_format, header)
             )
@@ -58,19 +63,13 @@ class VisionRX:
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
-            # Check if frame is complete
             if len(frames[frame_id]["chunks"]) == total_chunks:
                 jpeg_bytes = bytearray()
-
                 frame_complete = True
                 for i in range(total_chunks):
                     if i not in frames[frame_id]["chunks"]:
                         print(
-                            "Missing packet %s in frame %s"
-                            % (
-                                i,
-                                frame_id,
-                            )
+                            "Missing packet %s in frame %s" % (i, frame_id),
                         )
                         frame_complete = False
                         continue
@@ -94,14 +93,25 @@ class VisionRX:
             import time as _time
 
             from simulator.gate_detector import build_gate_mask, detect_gate
+            from simulator.obstacle_detector import detect_obstacles
 
             h, w = img.shape[:2]
             gate_mask = build_gate_mask(img)
+            raw_detection = detect_gate(img, frame_id, sim_time_ns)
+            classified = self._gate_classifier.classify(raw_detection, w, h)
 
-            detection = detect_gate(img, frame_id, sim_time_ns)
+            obstacle_dets = detect_obstacles(
+                img,
+                frame_id,
+                sim_time_ns,
+                gate_detection=raw_detection,
+                gate_mask=gate_mask,
+            )
+            obstacle_tracks = self._obstacle_tracker.update(
+                obstacle_dets, frame_id, w, h
+            )
 
             self.data["camera"] = {"received_at": _time.monotonic()}
-            # Raw BGR frame for dataset generation (Module 2) / GateNet inference.
             self.data["frame"] = {
                 "img": img,
                 "frame_id": frame_id,
@@ -109,39 +119,16 @@ class VisionRX:
                 "received_at": _time.monotonic(),
             }
 
-            if detection is not None:
-                nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
-                ny = (detection.centroid_y_px - h / 2.0) / (h / 2.0)
-                r_frac = detection.area_px / (w * h)
-                self.data["gate_target"] = {
-                    "detected": True,
-                    "nx": nx,
-                    "ny": ny,
-                    "r_frac": r_frac,
-                    "quality": detection.quality,
-                    "reproj_err_px": detection.reproj_err_px,
-                    "width_px": detection.width_px,
-                    "height_px": detection.height_px,
-                    "corners_px": detection.corners_px,
-                }
-                print(
-                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} q={detection.quality:.2f} "
-                    f"nx={nx:+.3f} ny={ny:+.3f}",
-                    flush=True,
-                )
-            else:
-                self.data["gate_target"] = {
-                    "detected": False,
-                    "nx": 0.0,
-                    "ny": 0.0,
-                    "r_frac": 0.0,
-                    "quality": 0.0,
-                }
+            self._publish_gate_target(classified, w, h)
+            self._publish_obstacles(obstacle_tracks)
+
+            detection_for_fusion = (
+                classified.detection if classified.validated else None
+            )
 
             if self.gate_tracker is not None:
                 updated = self.gate_tracker.process_detection(
-                    detection, frame_id, sim_time_ns
+                    detection_for_fusion, frame_id, sim_time_ns
                 )
                 if updated:
                     gt = self.data.get("gate_track", {})
@@ -154,11 +141,11 @@ class VisionRX:
 
             if self.vio is not None:
                 updated = False
-                if detection is not None:
+                if detection_for_fusion is not None:
                     updated = self.vio.update_from_gate_detection(
-                        detection, frame_id, sim_time_ns
+                        detection_for_fusion, frame_id, sim_time_ns
                     )
-                if not updated and gate_mask is not None:
+                if not updated and gate_mask is not None and classified.validated:
                     updated = self.vio.update_from_gate_mask(
                         gate_mask, frame_id, sim_time_ns
                     )
@@ -171,36 +158,74 @@ class VisionRX:
                         flush=True,
                     )
 
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
-            obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
-            if detection is not None:
-                cv2.circle(
-                    obs_mask,
-                    (int(detection.centroid_x_px), int(detection.centroid_y_px)),
-                    int(max(detection.width_px, detection.height_px)),
-                    0,
-                    -1,
-                )
-            obs_contours, _ = cv2.findContours(
-                obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            obstacles = []
-            for oc in obs_contours:
-                oa = cv2.contourArea(oc)
-                if oa < 200:
-                    continue
-                om = cv2.moments(oc)
-                om00 = max(om["m00"], 1e-6)
-                ocx = om["m10"] / om00
-                ocy = om["m01"] / om00
-                onx = (ocx - w / 2.0) / (w / 2.0)
-                ony = (ocy - h / 2.0) / (h / 2.0)
-                orf = oa / (w * h)
-                obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
-            self.data["obstacles"] = obstacles
         except Exception as e:
             from simulator import config
 
             if config.DEBUG:
                 print(f"[vision_rx] process_frame error: {e}")
+
+    def _publish_gate_target(self, classified: ClassifiedGate, w: int, h: int) -> None:
+        det = classified.detection
+        self.data["gate_classification"] = {
+            "gate_confidence": classified.gate_confidence,
+            "temporal_streak": classified.temporal_streak,
+            "geometric_valid": classified.geometric_valid,
+            "ambiguous": classified.ambiguous,
+            "validated": classified.validated,
+        }
+
+        if det is None:
+            self.data["gate_target"] = {
+                "detected": False,
+                "nx": 0.0,
+                "ny": 0.0,
+                "r_frac": 0.0,
+                "quality": 0.0,
+                "gate_confidence": 0.0,
+                "ambiguous": True,
+                "validated": False,
+            }
+            return
+
+        nx = (det.centroid_x_px - w / 2.0) / (w / 2.0)
+        ny = (det.centroid_y_px - h / 2.0) / (h / 2.0)
+        r_frac = det.area_px / (w * h)
+        nav_goal = classified.validated and not classified.ambiguous
+
+        self.data["gate_target"] = {
+            "detected": nav_goal,
+            "raw_detected": True,
+            "nx": nx,
+            "ny": ny,
+            "r_frac": r_frac,
+            "quality": det.quality,
+            "gate_confidence": classified.gate_confidence,
+            "temporal_streak": classified.temporal_streak,
+            "ambiguous": classified.ambiguous,
+            "validated": classified.validated,
+            "reproj_err_px": det.reproj_err_px,
+            "width_px": det.width_px,
+            "height_px": det.height_px,
+            "corners_px": det.corners_px,
+        }
+
+        tag = "GATE" if nav_goal else ("AMBIG" if classified.ambiguous else "RAW")
+        print(
+            f"[vision] {tag} cx={det.centroid_x_px:.0f} cy={det.centroid_y_px:.0f} "
+            f"area={det.area_px:.0f} conf={classified.gate_confidence:.2f} "
+            f"streak={classified.temporal_streak} nx={nx:+.3f} ny={ny:+.3f}",
+            flush=True,
+        )
+
+    def _publish_obstacles(self, tracks: list[dict]) -> None:
+        self.data["obstacles"] = tracks
+        self.data["obstacle_track"] = {
+            "count": len(tracks),
+            "tracks": tracks,
+            "blocking": any(
+                t.get("confidence", 0) >= 0.4
+                and abs(t.get("nx", 0)) < 0.25
+                and t.get("r_frac", 0) > 0.005
+                for t in tracks
+            ),
+        }
