@@ -8,3 +8,6 @@ _backup
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime logs
+logs/
