@@ -134,6 +134,7 @@ class Controller:
         self._vy = 0.0
         self._vz = 0.0
         self.pilot = Pilot(self, data)
+        self._disarm_ticks = 0
 
     def set_control_mode(self, mode):
         self.control_mode = mode
@@ -155,6 +156,13 @@ class Controller:
 
     def update(self):
         self.pilot.tick()
+
+        if not self.data.get("armed", False):
+            self._disarm_ticks += 1
+            if self._disarm_ticks % 50 == 1:
+                self.arm()
+        else:
+            self._disarm_ticks = 0
 
         if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)

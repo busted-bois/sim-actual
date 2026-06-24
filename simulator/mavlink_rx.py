@@ -188,6 +188,9 @@ class MAVLinkRX:
 
     def on_race_status(self, msg):
         raw_payload = bytes(msg.data)
+        # sim_boot_time_ms — elapsed ms since sim boot
+        # race_start_boot_time_ms — GO instant (first run) or countdown start (restart)
+        # race_finish_time_ns — < 0 while racing; >= 0 when finished
         (
             data_type,
             sim_boot_time_ms,
@@ -197,12 +200,12 @@ class MAVLinkRX:
             last_gate_race_time,
         ) = struct.unpack_from("<BQqqIq", raw_payload)
         self.data["active_gate_index"] = active_gate_index
-        self.data["race_started"] = race_start_boot_time_ms >= 0
-        self.data["race_finish_time_ns"] = race_finish_time_ns
         self.data["race_status"] = {
-            "active_gate_index": active_gate_index,
-            "race_start_boot_time_ms": race_start_boot_time_ms,
             "sim_boot_time_ms": sim_boot_time_ms,
+            "race_start_boot_time_ms": race_start_boot_time_ms,
+            "race_finish_time_ns": race_finish_time_ns,
+            "active_gate_index": active_gate_index,
+            "last_gate_race_time": last_gate_race_time,
         }
 
     def on_track_data_packet(self, msg):

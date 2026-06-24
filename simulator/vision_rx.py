@@ -132,6 +132,8 @@ class VisionRX:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
             obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
+            # Exclude ground band — dark floor false-triggers obstacle stop.
+            obs_mask[int(h * 0.55) :, :] = 0
             if detection is not None:
                 cv2.circle(
                     obs_mask,
@@ -146,7 +148,7 @@ class VisionRX:
             obstacles = []
             for oc in obs_contours:
                 oa = cv2.contourArea(oc)
-                if oa < 200:
+                if oa < 800:
                     continue
                 om = cv2.moments(oc)
                 om00 = max(om["m00"], 1e-6)

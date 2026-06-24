@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -6,6 +6,9 @@ i install:
 check:
 	uv run ruff check --fix .
 	uv run ruff format .
+
+test:
+	uv run python -m unittest tests.test_preflight -v
 
 sim:
 	uv run main.py
