@@ -123,7 +123,13 @@ class VisionRX:
             self._publish_obstacles(obstacle_tracks)
 
             detection_for_fusion = (
-                classified.detection if classified.validated else None
+                classified.detection
+                if classified.validated
+                or (
+                    classified.geometric_valid
+                    and classified.temporal_streak >= 2
+                )
+                else None
             )
 
             if self.gate_tracker is not None:
@@ -165,6 +171,8 @@ class VisionRX:
                 print(f"[vision_rx] process_frame error: {e}")
 
     def _publish_gate_target(self, classified: ClassifiedGate, w: int, h: int) -> None:
+        from simulator.config import GATE_CONFIDENCE_MIN_NAV
+
         det = classified.detection
         self.data["gate_classification"] = {
             "gate_confidence": classified.gate_confidence,
@@ -190,7 +198,19 @@ class VisionRX:
         nx = (det.centroid_x_px - w / 2.0) / (w / 2.0)
         ny = (det.centroid_y_px - h / 2.0) / (h / 2.0)
         r_frac = det.area_px / (w * h)
-        nav_goal = classified.validated and not classified.ambiguous
+        nav_goal = (
+            classified.validated
+            or (
+                classified.geometric_valid
+                and classified.temporal_streak >= 2
+                and classified.gate_confidence >= GATE_CONFIDENCE_MIN_NAV
+            )
+            or (
+                classified.temporal_streak >= 3
+                and r_frac > 0.04
+                and abs(nx) < 0.55
+            )
+        )
 
         self.data["gate_target"] = {
             "detected": nav_goal,

@@ -37,8 +37,17 @@ def _gate_exclusion_mask(
     if gate_detection is not None:
         cx = int(gate_detection.centroid_x_px)
         cy = int(gate_detection.centroid_y_px)
-        r = int(max(gate_detection.width_px, gate_detection.height_px) * 0.6)
-        cv2.circle(exclude, (cx, cy), max(r, 20), 255, -1)
+        half_w = int(gate_detection.width_px * 0.95)
+        half_h = int(gate_detection.height_px * 0.95)
+        cv2.rectangle(
+            exclude,
+            (cx - half_w, cy - half_h),
+            (cx + half_w, cy + half_h),
+            255,
+            -1,
+        )
+        r = int(max(gate_detection.width_px, gate_detection.height_px) * 0.7)
+        cv2.circle(exclude, (cx, cy), max(r, 30), 255, -1)
     return exclude
 
 
@@ -90,7 +99,16 @@ def detect_obstacles(
 
         area_frac = area / max(frame_area, 1.0)
         centrality = 1.0 - (abs(cx - w / 2) / (w / 2) + abs(cy - h / 2) / (h / 2)) / 2.0
-        confidence = min(1.0, area_frac / 0.02) * max(0.2, centrality)
+        confidence = min(1.0, area_frac / 0.04) * max(0.2, centrality)
+
+        # Skip blobs inside the gate bbox (dark gate interior).
+        if gate_detection is not None:
+            gx0 = gate_detection.centroid_x_px - gate_detection.width_px * 0.9
+            gx1 = gate_detection.centroid_x_px + gate_detection.width_px * 0.9
+            gy0 = gate_detection.centroid_y_px - gate_detection.height_px * 0.9
+            gy1 = gate_detection.centroid_y_px + gate_detection.height_px * 0.9
+            if gx0 <= cx <= gx1 and gy0 <= cy <= gy1:
+                continue
 
         results.append(
             ObstacleDetection(

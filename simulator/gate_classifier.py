@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from simulator.config import (
     GATE_CONFIDENCE_AMBIGUOUS,
     GATE_CONFIDENCE_MIN_NAV,
+    GATE_MAX_AREA_FRAC,
     GATE_TEMPORAL_MIN_STREAK,
     MAX_ASPECT_RATIO,
     MIN_ASPECT_RATIO,
@@ -52,12 +53,20 @@ class GateClassifier:
             )
 
         geometric = self._geometric_valid(detection, img_w, img_h)
-        base = detection.quality if geometric else detection.quality * 0.25
+        area_frac = detection.area_px / max(img_w * img_h, 1)
 
-        if geometric and detection.quality >= 0.15 and detection.corners_px:
+        if geometric:
+            base = detection.quality
+            # Close approach: PnP quality drops but HSV streak is reliable.
+            if self._streak >= 1 and area_frac > 0.08:
+                base = max(base, 0.38)
+            if area_frac > 0.20:
+                base = max(base, 0.42)
+        else:
+            base = detection.quality * 0.25
+
+        if geometric and (detection.quality >= 0.10 or area_frac > 0.06):
             self._streak += 1
-        elif geometric and detection.quality >= 0.15:
-            self._streak = max(1, self._streak)
         else:
             self._streak = max(0, self._streak - 1)
 
@@ -74,16 +83,25 @@ class GateClassifier:
         )
         gate_confidence = min(1.0, max(0.0, gate_confidence))
 
+        approaching = self._streak >= 3 and area_frac > 0.04
+        if approaching:
+            gate_confidence = max(
+                gate_confidence,
+                min(0.65, 0.40 + 0.04 * min(self._streak, 8)),
+            )
+
         ambiguous = (
-            not geometric
-            or gate_confidence < GATE_CONFIDENCE_AMBIGUOUS
-            or self._streak < GATE_TEMPORAL_MIN_STREAK
+            not approaching
+            and (
+                not geometric
+                or gate_confidence < GATE_CONFIDENCE_AMBIGUOUS
+                or self._streak < GATE_TEMPORAL_MIN_STREAK
+            )
         )
         validated = (
             geometric
             and self._streak >= GATE_TEMPORAL_MIN_STREAK
             and gate_confidence >= GATE_CONFIDENCE_MIN_NAV
-            and detection.corners_px is not None
         )
 
         return ClassifiedGate(
@@ -103,7 +121,7 @@ class GateClassifier:
         if aspect > MAX_ASPECT_RATIO or aspect < MIN_ASPECT_RATIO:
             return False
         area_frac = det.area_px / max(img_w * img_h, 1)
-        if area_frac > 0.35:
+        if area_frac > GATE_MAX_AREA_FRAC:
             return False
         if det.reproj_err_px is not None and det.reproj_err_px > 15.0:
             return False
