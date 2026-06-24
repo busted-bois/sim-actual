@@ -310,6 +310,7 @@ class MAVLinkRX:
         self.data["gates"] = gates
         self.data["track_gates"] = [
             {
+                "gate_id": g.gate_id,
                 "position_ned": g.pos_ned,
                 "orientation_ned": g.orient_quat,
                 "width": g.width_m,
@@ -317,6 +318,7 @@ class MAVLinkRX:
             }
             for g in gates
         ]
+        print(f"[mavlink] track map: {num_gates} gates", flush=True)
 
     def on_actuator_output_status(self, msg):
         pass
