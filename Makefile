@@ -8,10 +8,26 @@ check:
 	uv run ruff format .
 
 test:
-	uv run python -m unittest tests.test_preflight -v
+	uv run python -m unittest tests.test_preflight tests.test_camera_model tests.test_gate_estimator tests.test_ibvs_comparison tests.test_pilot_profile -v
 
 sim:
 	uv run main.py
+
+# A/B gate-racing profiles (Windows: powershell -File scripts/sim-ab.ps1 -Profile main)
+sim-ab-main:
+	PILOT_AB=main uv run main.py
+
+sim-ab-branch:
+	PILOT_AB=branch uv run main.py
+
+sim-ab-jacobian:
+	PILOT_AB=jacobian uv run main.py
+
+sim-ab-main-jacobian:
+	PILOT_AB=main-jacobian uv run main.py
+
+sim-ab-branch-legacy:
+	PILOT_AB=branch-legacy uv run main.py
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json

@@ -128,6 +128,21 @@ class PolicyRunner:
             if snap.quat is not None:
                 self.ekf.update_attitude(np.array(snap.quat))
 
+            gate_target = sim.data.get("gate_target") or {}
+            if (
+                gate_target.get("detected")
+                and self.gate_idx < len(gate_map)
+                and snap.quat is not None
+            ):
+                from rl.vision_fusion import fuse_gate_target_position
+
+                fuse_gate_target_position(
+                    self.ekf,
+                    gate_target,
+                    np.array(gate_map[self.gate_idx]["pos"]),
+                    np.array(snap.quat),
+                )
+
             st = self.ekf.state()
             ang_vel = np.array(snap.ang_vel) if snap.ang_vel else np.zeros(3)
 
