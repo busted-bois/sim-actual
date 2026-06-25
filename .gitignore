@@ -8,3 +8,8 @@ _backup
 __pycache__/
 *.pyc
 .venv/
+
+# ML artifacts — kept on disk locally, but too large / regenerable for git
+yolo*.pt
+rl/data/gate_pose_ds/
+rl/data/gate_pose.pt

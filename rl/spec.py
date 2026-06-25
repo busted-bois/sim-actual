@@ -61,6 +61,25 @@ GATE_CORNERS_LOCAL = np.array(
     dtype=np.float64,
 )
 
+# YOLO-pose keypoints = the 4 opening corners, SAME order as GATE_CORNERS_LOCAL
+# and pnp._OBJ (TL,TR,BR,BL), so detector keypoints feed PnP with no reordering.
+N_KEYPOINTS = 4
+KPT_FLIP_IDX = [1, 0, 3, 2]  # horizontal image flip swaps L<->R within each row
+
+
+def gate_keypoints_px(gate_pos, gate_quat, drone_pos, drone_quat):
+    """Project the 4 gate corners (TL,TR,BR,BL) to pixels + in-front mask.
+
+    Used to auto-label YOLO-pose training data (Module 2) and to validate the
+    keypoint->PnP path (Module 4). gate_corners_world/project are defined below
+    and resolved at call time.
+    """
+    corners = gate_corners_world(
+        np.asarray(gate_pos, float), np.asarray(gate_quat, float)
+    )
+    return project(corners, np.asarray(drone_pos, float), np.asarray(drone_quat, float))
+
+
 # ----------------------------------------------------------------------------
 # Control / action space — attitude-rate + thrust.
 # ----------------------------------------------------------------------------
@@ -168,9 +187,34 @@ def project(p_world: np.ndarray, drone_pos: np.ndarray, q: np.ndarray):
     return np.stack([u, v], axis=1), in_front
 
 
+# The sim's gate "facing"/normal axis is NOT gate-local +X: a gate broadcast at
+# quat ~90°-about-Z faces along the course (travel) direction. Our corner model
+# (GATE_CORNERS_LOCAL) and gate-normal code assume normal = +X, so rotate the
+# sim's gate rotation by +90° about gate-Z to align the conventions. Without
+# this the opening collapses edge-on (corners project to a vertical line).
+# Analogous to the reference repo's "prefab rotation" fix. Sign verified against
+# live frames via the dataset overlay (rl/data/gate_pose_ds/debug).
+def _R_z(a: float) -> np.ndarray:
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
+
+
+R_GATE_FIX = _R_z(np.radians(90.0))
+
+
+def gate_rotation(gate_quat: np.ndarray) -> np.ndarray:
+    """Sim gate quaternion -> our gate rotation (normal=+X, width=+Y, height=+Z)."""
+    return quat_to_R(np.asarray(gate_quat, float)) @ R_GATE_FIX
+
+
+def gate_normal_world(gate_quat: np.ndarray) -> np.ndarray:
+    """Gate through-axis (normal) in world NED, convention-corrected."""
+    return gate_rotation(gate_quat) @ np.array([1.0, 0.0, 0.0])
+
+
 def gate_corners_world(gate_pos: np.ndarray, gate_quat: np.ndarray) -> np.ndarray:
-    """4 gate corners (TL,TR,BR,BL) in world NED."""
-    R = quat_to_R(gate_quat)
+    """4 gate corners (TL,TR,BR,BL) in world NED, convention-corrected."""
+    R = gate_rotation(gate_quat)
     return gate_pos + GATE_CORNERS_LOCAL @ R.T
 
 

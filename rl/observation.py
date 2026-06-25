@@ -62,7 +62,7 @@ def build_observation(
     dist = float(np.linalg.norm(dvec_w))
     to_gate_body = Rt @ _unit(dvec_w)
 
-    gnorm_w = spec.quat_to_R(np.asarray(cur["quat"], float)) @ np.array([1.0, 0, 0])
+    gnorm_w = spec.gate_normal_world(cur["quat"])
     gate_normal_body = Rt @ gnorm_w
 
     vel_body = (Rt @ v_world) / V_SCALE

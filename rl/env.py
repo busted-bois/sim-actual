@@ -94,10 +94,16 @@ class GateRacingEnv(gym.Env):
             y = self.np_random.uniform(-j, j)
             z = self.np_random.uniform(-3.0 - j, -3.0 + j)  # NED altitude
             yaw = self.np_random.uniform(-0.4, 0.4) if i > 0 else 0.0
+            # Author the RAW (sim-convention) quaternion: spec.gate_rotation
+            # applies R_GATE_FIX (+90° about Z), so a gate meant to FACE `yaw`
+            # is stored at angle (yaw - 90°). This keeps env gates in the same
+            # convention as the real sim's broadcast quats, so the policy's
+            # gate_normal observation matches between training and deployment.
+            a = yaw - np.pi / 2
             gates.append(
                 {
                     "pos": [x, y, z],
-                    "quat": [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)],
+                    "quat": [np.cos(a / 2), 0.0, 0.0, np.sin(a / 2)],
                     "w": spec.GATE_SIZE_M,
                     "h": spec.GATE_SIZE_M,
                 }
@@ -128,7 +134,7 @@ class GateRacingEnv(gym.Env):
     def _gate_frame(self, idx):
         g = self.gate_map[idx]
         gc = np.array(g["pos"])
-        n = spec.quat_to_R(np.array(g["quat"])) @ np.array([1.0, 0, 0])
+        n = spec.gate_normal_world(g["quat"])
         return gc, n
 
     def _signed_dist(self, idx):
@@ -199,7 +205,7 @@ class GateRacingEnv(gym.Env):
             # Square opening: offsets along the gate's local right/down axes
             # vs its reported w/h.
             g = self.gate_map[self.gate_idx]
-            R = spec.quat_to_R(np.array(g["quat"]))
+            R = spec.gate_rotation(np.array(g["quat"]))
             rel = self.p - gc
             dy = abs(float(R[:, 1] @ rel))  # width axis (right)
             dz = abs(float(R[:, 2] @ rel))  # height axis (down)

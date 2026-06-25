@@ -151,7 +151,7 @@ def _selftest():
         gpos = dpos + np.array(
             [rng.uniform(4, 8), rng.uniform(-1, 1), rng.uniform(-1, 1)]
         )
-        gq = np.array([0.0, 0.0, 0.0, 1.0])  # facing -North
+        gq = np.array([0.70710678, 0.0, 0.0, 0.70710678])  # 90°-about-Z: faces drone
         gate = [
             {"id": 0, "pos": gpos.tolist(), "quat": gq.tolist(), "w": 1.5, "h": 1.5}
         ]

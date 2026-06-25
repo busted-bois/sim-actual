@@ -8,9 +8,10 @@ Gate progression mirrors the training env (signed-distance plane crossing),
 so the obs the policy sees in deployment matches what it saw in training.
 
 State estimation: the EKF predicts on IMU and updates on the sim's odometry
-position + attitude (loosely-coupled). If a trained gatenet.pt is present, the
-GateNet->PnP vision pose can be fused too (Modules 3-4); odometry is the
-robust default since the sim provides it directly.
+position + attitude (loosely-coupled). If a trained gate_pose.pt is present, the
+YOLO-pose -> PnP vision pipeline (Modules 3-4) builds a world gate tracker and
+the policy flies the vision-refined gate map instead of the raw broadcast;
+odometry still anchors the drone position.
 
     uv run -m rl.deploy                 # fly the policy on the live sim
     uv run -m rl.deploy --selftest      # closed-loop on internal env (no sim)
@@ -25,10 +26,12 @@ import time
 import numpy as np
 import torch
 
-from rl import spec
+from rl import gatepose, spec
 from rl.ekf import ESKF
 from rl.env import GateRacingEnv
+from rl.gate_tracker import GateTracker
 from rl.observation import build_observation
+from rl.perception import GatePerception
 from rl.train_ppo import POLICY_PT, StandalonePolicy
 
 
@@ -53,13 +56,13 @@ def load_policy(path: str = POLICY_PT, device: str = "cpu"):
 
 
 def _gate_normal(g):
-    return spec.quat_to_R(np.asarray(g["quat"], float)) @ np.array([1.0, 0, 0])
+    return spec.gate_normal_world(g["quat"])
 
 
 def _passed(p, prev_signed, g):
     """Return (passed, new_signed)."""
     gc = np.asarray(g["pos"], float)
-    R = spec.quat_to_R(np.asarray(g["quat"], float))
+    R = spec.gate_rotation(g["quat"])  # convention-corrected gate frame
     n = R[:, 0]  # gate normal (through-axis)
     signed = float(n @ (p - gc))
     if prev_signed < 0.0 <= signed:
@@ -83,16 +86,36 @@ class PolicyRunner:
         self._prev_signed = None
         self._last_imu_t = None
 
+        # Vision: YOLO-pose -> PnP -> world gate tracker. Auto-on when a trained
+        # gate_pose.pt exists; otherwise fall back to the broadcast gate map.
+        self.tracker = GateTracker()
+        self.vision = None
+        self._last_vision_fid = -1
+        if os.path.exists(gatepose.WEIGHTS_PATH):
+            try:
+                self.vision = GatePerception()
+                print(f"[deploy] vision ON — {gatepose.WEIGHTS_PATH}", flush=True)
+            except Exception as e:  # missing ultralytics / bad weights
+                print(f"[deploy] vision OFF — {e}", flush=True)
+        else:
+            print("[deploy] vision OFF — no gate_pose.pt (broadcast map)", flush=True)
+
     def run(self):
-        from rl.sim_interface import SimInterface
+        from rl.sim_interface import GATE_MAP_PATH, SimInterface, load_gate_map
 
         sim = SimInterface()
         if not sim.wait_for_telemetry():
             print("[deploy] no telemetry — is the simulator running?")
             return
-        gate_map = sim.capture_gate_map()
+        # Gate map is broadcast once at race start; if we joined mid-race and
+        # missed it, fall back to the saved map (static course/origin). Vision
+        # refines gate POSITIONS live, so a slightly stale saved map is fine.
+        gate_map = sim.capture_gate_map(timeout_s=5.0)
+        if not gate_map and os.path.exists(GATE_MAP_PATH):
+            gate_map = load_gate_map(GATE_MAP_PATH)
+            print(f"[deploy] using saved gate map ({len(gate_map)} gates)", flush=True)
         if not gate_map:
-            print("[deploy] no gate map; aborting")
+            print("[deploy] no gate map (no broadcast, no saved file); aborting")
             return
 
         # Seed EKF from first odometry.
@@ -131,22 +154,37 @@ class PolicyRunner:
             st = self.ekf.state()
             ang_vel = np.array(snap.ang_vel) if snap.ang_vel else np.zeros(3)
 
-            # Gate progression.
-            if self.gate_idx < len(gate_map):
+            # --- Vision: detect gates this frame -> world tracks -> map fix ----
+            # The policy flies vision-refined gate positions, keeping the
+            # broadcast map's order/orientation/size. Drift cancels because the
+            # track and the observation use the same drone pose (see gate_tracker).
+            effective_map = gate_map
+            if self.vision is not None:
+                frame = sim.data.get("frame")
+                if frame is not None and frame["frame_id"] != self._last_vision_fid:
+                    self._last_vision_fid = frame["frame_id"]
+                    seen = self.vision.process(frame["img"], st["p"], st["q"])
+                    self.tracker.update(
+                        [g["gate_pos_world"] for g in seen], snap.t_mono
+                    )
+                effective_map = self.tracker.corrected_map(gate_map)
+
+            # Gate progression (on the vision-corrected map).
+            if self.gate_idx < len(effective_map):
                 passed, self._prev_signed = _passed(
-                    st["p"], self._prev_signed, gate_map[self.gate_idx]
+                    st["p"], self._prev_signed, effective_map[self.gate_idx]
                 )
                 if passed:
                     self.gate_idx += 1
                     print(
-                        f"[deploy] gate {self.gate_idx}/{len(gate_map)} passed",
+                        f"[deploy] gate {self.gate_idx}/{len(effective_map)} passed",
                         flush=True,
                     )
-                    if self.gate_idx >= len(gate_map):
+                    if self.gate_idx >= len(effective_map):
                         print("[deploy] COURSE COMPLETE", flush=True)
                         sim.send_attitude_rates(0, 0, 0, spec.HOVER_THRUST)
                         return
-                    g = gate_map[self.gate_idx]
+                    g = effective_map[self.gate_idx]
                     self._prev_signed = float(
                         _gate_normal(g) @ (st["p"] - np.array(g["pos"]))
                     )
@@ -156,7 +194,7 @@ class PolicyRunner:
                 st["v"],
                 st["q"],
                 ang_vel,
-                gate_map,
+                effective_map,
                 self.gate_idx,
                 self.last_action[:3],
             )
