@@ -45,20 +45,22 @@ OBSTACLE_CLEAR_ZONE = 0.25
 AMBIGUOUS_YAW_GAIN = math.radians(15)
 
 POST_GATE_HOVER_S = 0.0
-POST_GATE_VISION_COOLDOWN_S = 4.0
+POST_GATE_VISION_COOLDOWN_S = 8.0
 FORCE_TELEM_AFTER_PASS_S = 5.0
-POST_PASS_BRAKE_S = 2.5
-POST_PASS_BRAKE_PITCH = 0.04
-POST_PASS_ALIGN_S = 3.5
-POST_PASS_SPEED_CAP_S = 5.0
+POST_PASS_BRAKE_S = 2.0
+POST_PASS_BRAKE_PITCH = 0.03
+POST_PASS_ALIGN_S = 2.5
+POST_PASS_SPEED_CAP_S = 4.0
 INTER_GATE_MAX_PITCH = 0.035
 RECOVERY_BRAKE_PITCH = 0.0
-INTER_GATE_ALIGN_RAD = math.radians(18)
+INTER_GATE_ALIGN_RAD = math.radians(12)
 INTER_GATE_DIRECT_UNTIL_M = 18.0
-INTER_GATE_YAW_GAIN = 0.88
+INTER_GATE_YAW_GAIN = 0.75
 PITCH_TAPER_START_FRAC = 0.55
 PATH_REJOIN_XTE_M = 4.0
 INTER_GATE_FLYTHROUGH_M = 10.0
+INTER_GATE_RECOVERY_XTE_M = 6.0
+INTER_GATE_RECOVERY_BRAKE_PITCH = 0.02
 MIN_PASS_INTERVAL_S = 4.0
 TELEM_PASS_MIN_APPROACH_M = 3.0
 PATH_PASS_MIN_APPROACH_M = 5.0
@@ -88,8 +90,8 @@ SEARCH_FORWARD_PITCH = -0.03
 SEARCH_WARMUP_S = 0.5
 
 # Passed-gate rejection — only ignore vision toward gates already flown through
-PASSED_GATE_NEAR_M = 1.5
-PASSED_GATE_ANGLE_RAD = math.radians(35)
+PASSED_GATE_NEAR_M = 22.0
+PASSED_GATE_ANGLE_RAD = math.radians(50)
 
 CONTROL_DT_S = 1 / 250
 
@@ -137,6 +139,8 @@ class Pilot:
         self._overshoot_logged: bool = False
         self._post_pass_speed_cap_until: float = 0.0
         self._post_pass_align_until: float = 0.0
+        self._inter_gate_recover: bool = False
+        self._inter_gate_aligned: bool = False
         self.data["pilot_course_gate_index"] = 0
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
@@ -170,7 +174,9 @@ class Pilot:
 
         return best_gate
 
-    def _reset_approach_state(self, *, keep_post_gate: bool = False) -> None:
+    def _reset_approach_state(
+        self, *, keep_post_gate: bool = False, keep_yaw: bool = False
+    ) -> None:
         self._advancing = False
         self._path_lookahead = False
         self._stabilize_start = None
@@ -180,8 +186,11 @@ class Pilot:
         self._vision_suppress_until = 0.0
         self._telem_min_dist = float("inf")
         self._segment_min_dist = float("inf")
-        self._last_yaw_cmd = 0.0
+        if not keep_yaw:
+            self._last_yaw_cmd = 0.0
         self._overshoot_logged = False
+        self._inter_gate_recover = False
+        self._inter_gate_aligned = False
 
     def _mark_gate_passed(self) -> str | None:
         now = _time.monotonic()
@@ -212,9 +221,14 @@ class Pilot:
         self._post_pass_align_until = _time.monotonic() + POST_PASS_ALIGN_S
         self._reset_approach_state()
         self._post_gate_time = None
-        self._last_target_course_idx = self._course_gate_index
+        # Force NEW TARGET log/handoff for the next gate on next tick.
+        self._last_target_course_idx = self._course_gate_index - 1
         self._path_lookahead = False
         self._last_yaw_cmd = 0.0
+        self._inter_gate_recover = False
+        self._inter_gate_aligned = False
+        self._on_course_target_changed(keep_yaw=True)
+        self._snap_yaw_toward_course_gate()
 
         print(
             f"[pilot] Gate {gate_id} marked COMPLETE, "
@@ -247,12 +261,76 @@ class Pilot:
                 )
         return gate_id
 
+    def _course_steering_bearing(self, odometry: dict) -> float | None:  # type: ignore[type-arg]
+        """Bearing for steering — path tangent after pass, direct near gate."""
+        from simulator.course_path import segment_for_index
+
+        gate = self._get_course_gate()
+        if gate is None:
+            return None
+        cx, cy, _ = gate["position_ned"]
+        ox, oy = odometry["x"], odometry["y"]
+        dist = math.hypot(cx - ox, cy - oy)
+        seg = segment_for_index(self.data, self._course_gate_index)
+        if seg is not None and self._gates_passed > 0 and dist > INTER_GATE_DIRECT_UNTIL_M:
+            return float(seg["bearing_rad"])
+        return math.atan2(cy - oy, cx - ox)
+
+    def _snap_yaw_toward_course_gate(self) -> None:
+        """After pass — hold path tangent toward next gate, not rear vision."""
+        odometry = self.data.get("odometry")
+        if odometry is None:
+            self._last_yaw_cmd = 0.0
+            return
+        bearing = self._course_steering_bearing(odometry)
+        if bearing is None:
+            self._last_yaw_cmd = 0.0
+            return
+        yaw = self._yaw_from_odometry(odometry)
+        err = bearing_to_yaw_delta(bearing, yaw)
+        self._last_yaw_cmd = _clamp(1.0 * err, -0.95, 0.95)
+
+    def _yaw_rate_toward_course_gate(self, odometry: dict) -> float:  # type: ignore[type-arg]
+        bearing = self._course_steering_bearing(odometry)
+        if bearing is None:
+            return self._smooth_yaw_rate(0.0)
+        yaw = self._yaw_from_odometry(odometry)
+        err = bearing_to_yaw_delta(bearing, yaw)
+        return self._smooth_yaw_rate(_clamp(0.90 * err, -0.95, 0.95))
+
+    def _vision_steering_allowed(self) -> bool:
+        """Gate 0 vision only; after pass use map until final approach."""
+        if self._gates_passed == 0:
+            return True
+        if _time.monotonic() < self._vision_cooldown_until:
+            return False
+        cur = self._course_gate_dist()
+        return cur is not None and cur < VISION_FINAL_APPROACH_M
+
     def _vision_flythrough(self, nx: float, ny: float, r_frac: float) -> bool:
         """Detect gate pass from vision when gate fills frame (r_frac stays large)."""
         if self._peak_r_frac < 0.08 or not self._advancing:
             return False
         if not self._vision_pass_allowed():
             return False
+
+        # Gate 0 — strict pass, but allow fill-frame and exit signatures
+        if self._gates_passed == 0:
+            if self._peak_r_frac < 0.12:
+                return False
+            odometry = self.data.get("odometry")
+            if abs(nx) < 0.35 and r_frac < self._peak_r_frac * 0.55:
+                return True
+            if self._peak_r_frac > 0.22 and r_frac < 0.04:
+                return True
+            if (
+                odometry is not None
+                and self._peak_r_frac > 0.14
+                and self._gate_is_behind(odometry)
+            ):
+                return True
+            return False
+
         # Classic: gate shrinks while still near center
         if abs(nx) < 0.28 and r_frac < self._peak_r_frac * 0.60:
             return True
@@ -284,9 +362,10 @@ class Pilot:
         if _time.monotonic() - self._last_pass_mono < MIN_PASS_INTERVAL_S:
             return False
 
-        # Gate 0: vision fly-through only
+        # Gate 0: vision-primary, but allow odometry fly-through once committed
         if self._course_gate_index == 0:
-            return False
+            if not self._advancing or self._peak_r_frac < 0.14:
+                return False
 
         odometry = self.data.get("odometry")
         gate = self._get_course_gate()
@@ -426,10 +505,32 @@ class Pilot:
         return _time.monotonic() < self._post_pass_align_until
 
     def _sync_sim_gate_progress(self) -> None:
-        """Log sim gate index only — do not auto-mark passes (causes skips)."""
-        if not self.data.get("track_gates"):
+        """Sync pilot gate progress from sim active_gate_index (guarded)."""
+        track_gates = self.data.get("track_gates") or []
+        if not track_gates:
             return
         sim_idx = int(self.data.get("active_gate_index", 0))
+        if (
+            self._course_gate_index == 0
+            and sim_idx > 0
+            and self._peak_r_frac > 0.15
+            and self._advancing
+        ):
+            odometry = self.data.get("odometry")
+            if odometry is None:
+                return
+            cur = self._course_gate_dist(odometry)
+            behind = self._gate_is_behind(odometry)
+            receding = (
+                cur is not None
+                and self._telem_min_dist < 6.0
+                and cur > self._telem_min_dist + 1.5
+            )
+            if behind or receding:
+                print("[pilot] sim confirmed gate 0 pass", flush=True)
+                self._mark_gate_passed()
+                self._last_logged_sim_idx = sim_idx
+            return
         if sim_idx > self._course_gate_index and sim_idx != self._last_logged_sim_idx:
             self._last_logged_sim_idx = sim_idx
             print(
@@ -527,7 +628,8 @@ class Pilot:
         dist = self._course_gate_dist(odometry)
         if dist is None:
             return
-        gid = self._gate_id(gate)
+        course = self._get_course_gate()
+        gid = self._gate_id(course) if course else self._gate_id(gate)
         ox, oy, oz = odometry["x"], odometry["y"], odometry.get("z", 0.0)
         xte, _ = self._path_cross_track(odometry)
         print(
@@ -737,24 +839,16 @@ class Pilot:
             self._path_lookahead = False
             return current
 
-        next_gate = self._get_lookahead_gate()
-        cx, cy, _ = current["position_ned"]
-        ox, oy = odometry["x"], odometry["y"]
-        dist = math.hypot(cx - ox, cy - oy)
-        use_next = (
-            next_gate is not None
-            and self._advancing
-            and dist < PATH_LOOKAHEAD_DIST_M
-        )
-        self._path_lookahead = use_next
-        return next_gate if use_next else current
+        # Gate 0 — always steer to current gate; no lookahead to gate 1
+        self._path_lookahead = False
+        return current
 
-    def _on_course_target_changed(self) -> None:
+    def _on_course_target_changed(self, *, keep_yaw: bool = False) -> None:
         if self._course_gate_index == self._last_target_course_idx:
             return
         in_hover = self._post_gate_time is not None
         self._last_target_course_idx = self._course_gate_index
-        self._reset_approach_state(keep_post_gate=in_hover)
+        self._reset_approach_state(keep_post_gate=in_hover, keep_yaw=keep_yaw)
         gate = self._get_course_gate()
         if gate is not None:
             gid = self._gate_id(gate)
@@ -782,8 +876,27 @@ class Pilot:
         }
 
     def _vision_usable(self, gate_target: dict) -> bool:  # type: ignore[type-arg]
+        if not self._vision_steering_allowed():
+            return False
+        if (
+            self._gates_passed > 0
+            and _time.monotonic() < self._vision_cooldown_until
+        ):
+            return False
         nx = gate_target.get("nx", 0.0)
         ny = gate_target.get("ny", 0.0)
+        # Rear-view gate frame after pass — never chase it
+        if self._gates_passed > 0 and abs(nx) > 0.35:
+            return False
+        # Gate 0 commit: keep tracking through fill-frame / ambiguous frames
+        if (
+            self._gates_passed == 0
+            and self._advancing
+            and self._peak_r_frac > 0.14
+            and gate_target.get("raw_detected")
+            and abs(nx) < 0.72
+        ):
+            return True
         if abs(nx) > VISION_MAX_NX:
             return False
         # After close approach, ignore off-center blobs (passed gate / wrong contour)
@@ -932,13 +1045,25 @@ class Pilot:
 
     def _reacquire_without_map(self) -> None:
         """Yaw toward visible gate blob; sweep only when blind."""
+        odometry = self.data.get("odometry")
+        course_gate = self._get_course_gate()
+        if self._gates_passed > 0 and odometry is not None and course_gate is not None:
+            self._steer_toward_gate(
+                course_gate, odometry, pitch=POST_PASS_BRAKE_PITCH
+            )
+            return
+
         gate = self.data.get("gate_target") or {}
         drone_pos = self._get_position(for_telemetry=True)
         z_hold = drone_pos[2] if drone_pos else None
         thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_hold)
 
-        if gate.get("raw_detected") and abs(gate.get("nx", 0.0)) < 0.85:
-            nx = gate.get("nx", 0.0)
+        nx = gate.get("nx", 0.0)
+        if (
+            gate.get("raw_detected")
+            and abs(nx) < 0.85
+            and not self._is_passed_gate(nx)
+        ):
             ny = gate.get("ny", 0.0)
             yaw_rate = _clamp(VISION_YAW_GAIN * 0.5 * nx, -1.0, 1.0)
             ny_offset = _clamp(
@@ -1010,10 +1135,13 @@ class Pilot:
             self._mark_gate_passed()
             self._mode_str = "transit"
 
-        # Brief post-pass brake — yaw along path toward next gate
+        # Post-pass — map steer toward next gate (no vision look-back)
         if (
             self._gates_passed > 0
-            and _time.monotonic() < self._brake_until
+            and (
+                _time.monotonic() < self._brake_until
+                or self._post_pass_align_phase()
+            )
             and self.data.get("odometry") is not None
         ):
             gate = self._get_course_gate()
@@ -1142,20 +1270,6 @@ class Pilot:
             self._reacquire_without_map()
             return
 
-        # Gate 1: prefer vision, but switch to map once close / off-center
-        if (
-            self._gates_passed == 0
-            and not force_telem
-            and telem is not None
-            and self._peak_r_frac > 0.15
-            and gate_target
-            and abs(gate_target.get("nx", 0.0)) > VISION_CHASE_MAX_NX
-        ):
-            nearest, odometry = telem
-            self._mode_str = "telemetry_gate1"
-            self._fly_toward_gate_telemetry(nearest, odometry)
-            return
-
         # Gate 1: always prefer vision over map (map arrives mid-countdown)
         if (
             self._gates_passed == 0
@@ -1196,6 +1310,8 @@ class Pilot:
             gate_target
             and gate_target.get("raw_detected")
             and gate_target.get("ambiguous")
+            and self._gates_passed == 0
+            and not vision_cooldown
             and telem is None
             and self._vision_usable(gate_target)
         ):
@@ -1222,6 +1338,16 @@ class Pilot:
         if self._searching:
             self._mode_str = "reacquire"
             self._reacquire_without_map()
+            return
+
+        # Gate 0: vision dropped mid-commit — punch through on map/odometry
+        if (
+            self._gates_passed == 0
+            and self._advancing
+            and self._peak_r_frac > 0.12
+        ):
+            self._mode_str = "gate0_commit"
+            self._fly_gate0_commit(gate_target)
             return
 
         self._mode_str = "no_target"
@@ -1315,6 +1441,40 @@ class Pilot:
         self.controller.set_control_mode("attitude")
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
+    def _gate0_pitch_scale(self, r_frac: float) -> float:
+        """Gate 0 — pitch up when close so we fly through, not into, the frame."""
+        if r_frac > 0.14 or self._peak_r_frac > 0.18:
+            return 0.60
+        if r_frac > 0.08:
+            return 0.45
+        return self._pitch_scale(r_frac)
+
+    def _fly_gate0_commit(self, gate_target: dict | None) -> None:  # type: ignore[type-arg]
+        """Forward commit when gate fills frame and vision goes ambiguous."""
+        odometry = self.data.get("odometry")
+        cruise = self._cruise_pitch()
+        pitch = self._clamp_pitch(cruise * 0.55)
+        yaw_rate = 0.0
+        z_target = None
+        if gate_target and odometry is not None:
+            nx = gate_target.get("nx", 0.0)
+            ny = gate_target.get("ny", 0.0)
+            r_frac = gate_target.get("r_frac", 0.0)
+            if abs(nx) < 0.55:
+                yaw_rate = _clamp(VISION_YAW_GAIN * nx * 0.45, -0.8, 0.8)
+            z_now = odometry.get("z", 0.0)
+            z_target = z_now + _clamp(
+                ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
+            )
+            if self._vision_flythrough(nx, ny, r_frac):
+                self._mark_gate_passed()
+                pitch = self._clamp_pitch(abs(cruise) * 0.35)
+        thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+        if odometry is not None:
+            yaw_rate = self._yaw_rate_toward_course_gate(odometry)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
+
     def _hover(self, z_target: float | None = None) -> None:
         thrust = self._altitude_thrust(HOVER_THRUST, z_target)
         self.controller.set_control_mode("attitude")
@@ -1340,38 +1500,13 @@ class Pilot:
             gate_conf = min(1.0, gate_conf * 1.15)
         gate_conf *= max(0.5, vio_q)
         cruise = self._cruise_pitch()
-        p_scale = self._pitch_scale(r_frac)
-        if self._gates_passed == 0 and self._peak_r_frac > 0.22:
-            p_scale = min(p_scale, 0.25)
+        p_scale = (
+            self._gate0_pitch_scale(r_frac)
+            if self._gates_passed == 0
+            else self._pitch_scale(r_frac)
+        )
 
         yaw_rate = _clamp(VISION_YAW_GAIN * nx * gate_conf, -1.2, 1.2)
-
-        # Gate 0: blend yaw toward prefetched next gate while advancing through opening
-        if self._gates_passed == 0 and self._advancing and odometry is not None:
-            next_g = self.data.get("next_gate")
-            current = self._get_course_gate()
-            if next_g and current:
-                cx, cy, _ = current["position_ned"]
-                ox, oy = odometry["x"], odometry["y"]
-                dist0 = math.hypot(cx - ox, cy - oy)
-                if dist0 < PATH_LOOKAHEAD_DIST_M:
-                    nxg, nyg, _ = next_g["position_ned"]
-                    qw = odometry.get("qw", 1.0)
-                    qx = odometry.get("qx", 0.0)
-                    qy = odometry.get("qy", 0.0)
-                    qz = odometry.get("qz", 0.0)
-                    yaw = math.atan2(
-                        2.0 * (qw * qz + qx * qy),
-                        1.0 - 2.0 * (qy * qy + qz * qz),
-                    )
-                    bearing_next = math.atan2(nyg - oy, nxg - ox)
-                    bearing_err = bearing_next - yaw
-                    bearing_err = (bearing_err + math.pi) % (2 * math.pi) - math.pi
-                    blend = max(0.0, 1.0 - dist0 / PATH_LOOKAHEAD_DIST_M) * 0.55
-                    yaw_map = _clamp(TELEMETRY_YAW_GAIN * bearing_err, -1.0, 1.0)
-                    yaw_rate = _clamp(
-                        yaw_rate * (1.0 - blend) + yaw_map * blend, -1.2, 1.2
-                    )
 
         ny_offset = _clamp(
             ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
@@ -1391,6 +1526,11 @@ class Pilot:
             self._mark_gate_passed()
             pitch = self._clamp_pitch(abs(cruise) * 0.3)
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+            yaw_rate = (
+                self._yaw_rate_toward_course_gate(odometry)
+                if odometry is not None
+                else 0.0
+            )
             self.controller.set_control_mode("attitude")
             self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
             return
@@ -1402,8 +1542,16 @@ class Pilot:
 
         if self._advancing:
             # ADVANCE — only pitch forward when gate is centered in view
-            off_center_limit = 0.32 if self._gates_passed > 0 else 0.75
-            if abs(nx) > off_center_limit or (abs(ny) > 0.88 and r_frac < 0.08):
+            off_center_limit = 0.32 if self._gates_passed > 0 else 0.85
+            bad_vertical = (
+                self._gates_passed > 0 and abs(ny) > 0.88 and r_frac < 0.08
+            )
+            gate0_commit = (
+                self._gates_passed == 0
+                and (self._peak_r_frac > 0.16 or r_frac > 0.10)
+                and abs(nx) < 0.40
+            )
+            if abs(nx) > off_center_limit or bad_vertical:
                 self._advancing = False
                 self._stabilize_start = None
                 print(
@@ -1412,10 +1560,11 @@ class Pilot:
                 )
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+            elif gate0_commit:
+                pitch = self._clamp_pitch(cruise * 0.55)
+                thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             elif abs(nx) < 0.28 and r_frac >= VISION_PROXIMITY_R_FRAC:
                 slow = 0.45 * p_scale
-                if self._gates_passed == 0 and self._peak_r_frac > 0.25:
-                    slow = min(slow, 0.15)
                 pitch = self._clamp_pitch(cruise * slow)
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             elif abs(nx) < 0.28:
@@ -1476,7 +1625,7 @@ class Pilot:
         ox, oy = odometry["x"], odometry["y"]
         yaw = self._yaw_from_odometry(odometry)
         seg = segment_for_index(self.data, self._course_gate_index)
-        direct = self._direct_bearing_to_course_gate(odometry)
+        direct = self._course_steering_bearing(odometry)
         if self._gates_passed > 0 and direct is not None:
             bearing = direct
             aggressive_yaw = True
@@ -1517,76 +1666,50 @@ class Pilot:
         *,
         allow_pass_detection: bool = True,
     ) -> None:
-        """Gates 1+ — follow blue path, align, then fly through opening."""
+        """Gates 1+ — steer to course gate center, pitch only when aligned."""
+        current = self._get_course_gate()
+        if current is None:
+            self._hover()
+            return
+
         if _time.monotonic() < self._brake_until:
-            brake_pitch = POST_PASS_BRAKE_PITCH
-            self._steer_toward_gate(gate, odometry, pitch=brake_pitch)
+            self._steer_toward_gate(current, odometry, pitch=POST_PASS_BRAKE_PITCH)
             return
 
         ox, oy, oz = odometry["x"], odometry["y"], odometry.get("z", 0.0)
-        gx, gy, gz = gate["position_ned"]
-        current = self._get_course_gate()
-        cur_dist = math.hypot(gx - ox, gy - oy)
-        if current is not None:
-            cx, cy, cz = current["position_ned"]
-            cur_dist = math.sqrt((cx - ox) ** 2 + (cy - oy) ** 2 + (cz - oz) ** 2)
+        cx, cy, cz = current["position_ned"]
+        cur_dist = math.sqrt((cx - ox) ** 2 + (cy - oy) ** 2 + (cz - oz) ** 2)
         self._telem_min_dist = min(self._telem_min_dist, cur_dist)
         self._segment_min_dist = min(self._segment_min_dist, cur_dist)
 
-        xte, seg = self._path_cross_track(odometry)
-        abs_xte = abs(xte)
-        on_path = abs_xte < PATH_REJOIN_XTE_M
-        z_target = self._approach_z_target(oz, gz, cur_dist)
-
+        # Blend path bearing when far, direct bearing when close.
         yaw = self._yaw_from_odometry(odometry)
-        direct = self._direct_bearing_to_course_gate(odometry)
-        if direct is None:
-            direct = math.atan2(gy - oy, gx - ox)
-        path_bearing = float(seg["bearing_rad"]) if seg is not None else direct
-
-        steer_bearing = direct
+        steer_bearing = self._course_steering_bearing(odometry)
+        if steer_bearing is None:
+            steer_bearing = math.atan2(cy - oy, cx - ox)
 
         bearing_error = bearing_to_yaw_delta(steer_bearing, yaw)
-        aligned = abs(bearing_error) < INTER_GATE_ALIGN_RAD
+        err_abs = abs(bearing_error)
+        aligned = err_abs < math.radians(15)
 
-        aggressive_yaw = True
-        if aggressive_yaw:
-            yaw_rate = self._yaw_rate_for_bearing(
-                bearing_error, cur_dist, aggressive=True
-            )
-            self._last_yaw_cmd = yaw_rate
-        else:
-            yaw_rate = self._yaw_rate_for_bearing(bearing_error, cur_dist)
-
+        yaw_rate = self._smooth_yaw_rate(
+            _clamp(0.70 * bearing_error, -0.70, 0.70)
+        )
+        z_target = self._approach_z_target(oz, cz, cur_dist)
         thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
-        pitch = 0.0
         cruise = self._cruise_pitch()
+        pitch = 0.0
 
+        # Must turn toward gate before pitching forward.
         if self._post_pass_align_phase() or not aligned:
-            pitch = POST_PASS_BRAKE_PITCH if abs(bearing_error) > INTER_GATE_ALIGN_RAD else 0.0
-        elif abs_xte > PATH_REJOIN_XTE_M * 1.5:
-            pitch = 0.0
-        elif self._recovery_active(odometry):
-            if aligned:
-                pitch = self._clamp_pitch(-INTER_GATE_MAX_PITCH * 0.8)
-        elif cur_dist < INTER_GATE_FLYTHROUGH_M:
-            path_err = bearing_to_yaw_delta(path_bearing, yaw)
-            pitch = self._approach_pitch(path_err, cur_dist, cruise, odometry)
-        elif self._post_pass_speed_capped():
+            if err_abs > math.radians(10):
+                pitch = POST_PASS_BRAKE_PITCH
+        elif cur_dist < INTER_GATE_FLYTHROUGH_M and aligned:
+            pitch = self._clamp_pitch(-max(abs(cruise) * 0.65, 0.035))
+        elif aligned and cur_dist < 30.0:
             pitch = self._clamp_pitch(-INTER_GATE_MAX_PITCH)
-        else:
-            pitch = self._clamp_pitch(-TRANSIT_MAX_PITCH)
 
-        if (
-            allow_pass_detection
-            and on_path
-            and self._telem_min_dist < 6.0
-            and cur_dist < 7.0
-            and (
-                self._gate_is_behind(odometry)
-                or cur_dist > self._telem_min_dist + 1.2
-            )
-        ):
+        if allow_pass_detection and self._gate_flythrough_detected():
             self._mark_gate_passed()
             pitch = self._clamp_pitch(abs(cruise) * 0.2)
 
