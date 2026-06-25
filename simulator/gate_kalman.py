@@ -118,14 +118,20 @@ class GateKalmanFilter:
         q_meas: np.ndarray,
         sigma_pos: float,
         sigma_att: float,
-    ) -> None:
+        chi2_thresh: float = 11.34,
+    ) -> bool:
         p_meas = np.asarray(p_meas, dtype=float)
         q_meas = quat_norm(np.asarray(q_meas, dtype=float))
 
         Rm = (sigma_pos**2) * np.eye(3)
+        innov = p_meas - self.p
         S = self.P_pos + Rm
+        mahal = float(innov.T @ np.linalg.inv(S) @ innov)
+        if mahal > chi2_thresh:
+            return False
+
         K = self.P_pos @ np.linalg.inv(S)
-        self.p = self.p + K @ (p_meas - self.p)
+        self.p = self.p + K @ innov
         self.P_pos = (np.eye(3) - K) @ self.P_pos
 
         dq = quat_mult(quat_inv(self.q), q_meas)
@@ -139,6 +145,7 @@ class GateKalmanFilter:
         self.q = quat_norm(quat_mult(self.q, quat_from_smallangle(dtheta_corr)))
         self.P_att = (np.eye(3) - K_a) @ self.P_att
         self._initialized = True
+        return True
 
     @property
     def initialized(self) -> bool:

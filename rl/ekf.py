@@ -130,6 +130,22 @@ class ESKF:
         r = np.asarray(p_meas, float) - self.p
         self._update(H, r, (s**2) * np.eye(3))
 
+    def update_position_gated(
+        self, p_meas, sigma=None, chi2_thresh: float = 11.34
+    ) -> bool:
+        """Position update with Mahalanobis outlier rejection (3-dof, ~99%)."""
+        s = self.s_pos if sigma is None else sigma
+        H = np.zeros((3, 9))
+        H[:, 0:3] = np.eye(3)
+        r = np.asarray(p_meas, float) - self.p
+        Rm = (s**2) * np.eye(3)
+        S = H @ self.P @ H.T + Rm
+        mahal = float(r.T @ np.linalg.inv(S) @ r)
+        if mahal > chi2_thresh:
+            return False
+        self._update(H, r, Rm)
+        return True
+
     def update_attitude(self, q_meas, sigma=None):
         s = self.s_att if sigma is None else sigma
         dq = quat_mult(quat_inv(self.q), quat_norm(np.asarray(q_meas, float)))

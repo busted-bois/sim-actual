@@ -46,7 +46,10 @@ def build_gate_mask(img: np.ndarray) -> np.ndarray | None:
 
 
 def detect_gate(
-    img: np.ndarray, frame_id: int, sim_time_ns: int
+    img: np.ndarray,
+    frame_id: int,
+    sim_time_ns: int,
+    corner_roi: tuple[int, int, int, int] | None = None,
 ) -> GateDetection | None:
     """Detect a hex-colored gate in a BGR image frame.
 
@@ -114,7 +117,7 @@ def detect_gate(
 
     contour_mask = np.zeros_like(mask)
     cv2.drawContours(contour_mask, [best_contour], -1, 255, -1)
-    corners = detect_corners(contour_mask)
+    corners = detect_corners(contour_mask, roi=corner_roi)
     if corners is not None:
         corners_px = tuple((float(x), float(y)) for x, y in corners.reshape(4, 2))
         pose = estimate_pose(corners)

@@ -52,9 +52,22 @@ def order_quad(pts: np.ndarray) -> np.ndarray:
     )
 
 
-def detect_corners(mask: np.ndarray) -> np.ndarray | None:
-    """Largest gate blob -> 4 ordered corners, or None."""
+def detect_corners(
+    mask: np.ndarray,
+    roi: tuple[int, int, int, int] | None = None,
+) -> np.ndarray | None:
+    """Largest gate blob -> 4 ordered corners, or None.
+
+    Optional roi=(x0, y0, x1, y1) restricts search to predicted corner region.
+    """
     m = mask
+    offset = (0, 0)
+    if roi is not None:
+        x0, y0, x1, y1 = roi
+        m = m[y0:y1, x0:x1]
+        offset = (x0, y0)
+        if m.size == 0:
+            return None
     if m.ndim == 3:
         m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
     m = (m > 127).astype(np.uint8) * 255
@@ -75,7 +88,29 @@ def detect_corners(mask: np.ndarray) -> np.ndarray | None:
             break
     if quad is None:
         quad = cv2.boxPoints(cv2.minAreaRect(c)).astype(np.float64)
-    return order_quad(quad)
+    quad = order_quad(quad)
+    if offset != (0, 0):
+        quad[:, 0] += offset[0]
+        quad[:, 1] += offset[1]
+    return quad
+
+
+def filter_outlier_corners(
+    corners: np.ndarray,
+    predicted: np.ndarray | None,
+    max_dist_px: float = 80.0,
+) -> np.ndarray:
+    """Drop corners whose innovation exceeds max_dist_px from prediction."""
+    corners = order_quad(corners.astype(np.float64))
+    if predicted is None:
+        return corners
+    pred = predicted.astype(np.float64).reshape(4, 2)
+    dists = np.linalg.norm(corners - pred, axis=1)
+    out = corners.copy()
+    for i in range(4):
+        if dists[i] > max_dist_px:
+            out[i] = pred[i]
+    return out
 
 
 def estimate_pose(

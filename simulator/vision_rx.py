@@ -21,9 +21,11 @@ class VisionRX:
         self.data = data
         self.vio = vio
         self.gate_tracker = gate_tracker
+        from simulator.corner_tracker import CornerTracker
         from simulator.gate_classifier import GateClassifier
         from simulator.obstacle_tracker import ObstacleTracker
 
+        self._corner_tracker = CornerTracker(data)
         self._gate_classifier = GateClassifier()
         self._obstacle_tracker = ObstacleTracker()
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
@@ -92,12 +94,32 @@ class VisionRX:
         try:
             import time as _time
 
+            from dataclasses import replace
+
             from simulator.gate_detector import build_gate_mask, detect_gate
             from simulator.obstacle_detector import detect_obstacles
 
             h, w = img.shape[:2]
+            corner_roi = self._corner_tracker.search_roi()
             gate_mask = build_gate_mask(img)
-            raw_detection = detect_gate(img, frame_id, sim_time_ns)
+            raw_detection = detect_gate(
+                img, frame_id, sim_time_ns, corner_roi=corner_roi
+            )
+            if raw_detection is not None and raw_detection.corners_px:
+                smoothed = self._corner_tracker.process(
+                    raw_detection.corners_px,
+                    frame_id,
+                    raw_detection.reproj_err_px,
+                )
+                if smoothed is not None:
+                    corners_px = tuple(
+                        (float(x), float(y)) for x, y in smoothed.reshape(4, 2)
+                    )
+                    raw_detection = replace(
+                        raw_detection, corners_px=corners_px
+                    )
+            else:
+                self._corner_tracker.process(None, frame_id)
             classified = self._gate_classifier.classify(raw_detection, w, h)
 
             obstacle_dets = detect_obstacles(
@@ -227,6 +249,9 @@ class VisionRX:
             "width_px": det.width_px,
             "height_px": det.height_px,
             "corners_px": det.corners_px,
+            "corner_tracking": bool(
+                (self.data.get("corner_track") or {}).get("tracking")
+            ),
         }
 
         tag = "GATE" if nav_goal else ("AMBIG" if classified.ambiguous else "RAW")

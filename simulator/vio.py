@@ -23,6 +23,10 @@ MAX_GATE_TRACK_DELTA_M = 15.0
 MIN_VISION_QUALITY = 0.15
 
 
+def _course_gate_index(data: dict) -> int:
+    return int(data.get("pilot_course_gate_index", data.get("active_gate_index", 0)))
+
+
 class VisualInertialOdometry:
     """Loosely-coupled VIO: IMU predict + gate PnP position update."""
 
@@ -212,7 +216,8 @@ class VisualInertialOdometry:
                 return False
 
         sigma = BASE_VISION_SIGMA_M * (1.0 + reproj_err / 5.0)
-        self.ekf.update_position(p_vis, sigma=sigma)
+        if not self.ekf.update_position_gated(p_vis, sigma=sigma):
+            return False
         self._initialized = True
         self._last_vision_mono = _time.monotonic()
         self._last_reproj_err_px = reproj_err
@@ -227,7 +232,14 @@ class VisualInertialOdometry:
         return True
 
     def _drone_quat_for_pnp(self) -> np.ndarray:
-        """Use live telemetry attitude for PnP, not IMU-propagated quaternion."""
+        """Odometry when map exists; else IMU-propagated EKF attitude."""
+        odo = self.data.get("odometry")
+        if odo and "qw" in odo and self.data.get("track_gates"):
+            return np.array(
+                [odo["qw"], odo["qx"], odo["qy"], odo["qz"]], dtype=float
+            )
+        if self._seeded_from_telemetry and self._vision_updates > 0:
+            return self.ekf.q.copy()
         return self._quat_from_data()
 
     def _gate_world_for_pnp(self) -> tuple[np.ndarray, np.ndarray] | None:
@@ -252,7 +264,7 @@ class VisualInertialOdometry:
         track_gates = self.data.get("track_gates") or []
         if not track_gates:
             return None
-        idx = int(self.data.get("active_gate_index", 0))
+        idx = _course_gate_index(self.data)
         idx = max(0, min(idx, len(track_gates) - 1))
         gate = track_gates[idx]
         pos = gate.get("position_ned")
@@ -274,13 +286,24 @@ class VisualInertialOdometry:
         vision_age_s = (
             None if self._last_vision_mono is None else now - self._last_vision_mono
         )
+        p_trace = float(st["P_trace"])
+        nav_quality = 0.0
+        if self._initialized:
+            age_factor = 1.0
+            if vision_age_s is not None:
+                age_factor = max(0.0, 1.0 - vision_age_s / 3.0)
+            nav_quality = max(
+                0.0,
+                min(1.0, age_factor * (1.0 / (1.0 + p_trace / 5.0))),
+            )
         self.data["vio"] = {
             "initialized": self._initialized,
             "seeded_from_telemetry": self._seeded_from_telemetry,
             "pos_ned": tuple(float(x) for x in st["p"]),
             "vel_ned": tuple(float(x) for x in st["v"]),
             "quat": tuple(float(x) for x in st["q"]),
-            "P_trace": float(st["P_trace"]),
+            "P_trace": p_trace,
+            "nav_quality": nav_quality,
             "vision_valid": vision_valid,
             "vision_age_s": vision_age_s,
             "vision_updates": self._vision_updates,

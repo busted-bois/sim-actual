@@ -1,6 +1,7 @@
 from pymavlink import mavutil
 
 from simulator.controller import Controller
+from simulator.gate_map_loader import load_gate_map_into
 from simulator.gate_tracker import GateTracker
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.timesync import TimeSync
@@ -28,8 +29,12 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     shared_data["vio_processor"] = vio
     gate_tracker = GateTracker(shared_data)
     shared_data["gate_tracker"] = gate_tracker
-    print("[setup] VIO enabled (drone: IMU + camera)", flush=True)
+    n_gates = load_gate_map_into(shared_data)
+    if n_gates:
+        print(f"[setup] Preloaded gate map: {n_gates} gates", flush=True)
+    print("[setup] VIO enabled (drone: IMU + camera EKF)", flush=True)
     print("[setup] Gate tracker enabled (gate KF + detector)", flush=True)
+    print("[setup] Corner KF enabled (smooth/predict/coast)", flush=True)
 
     # -------------------------------
     # Setup Mavlink msg receiver
