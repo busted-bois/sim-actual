@@ -1,3 +1,4 @@
+import os
 import socket
 import struct
 import threading
@@ -116,11 +117,15 @@ class VisionRX:
                     "ny": ny,
                     "r_frac": r_frac,
                 }
-                print(
-                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
-                    flush=True,
-                )
+                # [debug] HSV gate print silenced — floods flight logs. Set
+                # SIM_VISION_DEBUG=1 to re-enable.
+                if os.environ.get("SIM_VISION_DEBUG"):
+                    print(
+                        f"[vision] GATE cx={detection.centroid_x_px:.0f} "
+                        f"cy={detection.centroid_y_px:.0f} area={detection.area_px:.0f} "
+                        f"nx={nx:+.3f} ny={ny:+.3f}",
+                        flush=True,
+                    )
             else:
                 self.data["gate_target"] = {
                     "detected": False,
