@@ -55,7 +55,12 @@ class Snapshot:
 
 
 class SimInterface:
-    def __init__(self, ip: str = DEFAULT_IP, mav_port: int = DEFAULT_MAV_PORT):
+    def __init__(
+        self,
+        ip: str = DEFAULT_IP,
+        mav_port: int = DEFAULT_MAV_PORT,
+        start_vision: bool = True,
+    ):
         self.data: dict = {}
         self.system_boot_ms = int(time.time() * 1000)
         print(f"[sim] connecting MAVLink udpin:{ip}:{mav_port} ...", flush=True)
@@ -66,7 +71,9 @@ class SimInterface:
         self.timesync = TimeSync(self.conn, self.data)
         self.timesync.thread = None  # TimeSync.create starts a thread; start manually
         self._start_timesync()
-        self.vision_rx = VisionRX(self.data)
+        # Camera RX is only needed by vision modules; controllers that fly on the
+        # hardcoded gate map (rl.fly2) skip it to avoid the per-frame log spam + CPU.
+        self.vision_rx = VisionRX(self.data) if start_vision else None
 
     def _start_timesync(self):
         import threading
@@ -196,6 +203,8 @@ class SimInterface:
     def close(self):
         """Stop the RX + timesync loops and join their (non-daemon) threads."""
         for rx in (self.mavlink_rx, self.vision_rx, self.timesync):
+            if rx is None:
+                continue
             thread = rx.get_thread_for_join()  # sets is_running=False, returns thread
             if thread is not None:
                 thread.join(timeout=2.0)
