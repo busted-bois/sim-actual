@@ -115,7 +115,10 @@ uv run -m rl.bc_dataset --demo rl/data/demo.jsonl
 # 3. PPO fine-tune on top of BC weights
 uv run -m rl.train_ppo --bc rl/data/demo.jsonl
 
-# 4. Fly on live sim
+# 4. Fly on live sim (Tier A -- no ML):
+uv run -m rl.fly_jacobian --mode course
+
+# 4. Fly on live sim (Tier B -- trained policy):
 uv run -m rl.deploy
 
 # geo_control stays identical in all 4 steps -- only the outer loop changes.
@@ -128,7 +131,8 @@ uv run -m rl.deploy
 | File | Role |
 |------|------|
 | `rl/geo_control.py` | `velocity_to_action()` -- the Jacobian inner loop |
-| `rl/demo_jacobian.py` | Tier-A demo: gate pursuit -> geo_control -> env |
+| `rl/demo_jacobian.py` | Tier-A demo: gate pursuit -> geo_control -> **internal env** |
+| `rl/fly_jacobian.py` | Tier-A demo: same stack on **live FlightSim** via MAVLink |
 | `rl/env.py` | Training env: inner loop runs each physics substep |
 | `rl/deploy.py` | Live sim: same inner loop with `DEPLOY_GAINS` (hover 0.27) |
 | `rl/spec.py` | `scale_velocity_action`, `encode_velocity_action`, shared constants |

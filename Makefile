@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test demo-jacobian
+.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test demo-jacobian fly-jacobian
 
 i install:
 	uv sync
@@ -61,10 +61,15 @@ fly-policy:
 demo-jacobian:
 	uv run -m rl.demo_jacobian --episodes 3 --stage 0 --plot
 
+# Tier-A Jacobian on live FlightSim (gate pursuit + geo_control, no ML).
+fly-jacobian:
+	uv run -m rl.fly_jacobian --mode course
+
 # Offline self-tests for every module (no live sim needed).
 rl-test:
 	uv run -m rl.geo_control --selftest
 	uv run -m rl.demo_jacobian --selftest
+	uv run -m rl.fly_jacobian --selftest
 	uv run -m rl.bc_dataset --selftest
 	uv run -m rl.dataset --selftest
 	uv run -m rl.gatenet --selftest
