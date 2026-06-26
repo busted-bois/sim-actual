@@ -84,7 +84,12 @@ def pursuit_velocity(
         return np.zeros(3), 0.0
 
     direction = to_gate / dist
+    # Proportional to distance, but also ramp DOWN inside 8m so the drone
+    # doesn't blow through the gate at full speed.  Gate opening is 2.72m --
+    # need to be under ~2 m/s to thread it reliably.
     speed = min(max_speed, max(1.5, 0.45 * dist))
+    if dist < 8.0:
+        speed = min(speed, max(1.5, 0.25 * dist))
 
     # Lookahead: blend toward the next gate when close to the current one.
     if next_gate_pos is not None and lookahead > 0.0 and dist < lookahead:

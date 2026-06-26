@@ -28,7 +28,12 @@ from rl.demo_jacobian import pursuit_velocity
 from rl.geo_control import GeoGains, velocity_to_action
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 
-DEPLOY_GAINS = GeoGains()  # hover 0.27, live-sim measured defaults
+DEPLOY_GAINS = GeoGains(
+    # hover 0.27 measured on live sim (fly2/dynamics_id)
+    brake_max=0.18,   # default 0.07 (4 deg) is too weak -- drone overshoots to 6+ m/s
+    roll_max=0.20,    # match TRAIN_GAINS lateral authority
+    k_lat=0.18,       # slightly more lateral correction
+)
 HZ = 100.0
 
 
