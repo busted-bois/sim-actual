@@ -38,6 +38,23 @@ from rl.sim_interface import SimInterface
 
 HOVER_THRUST = 0.29
 
+# Control loop rate. This sim is a PURE RATE INTEGRATOR with no auto-leveling
+# (see rl.dynamics_id), so attitude drifts between updates -- the sim's own
+# reference controller runs at 250 Hz (simulator.controller.CONTROL_HZ). At 50 Hz
+# the attitude wobbles enough to clip gates; match the native rate.
+HZ = 250.0
+
+# Collision recovery, mirroring simulator.pilot: when the sim reports a COLLISION,
+# stop steering, level out and hold a mild climb thrust to stabilize, then resume.
+# Without this a graze makes us keep ramming the gate until the sim resets us.
+COLLISION_HOLD_S = 1.0
+COLLISION_THRUST = 0.40
+
+# Our sim over-applies attitude rates by ~this factor (RL deploy calibration:
+# "sim rate gain ~2.7x"). The ported qualifier gains assume a 1:1 rate response,
+# so we divide commanded rates by this to cancel the over-response (kills jitter).
+RATE_GAIN = 2.7
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -95,7 +112,13 @@ def main() -> None:
         return sim.data.get("race_status") is not None
 
     def send(rates, thrust: float) -> None:
-        sim.send_attitude_rates(rates[0], rates[1], rates[2], thrust)
+        # Our sim applies attitude rates at ~RATE_GAIN x the commanded value (see
+        # the RL deploy calibration). The qualifier's attitude gains assume a 1:1
+        # response, so divide by RATE_GAIN to get the effective 1:1 the gains expect
+        # -- this is what kills the constant jitter. Thrust is unaffected.
+        sim.send_attitude_rates(
+            rates[0] / RATE_GAIN, rates[1] / RATE_GAIN, rates[2] / RATE_GAIN, thrust
+        )
 
     def fly_velocity(vn_des, ve_des, target_z, vz_ff, yaw0, affn, affe) -> None:
         v = vel()
@@ -140,7 +163,7 @@ def main() -> None:
         t_h = time.time()
         while time.time() - t_h < args.seconds:
             fly_velocity(0.0, 0.0, hold_z, 0.0, yaw0, 0.0, 0.0)
-            time.sleep(1 / 50)
+            time.sleep(1 / HZ)
         send([0.0, 0.0, 0.0], 0.0)
         print(">>> hover done", flush=True)
         sys.stdout.flush()
@@ -156,17 +179,17 @@ def main() -> None:
             and abs(pos()[2]) < 10.0
         ):
             send([0.0, 0.0, 0.0], 0.0)
-            time.sleep(1 / 50)
+            time.sleep(1 / HZ)
 
         print(">>> Fresh start detected. Start the race.", flush=True)
         while race_start_ms() < 0:
             send([0.0, 0.0, 0.0], 0.0)
-            time.sleep(1 / 50)
+            time.sleep(1 / HZ)
 
         countdown = time.time()
         while time.time() - countdown < 3.3:
             send([0.0, 0.0, 0.0], 0.0)
-            time.sleep(1 / 50)
+            time.sleep(1 / HZ)
 
     print(">>> GO.", flush=True)
     yaw0 = float(att()[2])
@@ -192,6 +215,8 @@ def main() -> None:
     gate_plane: list = [None] * n_gates
     prev_p = None
     last_active = -1
+    collision_until = 0.0  # monotonic deadline while recovering from a collision
+    n_collisions = 0
 
     def fmt_gate(gi: int) -> str:
         dz, lat, d3 = gate_off[gi]
@@ -213,6 +238,20 @@ def main() -> None:
 
     while time.time() - race_start < args.seconds:
         p = pos()
+
+        # Collision recovery (mirror simulator.pilot): on a reported collision,
+        # stop steering, level out + mild climb thrust to stabilize, then resume.
+        now_m = time.monotonic()
+        if sim.data.get("collision") is not None and now_m >= collision_until:
+            collision_until = now_m + COLLISION_HOLD_S
+            n_collisions += 1
+            sim.data.pop("collision", None)
+            print(f">>> COLLISION #{n_collisions} -- leveling out to recover", flush=True)
+        if now_m < collision_until:
+            send([0.0, 0.0, 0.0], COLLISION_THRUST)
+            prev_p = p
+            time.sleep(1 / HZ)
+            continue
 
         # Track closest approach to every TRUE gate center (6 gates -> cheap).
         for gi in range(n_gates):
@@ -285,13 +324,13 @@ def main() -> None:
                 flush=True,
             )
             last_log = now
-        time.sleep(1 / 50)
+        time.sleep(1 / HZ)
 
     elapsed = time.time() - race_start
     send([0.0, 0.0, 0.0], 0.0)
     print(
         f">>> result: {reason} gates={active()}/{len(course.GATES)} "
-        f"time={elapsed:.1f}s final={np.round(pos(), 1)}",
+        f"time={elapsed:.1f}s collisions={n_collisions} final={np.round(pos(), 1)}",
         flush=True,
     )
     print(">>> per-gate PLANE crossing (the real clip metric):", flush=True)
