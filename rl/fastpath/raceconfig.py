@@ -20,7 +20,7 @@ class RaceConfig:
     max_rate: float = 2.0
     look_ahead: float = 4.0
     alt_bias: float = 0.6
-    v_max: float = 9.0
+    v_max: float = 7.0  # our sim can't track the front zig-zag at 9 (gate1 missed 3.3m)
     v_min: float = 2.5
     v_start: float = 1.0
     a_lat: float = 5.5
