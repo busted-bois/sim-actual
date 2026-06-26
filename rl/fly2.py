@@ -8,7 +8,7 @@ Measured facts:
 
 Modes:
   hover  - level attitude + hold spawn altitude (validates the basics).
-  course - fly the gate map, gates advanced by sim active_gate_index.
+  course - follow Catmull-Rom raceline through gate_map.json (speed profile + arc projection).
 
     uv run -m rl.fly2 --mode hover  --seconds 6
     uv run -m rl.fly2 --mode course --seconds 60 --speed 3
@@ -23,7 +23,7 @@ import time
 
 import numpy as np
 
-from rl import spec
+from rl import course_path, raceline, spec
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator.transforms import quat_to_yaw
 
@@ -37,6 +37,8 @@ SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
 RATE_CLIP = 0.30
 YAW_CLIP = 0.8  # was 0.5 — allow faster yaw to cut turn time between gates
+LOOK_AHEAD = 4.0
+K_CT = 25.4  # cross-track velocity gain onto spline
 HZ = 150.0
 
 
@@ -103,6 +105,14 @@ def main():
     hold_yaw = rpy(s0.quat)[2]
     print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
 
+    pts, cum, vprof, total_arc = None, None, None, 0.0
+    if args.mode == "course":
+        start_pos = np.asarray(s0.pos_ned, float)
+        pts, cum = course_path.build_path(start_pos)
+        vprof = course_path.build_profile(pts, cum, v_max=args.speed)
+        total_arc = cum[-1]
+        print(f"[f2] raceline: {len(pts)} pts arc={total_arc:.0f}m", flush=True)
+
     t0 = time.time()
     last_log = 0.0
     last_active = -1
@@ -127,34 +137,38 @@ def main():
                     flush=True,
                 )
                 last_active = active
-            if active >= n:
+            s = raceline.project_arc(pts, cum, p)
+            if active >= n or s >= total_arc - 1.0:
                 reason = "COURSE COMPLETE"
                 break
-            g = np.asarray(gate_map[active]["pos"], float)
-            dx, dy = g[0] - p[0], g[1] - p[1]
-            dist = math.hypot(dx, dy)
-            bearing = math.atan2(dy, dx)
+            v_set = raceline.speed_at(cum, vprof, s)
+            nearest = raceline.point_at_arc(pts, cum, s)
+            ahead = raceline.point_at_arc(pts, cum, s + LOOK_AHEAD)
+            delta = ahead - nearest
+            horizontal = delta[:2]
+            hlen = float(np.linalg.norm(horizontal))
+            tangent = (
+                horizontal / hlen
+                if hlen > 1e-6
+                else np.array([math.cos(yaw), math.sin(yaw)])
+            )
+            ct_err = nearest[:2] - p[:2]
+            vel_des = v_set * tangent + K_CT * ct_err
+            v_horiz = float(np.linalg.norm(vel_des))
+            if v_horiz > args.speed:
+                vel_des *= args.speed / v_horiz
+            bearing = math.atan2(vel_des[1], vel_des[0])
             yaw_err = wrap(bearing - yaw)
             speed = float(np.linalg.norm(v[:2]))
-            # Signed lateral (cross-track) offset from the line to the gate, body-right.
-            e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-            align = max(0.0, 1.0 - abs(yaw_err) / 0.5)  # wider: don't kill speed for small heading errors
-            # Slow down when off the gate line so there is time to thread the center:
-            # stays fast on straight shots, eases off on turning/offset gates.
-            lat_align = max(0.3, 1.0 - abs(e_cross) / 2.5)  # slow sooner when off-line (was /3.0)
-            # Reach full speed by ~5m out, but only when well-lined-up (lat_align).
-            v_des = args.speed * align * lat_align * min(1.0, 0.4 + dist / 6.0)
-            # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
-            # Stronger accel gain (0.08, was 0.05) builds speed faster off each gate;
-            # a bit more brake authority (-0.07) keeps overshoot in check at speed.
-            lean = float(np.clip(0.08 * (v_des - speed), -0.07, args.lean))
+            v_des = float(np.linalg.norm(vel_des))
+            align = max(0.0, 1.0 - abs(yaw_err) / 0.5)
+            e_cross = ct_err[0] * math.sin(yaw) - ct_err[1] * math.cos(yaw)
+            lat_align = max(0.3, 1.0 - abs(e_cross) / 2.5)
+            v_cmd = v_des * align * lat_align
+            lean = float(np.clip(0.08 * (v_cmd - speed), -0.07, args.lean))
             tgt_pitch = -lean
-            # Cross-track roll control: bank toward the gate line (stronger + wider
-            # clip than before so it can re-center laterally at the higher speed).
             tgt_roll = float(np.clip(args.klat * e_cross, -0.16, 0.16))
-            # Track-data gate z appears sign-flipped vs odometry NED (course climbs).
-            # zoff lifts the aim point so we clear the bottom border of the opening.
-            tgt_z = (-g[2] if args.flipz else g[2]) + args.zoff
+            tgt_z = (-nearest[2] if args.flipz else nearest[2]) + args.zoff
 
         # Attitude-angle P -> rate commands, with measured sign conventions.
         roll_cmd = float(
@@ -178,10 +192,14 @@ def main():
 
         now = time.time() - t0
         if now - last_log >= 0.5:
+            extra = ""
+            if args.mode == "course" and pts is not None:
+                s_log = raceline.project_arc(pts, cum, p)
+                extra = f" s={s_log:5.1f}/{total_arc:.0f}"
             print(
                 f"[f2] [{now:4.1f}s] rpy=({math.degrees(roll):+4.0f},"
                 f"{math.degrees(pitch):+4.0f},{math.degrees(yaw):+4.0f}) "
-                f"z={z:+5.1f} v=({v[0]:+4.1f},{v[1]:+4.1f},{v[2]:+4.1f}) thr={thrust:.2f}",
+                f"z={z:+5.1f} v=({v[0]:+4.1f},{v[1]:+4.1f},{v[2]:+4.1f}) thr={thrust:.2f}{extra}",
                 flush=True,
             )
             last_log = now
