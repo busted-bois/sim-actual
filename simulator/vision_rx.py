@@ -9,6 +9,40 @@ import numpy as np
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
 
+# Overlay colors (BGR).
+_GATE_COLOR = (0, 200, 0)
+_OBSTACLE_COLOR = (0, 0, 255)
+
+
+def _annotate(img, detection, obstacle_px):
+    """Return a copy of img with the gate detection + obstacles drawn, plus a
+    one-line HUD. Consumed by simulator.display for the live vision window."""
+    out = img.copy()
+    if detection is not None:
+        cx, cy = int(detection.centroid_x_px), int(detection.centroid_y_px)
+        x0 = int(cx - detection.width_px / 2.0)
+        y0 = int(cy - detection.height_px / 2.0)
+        x1 = int(cx + detection.width_px / 2.0)
+        y1 = int(cy + detection.height_px / 2.0)
+        cv2.rectangle(out, (x0, y0), (x1, y1), _GATE_COLOR, 2)
+        cv2.circle(out, (cx, cy), 4, _GATE_COLOR, -1)
+        hud = f"GATE cx={cx} cy={cy} area={detection.area_px:.0f}"
+    else:
+        hud = "no gate"
+    for ocx, ocy in obstacle_px:
+        cv2.circle(out, (int(ocx), int(ocy)), 6, _OBSTACLE_COLOR, 2)
+    cv2.putText(
+        out,
+        hud,
+        (10, out.shape[0] - 12),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        _GATE_COLOR,
+        2,
+        cv2.LINE_AA,
+    )
+    return out
+
 
 class VisionRX:
     def __init__(self, data):
@@ -144,6 +178,7 @@ class VisionRX:
                 obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             obstacles = []
+            obstacle_px = []  # (cx, cy) in pixels, for the live overlay
             for oc in obs_contours:
                 oa = cv2.contourArea(oc)
                 if oa < 200:
@@ -156,7 +191,12 @@ class VisionRX:
                 ony = (ocy - h / 2.0) / (h / 2.0)
                 orf = oa / (w * h)
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
+                obstacle_px.append((ocx, ocy))
             self.data["obstacles"] = obstacles
+
+            # Annotated copy for the live display window (drawn here, next to
+            # detection, so the main/control thread just shows the result).
+            self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
         except Exception as e:
             from simulator import config
 
