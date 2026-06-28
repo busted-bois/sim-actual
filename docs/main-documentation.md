@@ -4,8 +4,8 @@ Living reference for what is **merged on `main`** today. Update this file when f
 
 | Field | Value |
 |-------|-------|
-| **Last updated** | 2026-06-24 |
-| **Main commit** | `1d12c7a` — *Add SPEC.md (Yat's specs) (#6)* |
+| **Last updated** | 2026-06-28 |
+| **Main commit** | `b0e71bc` — *vision extension added as a window so you can see what your drone is detecting (#8)* |
 | **Maintainer note** | Add a one-line entry to [Changelog](#changelog) per substantive merge to `main`. |
 
 ---
@@ -35,7 +35,7 @@ Living reference for what is **merged on `main`** today. Update this file when f
 
 This repo is the **ANDURIL** team's autonomous pilot for the [AI Grand Prix](https://www.theaigrandprix.com/) competition. As of the commit above, `main` holds **two working flight paths plus an offline RL pipeline**:
 
-- **`simulator/` — the live pilot.** `make sim` runs a self-contained, vision-first gate racer (`simulator/pilot.py`) driven at 250 Hz over MAVLink. It fuses HSV gate detection from the FPV camera with the sim's odometry + broadcast gate map, and falls back to a telemetry-only nearest-gate chase when vision is unavailable.
+- **`simulator/` — the live pilot.** `make sim` runs a self-contained, vision-first gate racer (`simulator/pilot.py`) driven at 250 Hz over MAVLink. It fuses HSV gate detection from the FPV camera with the sim's odometry + broadcast gate map, and falls back to a telemetry-only nearest-gate chase when vision is unavailable. A **live OpenCV window** (`simulator/display.py`) shows annotated camera frames while you fly; sessions optionally record to `runs/vision.mp4`.
 - **`rl/` — an 8-module RL/vision research pipeline** (Modules 1–8): live-sim interface, dataset auto-labeling, a GateNet U-Net segmenter, PnP pose, an error-state EKF, a 24-D observation builder, a Gymnasium training env, and PPO training + deployment. It also ships several scripted classical controllers (`fly2`, `fly_geometric`, `fly_odom`) and live diagnostics.
 
 The autonomy that earlier revisions of this doc described as "on feature branches" is now merged. For the competition's MAVLink message contract, see [SPEC.md](../SPEC.md). For competition context (timeline, hardware, rules), see [docs/Instructions.md](Instructions.md).
@@ -60,7 +60,7 @@ make sim      # connect to FlightSim.exe and run the live pilot
 2. Log in and start a qualifier / flight session (not just the main menu).
 3. Ensure nothing else is bound to UDP **14550** (MAVLink) or **5600** (vision).
 
-`make sim` waits for a MAVLink heartbeat, arms the drone, then runs the 250 Hz control loop until the process is killed.
+`make sim` waits for a MAVLink heartbeat, arms the drone, opens a **"drone vision"** debug window, then runs the 250 Hz control loop until the process is killed. On exit, the window closes and an mp4 may be written under `runs/` (gitignored).
 
 For which command to run and what to do when something fails, see [§2.5](#25-choosing-an-entry-point) and [§2.6](#26-troubleshooting). Full target list: [§10](#10-makefile-targets).
 
@@ -70,9 +70,9 @@ For which command to run and what to do when something fails, see [§2.5](#25-ch
 
 | Goal | Command | Live sim? | Vision? | Gate map? | Notes |
 |------|---------|-----------|---------|-----------|-------|
-| **Default competition pilot** | `make sim` | Yes | Yes | From sim at race start | Vision-first gate racer; telemetry fallback. What `main.py` runs. |
-| Hover / controller sanity check | `make hover` | Yes | No | Optional | `rl.fly2 --mode hover`; good before debugging course logic. |
-| Full course, measured dynamics | `make fly` | Yes | No | `rl/data/gate_map.json` | `rl.fly2 --mode course`. Start the race first; uses odom + saved map. |
+| **Default competition pilot** | `make sim` | Yes | Yes | From sim at race start | Vision-first gate racer + **live annotated vision window**. What `main.py` runs. |
+| Hover / controller sanity check | `make hover` | Yes | No | Optional | `rl.fly2 --mode hover`; includes vision window when frames arrive. |
+| Full course, measured dynamics | `make fly` | Yes | No | `rl/data/gate_map.json` | `rl.fly2 --mode course`; **live vision window** + optional `runs/vision.mp4`. |
 | Full course, geometric controller | `uv run -m rl.fly_geometric` | Yes | No | `gate_map.json` | Cascaded geometric controller + odom. |
 | Full course, pilot-style + odom | `uv run -m rl.fly_odom` | Yes | No | `gate_map.json` | Same control style as `pilot.py`, driven by telemetry only. |
 | Capture gate map for offline tools | `make capture-gates` | Yes | No | **Writes** `gate_map.json` | Run **before** (re)starting the race; see [§2.6](#26-troubleshooting). |
@@ -117,7 +117,8 @@ make fly-policy             # live sim — EKF + policy; odom default, GateNet i
 | Spins in place after a gate | Expected — search mode re-acquiring | Wait for `SEARCH → new gate acquired`; or check next gate is visible |
 | Collision then slow hover | `collision_hold` (2 s reduced thrust) | Normal; clears automatically |
 | `make fly-policy` drifts / weak | No `gatenet.pt`; policy trained on internal model | Train GateNet locally; re-run `make train-ppo`; expect sim-to-sim gap |
-| Process won't exit cleanly | No `KeyboardInterrupt` handler in `main.py` | Kill the terminal/process (known gap — see [§12](#12-current-capabilities--gaps)) |
+| Process won't exit cleanly | No `KeyboardInterrupt` handler in `main.py` | Kill the terminal/process; `display.close()` runs in `finally` (see [§12](#12-current-capabilities--gaps)) |
+| Vision window blank / missing | No frames yet, or headless environment | Wait for race + camera; OpenCV GUI needs a desktop session on Windows |
 
 #### Expected console output
 
@@ -175,7 +176,8 @@ simulator/                # LIVE pilot (what `make sim` runs)
   controller.py           # 250 Hz loop; motor / attitude / position senders
   pilot.py                # Vision+telemetry gate racer (drives controller)
   mavlink_rx.py           # MAVLink receive thread -> shared_data
-  vision_rx.py            # FPV JPEG receiver -> gate_detector -> shared_data
+  vision_rx.py            # FPV JPEG receiver -> gate_detector -> shared_data + annotated overlay
+  display.py              # Live cv2 window + optional runs/vision.mp4 recording
   gate_detector.py        # HSV orange-gate detection
   transforms.py           # Quaternion / frame / bearing / focal helpers
   config.py               # Tunables + GateDetection/DroneState/TrackGate types
@@ -205,7 +207,8 @@ rl/                       # Offline RL/vision pipeline (Modules 1-8) + tools
   diag_mav.py             # Raw MAVLink dump diagnostic
   diag_project.py         # Gate-projection-vs-frame validation
   data/                   # gate_map.json, policy.pt, projection check PNGs
-main.py                   # Entry point (setup -> arm -> 250 Hz loop)
+main.py                   # Entry point (setup -> arm -> 250 Hz loop + vision window)
+runs/                     # Gitignored — vision.mp4 recordings from display.py
 SPEC.md                   # Competition MAVLink message contract
 diagnostics.log           # Stray runtime log (tracked; see §12)
 skills-lock.json          # Agent skills lockfile
@@ -237,6 +240,7 @@ flowchart TB
         MAIN[main.py]
         CTRL[Controller.update]
         PILOT[Pilot.tick]
+        DISP[display.tick]
     end
 
     SD[(shared_data dict)]
@@ -245,10 +249,11 @@ flowchart TB
     VID --> VR
     TS -.->|TIMESYNC req — never sent, see §6| MAV
     MR -->|telemetry, gates, collision| SD
-    VR -->|gate_detector -> gate_target, obstacles, frame| SD
+    VR -->|gate_detector -> gate_target, obstacles, frame, annotated| SD
     MAIN --> CTRL
     CTRL --> PILOT
     SD -->|read| PILOT
+    SD -->|frame annotated| DISP
     PILOT -->|set_attitude_rates / mode| CTRL
     CTRL -->|SET_ATTITUDE_TARGET| MAV
 ```
@@ -258,10 +263,11 @@ flowchart TB
 1. Create empty `shared_data` dict.
 2. `setup_components()` — open `udpin` MAVLink connection, **wait for heartbeat**, start the `MAVLinkRX` and `VisionRX` threads, construct `TimeSync` (whose thread is *not* started — see [§6](#6-module-reference--simulator)), and construct the `Controller` (which instantiates `Pilot`).
 3. `controller.arm()` — `MAV_CMD_COMPONENT_ARM_DISARM`.
-4. Infinite `controller.update()` loop at 250 Hz. Each tick runs `pilot.tick()` then emits one MAVLink setpoint for the active control mode.
-5. On exit (only reachable if the `while is_running` flag is cleared — it currently never is): join threads with 1 s timeouts.
+4. `display.start()` — create the **"drone vision"** OpenCV window (must run on the main thread).
+5. `try` / `finally` loop at 250 Hz: each tick runs `controller.update()`; on each **new** `shared_data["frame"]`, call `display.tick(annotated_or_raw, elapsed)` so overlays stay in sync with perception.
+6. `finally`: `display.close()` finalizes the mp4 writer; then join RX threads with 1 s timeouts.
 
-There is still **no graceful `KeyboardInterrupt` handler**; the loop runs until the process is killed.
+There is still **no graceful `KeyboardInterrupt` handler**; killing the process triggers `finally` and closes the window/mp4.
 
 ---
 
@@ -279,7 +285,7 @@ There is still **no graceful `KeyboardInterrupt` handler**; the loop runs until 
 | `active_gate_index` / `race_started` / `race_finish_time_ns` / `race_status` | `on_race_status` | race timing + current target gate |
 | `gates` / `track_gates` | `on_track_data` | full gate map (NED pose, quat, width, height) |
 | `collision` / `last_collision` | `on_collision` | id, threat level, delta |
-| `camera` / `frame` | `vision_rx.process_frame` | decode timestamp + raw BGR frame |
+| `camera` / `frame` | `vision_rx.process_frame` | `{img, frame_id, sim_time_ns, received_at, annotated?}` — BGR arrays; `annotated` has gate bbox, obstacle circles, HUD |
 | `gate_target` | `vision_rx.process_frame` | `{detected, nx, ny, r_frac}` (normalized gate centroid + area fraction) |
 | `obstacles` | `vision_rx.process_frame` | list of `{nx, ny, r_frac}` dark blobs near center |
 
@@ -289,7 +295,11 @@ There is still **no graceful `KeyboardInterrupt` handler**; the loop runs until 
 
 ### `main.py`
 
-Entry point. Builds `shared_data`, wires components, arms, and runs the 250 Hz loop. No CLI arguments.
+Entry point. Builds `shared_data`, wires components, arms, starts the vision window, and runs the 250 Hz loop. Pumps `display.tick()` on each new camera frame. `try` / `finally` ensures `display.close()` on exit. No CLI arguments.
+
+### `display.py`
+
+Live perception debug UI. `start()` opens a cv2 window named **"drone vision"**; `tick(frame, elapsed)` shows the frame (annotated when available) and optionally appends to `runs/vision.mp4` (`RECORD = True` by default, 30 fps). **All cv2 calls run on the main thread** — never call from `VisionRX`. Used by `main.py` and `rl/fly2.py`.
 
 ### `setup.py`
 
@@ -329,7 +339,7 @@ Binary layouts: race status `struct "<BQqqIq"` (`data_type`, sim boot ms, race s
 
 ### `vision_rx.py`
 
-Listens on `0.0.0.0:5600` for chunked JPEG. Header `"<IHHIIQ"`: `frame_id`, `chunk_id`, `total_chunks`, `jpeg_size`, `payload_size`, `sim_time_ns`. Reassembles, decodes with OpenCV, then `process_frame()` runs `gate_detector.detect_gate`, writes `gate_target` (normalized centroid `nx`/`ny` + area fraction `r_frac`), stores the raw `frame` (for dataset/GateNet use), and extracts dark-blob `obstacles`.
+Listens on `0.0.0.0:5600` for chunked JPEG. Header `"<IHHIIQ"`: `frame_id`, `chunk_id`, `total_chunks`, `jpeg_size`, `payload_size`, `sim_time_ns`. Reassembles, decodes with OpenCV, then `process_frame()` runs `gate_detector.detect_gate`, writes `gate_target` (normalized centroid `nx`/`ny` + area fraction `r_frac`), stores `frame` (raw BGR + metadata), draws **`_annotate()`** overlays (gate rectangle, obstacle circles, HUD text) into `frame["annotated"]`, and extracts dark-blob `obstacles`.
 
 ### `gate_detector.py`
 
@@ -372,7 +382,7 @@ The `rl/` package is an offline-trainable pipeline. `rl/spec.py` is the single s
 **Scripted controllers & tools** (not the learned policy):
 
 - `control.py` — geometric cascaded controller; expert/baseline/fallback.
-- `fly2.py` — controller built from measured sim dynamics; `hover` and `course` modes.
+- `fly2.py` — controller built from measured sim dynamics; `hover` and `course` modes; **includes live vision window** via `display.py`.
 - `fly_geometric.py` — fly the course with the geometric controller + odometry + gate map (no vision).
 - `fly_odom.py` — fly the course with `pilot.py`-style control driven by odometry + gate map.
 - `dynamics_id.py` — open-loop plant characterization (hover thrust, rate→angle sign/scale).
@@ -449,7 +459,8 @@ Broadcast by the sim as a short burst at race start (DATA_TRANSMISSION_HANDSHAKE
 
 - UDP MAVLink connect + heartbeat wait; telemetry parsed **into `shared_data`**.
 - Multi-packet track gate-map reassembly.
-- FPV JPEG receive + decode + **HSV gate detection** with obstacle blobs.
+- FPV JPEG receive + decode + **HSV gate detection** with obstacle blobs; **annotated overlay** for debug display.
+- **Live vision debug window** (`display.py`) on `make sim` and `make fly`; optional `runs/vision.mp4` recording.
 - Live attitude-rate **gate racer** (`pilot.py`): vision chase, telemetry fallback, altitude PID, search, collision hold, post-gate re-acquire, passed-gate rejection.
 - Scripted course controllers (`fly2`, `fly_geometric`, `fly_odom`) + open-loop dynamics ID.
 - Full **RL/vision pipeline** (Modules 1–8): dataset auto-labeling, GateNet, PnP, EKF, 24-D obs, Gymnasium env + curriculum, PPO training and policy deployment — each with offline self-tests.
@@ -458,7 +469,7 @@ Broadcast by the sim as a short burst at race start (DATA_TRANSMISSION_HANDSHAKE
 
 ### Not implemented / known gaps on `main`
 
-- No graceful `KeyboardInterrupt` shutdown in `main.py` (loop runs until killed).
+- No graceful `KeyboardInterrupt` shutdown in `main.py` (`finally` still closes display/mp4).
 - **`TimeSync` is never started** — `setup.py` calls `TimeSync(...)` instead of `create_timesync(...)`, so no TIMESYNC requests are sent (likely latent bug). See [§6](#6-module-reference--simulator).
 - `gate_estimator.py` / `state_machine.py` / `search.py` are committed but **unused** by the live pilot.
 - No `tests/` suite or CI test job (only ruff lint + the `rl.*` `--selftest` smoke checks, run manually via `make rl-test`).
@@ -487,6 +498,7 @@ Keep feature-branch-only detail out of this file until it ships on `main`.
 
 | Date | Commit / PR | Summary |
 |------|-------------|---------|
+| 2026-06-28 | `b0e71bc` (#8) | Live vision debug window (`display.py`), annotated overlays in `vision_rx`, mp4 to `runs/`; wired in `main.py` + `fly2.py` |
 | 2026-06-24 | — | Add §2.5 entry-point guide + §2.6 troubleshooting |
 | 2026-06-23 | — | Accuracy pass: race-status struct, repo layout, changelog cleanup |
 | 2026-06-22 | `1d12c7a` | Rewrote doc for `main` at `1d12c7a`: live `simulator/` gate racer + full `rl/` pipeline |
