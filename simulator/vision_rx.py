@@ -9,13 +9,44 @@ import numpy as np
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
 
+# Overlay colors (BGR).
+_GATE_COLOR = (0, 200, 0)
+_OBSTACLE_COLOR = (0, 0, 255)
+
+
+def _annotate(img, detection, obstacle_px):
+    """Return a copy of img with the gate detection + obstacles drawn, plus a
+    one-line HUD. Consumed by simulator.display for the live vision window."""
+    out = img.copy()
+    if detection is not None:
+        cx, cy = int(detection.centroid_x_px), int(detection.centroid_y_px)
+        x0 = int(cx - detection.width_px / 2.0)
+        y0 = int(cy - detection.height_px / 2.0)
+        x1 = int(cx + detection.width_px / 2.0)
+        y1 = int(cy + detection.height_px / 2.0)
+        cv2.rectangle(out, (x0, y0), (x1, y1), _GATE_COLOR, 2)
+        cv2.circle(out, (cx, cy), 4, _GATE_COLOR, -1)
+        hud = f"GATE cx={cx} cy={cy} area={detection.area_px:.0f}"
+    else:
+        hud = "no gate"
+    for ocx, ocy in obstacle_px:
+        cv2.circle(out, (int(ocx), int(ocy)), 6, _OBSTACLE_COLOR, 2)
+    cv2.putText(
+        out,
+        hud,
+        (10, out.shape[0] - 12),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        _GATE_COLOR,
+        2,
+        cv2.LINE_AA,
+    )
+    return out
+
 
 class VisionRX:
     def __init__(self, data):
         self.data = data
-        from simulator.gate_estimator import GateEstimator
-
-        self._gate_estimator = GateEstimator()
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -113,30 +144,15 @@ class VisionRX:
                 nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
                 ny = (detection.centroid_y_px - h / 2.0) / (h / 2.0)
                 r_frac = detection.area_px / (w * h)
-                gate_target = {
+                self.data["gate_target"] = {
                     "detected": True,
                     "nx": nx,
                     "ny": ny,
                     "r_frac": r_frac,
-                    "u_px": detection.centroid_x_px,
-                    "v_px": detection.centroid_y_px,
                 }
-                estimate = self._estimate_geometry(detection, w, h)
-                if estimate is not None:
-                    gate_target["bearing_rad"] = estimate.bearing_rad
-                    gate_target["elevation_rad"] = estimate.elevation_rad
-                    gate_target["range_m"] = estimate.range_m
-                    gate_target["confidence"] = estimate.confidence
-                    gate_target["estimate_source"] = estimate.source
-                self.data["gate_target"] = gate_target
-                range_s = (
-                    f" range={estimate.range_m:.1f}m"
-                    if estimate and estimate.range_m
-                    else ""
-                )
                 print(
                     f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}{range_s}",
+                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
                     flush=True,
                 )
             else:
@@ -150,8 +166,6 @@ class VisionRX:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
             obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
-            # Exclude ground band — dark floor false-triggers obstacle stop.
-            obs_mask[int(h * 0.55) :, :] = 0
             if detection is not None:
                 cv2.circle(
                     obs_mask,
@@ -164,9 +178,10 @@ class VisionRX:
                 obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             obstacles = []
+            obstacle_px = []  # (cx, cy) in pixels, for the live overlay
             for oc in obs_contours:
                 oa = cv2.contourArea(oc)
-                if oa < 800:
+                if oa < 200:
                     continue
                 om = cv2.moments(oc)
                 om00 = max(om["m00"], 1e-6)
@@ -176,56 +191,14 @@ class VisionRX:
                 ony = (ocy - h / 2.0) / (h / 2.0)
                 orf = oa / (w * h)
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
+                obstacle_px.append((ocx, ocy))
             self.data["obstacles"] = obstacles
+
+            # Annotated copy for the live display window (drawn here, next to
+            # detection, so the main/control thread just shows the result).
+            self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
         except Exception as e:
             from simulator import config
 
             if config.DEBUG:
                 print(f"[vision_rx] process_frame error: {e}")
-
-    def _estimate_geometry(self, detection, img_w: int, img_h: int):
-        from simulator.config import DroneState, TrackGate
-        from simulator.transforms import quat_to_yaw
-
-        odo = self.data.get("odometry")
-        if odo is None:
-            has_pos = False
-            pos = (0.0, 0.0, 0.0)
-            yaw = 0.0
-        else:
-            has_pos = True
-            pos = (odo.get("x", 0.0), odo.get("y", 0.0), odo.get("z", 0.0))
-            yaw = quat_to_yaw(
-                odo.get("qw", 1.0),
-                odo.get("qx", 0.0),
-                odo.get("qy", 0.0),
-                odo.get("qz", 0.0),
-            )
-        drone = DroneState(
-            pos_ned=pos,
-            vel_ned=(0.0, 0.0, 0.0),
-            yaw_rad=yaw,
-            yaw_rate=0.0,
-            time_boot_ms=0,
-            has_position=has_pos,
-        )
-        raw_gates = self.data.get("track_gates") or []
-        gates: list[TrackGate] = []
-        for g in raw_gates:
-            p = g.get("position_ned") or g.get("pos")
-            if not p or len(p) < 3:
-                continue
-            q = g.get("orientation_quat") or g.get("quat") or (1.0, 0.0, 0.0, 0.0)
-            gates.append(
-                TrackGate(
-                    gate_id=int(g.get("gate_id", g.get("id", 0))),
-                    pos_ned=(float(p[0]), float(p[1]), float(p[2])),
-                    orient_quat=tuple(float(x) for x in q[:4]),
-                    width_m=float(g.get("width_m", g.get("w", 2.72))),
-                    height_m=float(g.get("height_m", g.get("h", 2.72))),
-                )
-            )
-        active = int(self.data.get("active_gate_index", 0) or 0)
-        return self._gate_estimator.update(
-            detection, drone, gates, active, img_w=float(img_w), img_h=float(img_h)
-        )

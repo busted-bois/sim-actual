@@ -9,17 +9,12 @@ from simulator.auto_flight import auto_flight_enabled, run_auto_flight_loop
 from simulator.preflight import wait_for_race_go, wait_for_track
 from simulator.setup import setup_components
 
-# Modify these properties if you want to run the server remotely for example
 SIM_SERVER_UDP_IP = "127.0.0.1"
 SIM_SERVER_UDP_PORT = 14550
 
-# time since sim started ms
 system_boot_ms = int(time.time() * 1000)
-
-# arbitrary shared data between the various components
 shared_data = {}
 
-# setup components
 try:
     components = setup_components(
         shared_data, system_boot_ms, SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT
@@ -38,10 +33,6 @@ if shared_data.get("odometry") is None:
     print("WARNING: no odometry after 30s — continuing anyway", flush=True)
 
 if auto_flight_enabled():
-    from rl.fly2_course import Fly2CoursePilot
-
-    controller.pilot = Fly2CoursePilot(controller, shared_data)
-    pilot = controller.pilot
     outcome, was_flying = run_auto_flight_loop(controller, pilot, shared_data)
     if outcome == "success":
         sys.exit(0)
@@ -65,6 +56,9 @@ controller.arm()
 if not wait_for_race_go(shared_data, armed_sim_boot_ms=armed_sim_boot_ms):
     print("ERROR: countdown never reached GO", flush=True)
     sys.exit(1)
+
+if hasattr(pilot, "on_attempt_start"):
+    pilot.on_attempt_start()
 
 print("Starting control loop...", flush=True)
 while True:

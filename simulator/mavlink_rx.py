@@ -4,6 +4,7 @@ import time
 import threading
 
 from simulator.config import TrackGate
+from simulator.flight_debug import dbg_now, flight_debug_enabled
 from simulator.transforms import quat_to_yaw
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
@@ -27,6 +28,7 @@ class MAVLinkRX:
         self.expected_num_track_chunks = {}
         self._debug_last_race_log = 0.0
         self._debug_logged_track = False
+        self._last_race_start_logged = None
 
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
@@ -216,7 +218,26 @@ class MAVLinkRX:
             "active_gate_index": active_gate_index,
             "last_gate_race_time": last_gate_race_time,
         }
-        if _auto_flight_debug():
+        if flight_debug_enabled():
+            if race_start_boot_time_ms != self._last_race_start_logged:
+                delta = race_start_boot_time_ms - sim_boot_time_ms
+                dbg_now(
+                    "race_start_chg",
+                    f"{self._last_race_start_logged}->{race_start_boot_time_ms} "
+                    f"sim_boot={sim_boot_time_ms} delta={delta}",
+                )
+                self._last_race_start_logged = race_start_boot_time_ms
+            now = time.monotonic()
+            if now - self._debug_last_race_log >= 2.0:
+                print(
+                    "[AUTO_FLIGHT_DEBUG] race_status "
+                    f"sim_boot={sim_boot_time_ms} "
+                    f"race_start={race_start_boot_time_ms} "
+                    f"active_gate_index={active_gate_index}",
+                    flush=True,
+                )
+                self._debug_last_race_log = now
+        elif _auto_flight_debug():
             now = time.monotonic()
             if now - self._debug_last_race_log >= 2.0:
                 print(
@@ -291,7 +312,13 @@ class MAVLinkRX:
             }
             for g in gates
         ]
-        if _auto_flight_debug() and not self._debug_logged_track:
+        if flight_debug_enabled():
+            dbg_now(
+                "track_burst",
+                f"num_gates={num_gates} race_start="
+                f"{(self.data.get('race_status') or {}).get('race_start_boot_time_ms', -1)}",
+            )
+        elif _auto_flight_debug() and not self._debug_logged_track:
             print(
                 f"[AUTO_FLIGHT_DEBUG] track burst received num_gates={num_gates}",
                 flush=True,

@@ -11,3 +11,7 @@ __pycache__/
 
 # Runtime logs
 logs/
+
+# Doc automation artifacts
+.doc-context.txt
+scripts/node_modules/

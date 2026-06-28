@@ -5,6 +5,8 @@ from simulator.race_monitor import (
     gate1_fail,
     gate1_watch_line,
     gate_count,
+    gate_progress_stall,
+    gate_progress_watch_line,
     passed_first_gate,
     passed_gate0_plane,
     signed_dist_gate0,
@@ -106,6 +108,36 @@ class RaceMonitorTests(unittest.TestCase):
         self.assertIn("gate1_watch", line)
         self.assertIn("active=0", line)
         self.assertIn("elapsed=12s", line)
+
+    def test_gate_progress_stall_not_yet(self):
+        data = {
+            "track_gates": [{}, {}, {}],
+            "race_status": {"race_finish_time_ns": -1},
+            "active_gate_index": 1,
+        }
+        self.assertFalse(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=19.0))
+
+    def test_gate_progress_stall_on_timeout(self):
+        data = {
+            "track_gates": [{}, {}, {}],
+            "race_status": {"race_finish_time_ns": -1},
+            "active_gate_index": 1,
+        }
+        self.assertTrue(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=20.0))
+
+    def test_gate_progress_stall_false_when_complete(self):
+        data = {
+            "track_gates": [{}, {}],
+            "race_status": {"race_finish_time_ns": 0},
+            "active_gate_index": 1,
+        }
+        self.assertFalse(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=30.0))
+
+    def test_gate_progress_watch_line(self):
+        line = gate_progress_watch_line({"active_gate_index": 2}, 1, 15.0)
+        self.assertIn("gate_progress_watch", line)
+        self.assertIn("active=2", line)
+        self.assertIn("last_active=1", line)
 
 
 if __name__ == "__main__":

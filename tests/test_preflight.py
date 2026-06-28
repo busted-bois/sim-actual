@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from simulator.preflight import (
     COUNTDOWN_SCHEDULED_THRESHOLD_MS,
+    GO_POST_MARGIN_MS,
     RACE_COUNTDOWN_MS,
     RaceGoLatch,
     is_restart_arm_context,
@@ -10,10 +11,13 @@ from simulator.preflight import (
     poll_race_go,
     race_finished,
     race_go_allowed,
+    race_go_already_passed,
+    wait_for_fresh_race_start,
     wait_for_fresh_track,
     wait_for_race_go,
     wait_for_race_start,
     wait_for_track,
+    wait_for_visual_go,
 )
 
 
@@ -25,7 +29,12 @@ class PreflightRaceGoTests(unittest.TestCase):
 
     def test_latch_countdown_start_future(self):
         go, branch = latch_race_go_boot_ms(4980, 5000)
-        self.assertEqual(go, 5000)
+        self.assertEqual(go, 5000 + RACE_COUNTDOWN_MS)
+        self.assertEqual(branch, "countdown")
+
+    def test_latch_imminent_countdown_go(self):
+        go, branch = latch_race_go_boot_ms(1_194_695, 1_194_661)
+        self.assertEqual(go, 1_194_661 + RACE_COUNTDOWN_MS)
         self.assertEqual(branch, "countdown")
 
     def test_race_go_not_allowed_during_countdown_after_latch(self):
@@ -41,11 +50,11 @@ class PreflightRaceGoTests(unittest.TestCase):
     def test_race_go_allowed_at_go(self):
         data = {
             "race_status": {
-                "sim_boot_time_ms": 7000,
+                "sim_boot_time_ms": 10000,
                 "race_start_boot_time_ms": 7000,
             }
         }
-        self.assertTrue(race_go_allowed(data, go_boot_ms=7000))
+        self.assertTrue(race_go_allowed(data, go_boot_ms=10000))
 
     def test_poll_race_go_restart_blocks_until_countdown_done(self):
         latch = RaceGoLatch()
@@ -86,12 +95,33 @@ class PreflightRaceGoTests(unittest.TestCase):
     def test_wait_for_race_go_succeeds_countdown_latch(self):
         data = {
             "race_status": {
+                "sim_boot_time_ms": 4980,
+                "race_start_boot_time_ms": 5000,
+            }
+        }
+        calls = {"n": 0}
+
+        def bump(_dt):
+            calls["n"] += 1
+            if calls["n"] > 20:
+                data["race_status"]["sim_boot_time_ms"] = (
+                    5000 + RACE_COUNTDOWN_MS + GO_POST_MARGIN_MS
+                )
+
+        with patch("simulator.preflight.RACE_GO_POLL_S", 0.001):
+            with patch("simulator.preflight.time.sleep", side_effect=bump):
+                self.assertTrue(wait_for_race_go(data, timeout_s=1.0))
+        self.assertEqual(data["_latched_go_boot_ms"], 5000 + RACE_COUNTDOWN_MS)
+
+    def test_wait_for_race_go_rejects_instant_at_go(self):
+        data = {
+            "race_status": {
                 "sim_boot_time_ms": 8000,
                 "race_start_boot_time_ms": 5000,
             }
         }
-        self.assertTrue(wait_for_race_go(data, timeout_s=1.0))
-        self.assertEqual(data["_latched_go_boot_ms"], 5000)
+        with patch("simulator.preflight.RACE_GO_POLL_S", 0.01):
+            self.assertFalse(wait_for_race_go(data, timeout_s=0.05))
 
     def test_race_finished_when_finish_ns_valid(self):
         self.assertTrue(race_finished({"race_status": {"race_finish_time_ns": 0}}))
@@ -112,6 +142,96 @@ class PreflightRaceGoTests(unittest.TestCase):
     def test_wait_for_race_start_succeeds(self):
         data = {"race_status": {"race_start_boot_time_ms": 1000}}
         self.assertTrue(wait_for_race_start(data, timeout_s=0.5))
+
+    def test_race_go_already_passed_after_countdown(self):
+        data = {
+            "race_status": {
+                "sim_boot_time_ms": 8000,
+                "race_start_boot_time_ms": 5000,
+            }
+        }
+        self.assertTrue(race_go_already_passed(data))
+
+    def test_race_go_not_passed_during_countdown(self):
+        data = {
+            "race_status": {
+                "sim_boot_time_ms": 3500,
+                "race_start_boot_time_ms": 3289,
+            }
+        }
+        self.assertFalse(race_go_already_passed(data))
+
+    def test_wait_for_fresh_race_start_rejects_stale(self):
+        data = {
+            "race_status": {
+                "sim_boot_time_ms": 8000,
+                "race_start_boot_time_ms": 5000,
+            }
+        }
+        with patch("simulator.preflight.PREFLIGHT_POLL_S", 0.01):
+            self.assertFalse(wait_for_fresh_race_start(data, timeout_s=0.03))
+
+    def test_wait_for_fresh_race_start_rejects_stale_mid_countdown(self):
+        data = {
+            "_preflight_race_start_baseline": 1_194_661,
+            "_track_sim_boot_ms": 1_200_000,
+            "_track_race_start_ms": 1_194_661,
+            "race_status": {
+                "sim_boot_time_ms": 1_194_695,
+                "race_start_boot_time_ms": 1_194_661,
+            },
+        }
+        with patch("simulator.preflight.PREFLIGHT_POLL_S", 0.01):
+            self.assertFalse(wait_for_fresh_race_start(data, timeout_s=0.03))
+
+    def test_wait_for_fresh_race_start_accepts_live_countdown(self):
+        data = {
+            "_preflight_race_start_baseline": 4000,
+            "_track_sim_boot_ms": 4980,
+            "_track_race_start_ms": 4000,
+            "race_status": {
+                "sim_boot_time_ms": 4980,
+                "race_start_boot_time_ms": 5000,
+            },
+        }
+        self.assertTrue(wait_for_fresh_race_start(data, timeout_s=0.5))
+
+    def test_wait_for_fresh_race_start_accepts_scheduled_future(self):
+        data = {
+            "_track_sim_boot_ms": 5000,
+            "_track_race_start_ms": 5000,
+            "race_status": {
+                "sim_boot_time_ms": 5000,
+                "race_start_boot_time_ms": 8000,
+            },
+        }
+        self.assertTrue(wait_for_fresh_race_start(data, timeout_s=0.5))
+
+    def test_wait_for_fresh_race_start_accepts_new_race_start(self):
+        data = {
+            "_preflight_race_start_baseline": 1_000_000,
+            "_track_sim_boot_ms": 1_200_000,
+            "_track_race_start_ms": 1_000_000,
+            "race_status": {
+                "sim_boot_time_ms": 1_200_010,
+                "race_start_boot_time_ms": 1_200_050,
+            },
+        }
+        self.assertTrue(wait_for_fresh_race_start(data, timeout_s=0.5))
+
+    def test_wait_for_visual_go_fallback_when_no_countdown(self):
+        data = {}
+        with patch("simulator.preflight.VISUAL_GO_SEE_TIMEOUT_S", 0.01):
+            with patch("simulator.preflight.PREFLIGHT_POLL_S", 0.01):
+                self.assertTrue(wait_for_visual_go(data, timeout_s=0.5))
+
+    def test_wait_for_visual_go_cleared(self):
+        from simulator.countdown_detector import reset_countdown_gate
+
+        data = {}
+        reset_countdown_gate(data)
+        data["_countdown_gate"]["state"] = "cleared"
+        self.assertTrue(wait_for_visual_go(data, timeout_s=0.5))
 
 
 class PreflightTimeoutTests(unittest.TestCase):

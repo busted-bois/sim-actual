@@ -4,6 +4,7 @@ from simulator.preflight import race_finished
 
 GATE1_TIMEOUT_S = float(os.environ.get("GATE1_TIMEOUT_S", "10"))
 GATE1_MIN_ELAPSED_S = float(os.environ.get("GATE1_MIN_ELAPSED_S", "8"))
+GATE_PROGRESS_TIMEOUT_S = float(os.environ.get("GATE_PROGRESS_TIMEOUT_S", "20"))
 SIM_RESET_WAIT_S = float(os.environ.get("SIM_RESET_WAIT_S", "5"))
 GATE1_WATCH_INTERVAL_S = float(os.environ.get("GATE1_WATCH_INTERVAL_S", "5"))
 
@@ -87,4 +88,21 @@ def gate1_watch_line(data, elapsed_s, pilot_gates_passed):
     return (
         f"[RACE] gate1_watch active={active} "
         f"elapsed={elapsed_s:.0f}s pilot_passed={pilot_gates_passed}"
+    )
+
+
+def gate_progress_stall(data, last_active, elapsed_since_advance_s):
+    if course_complete(data):
+        return False
+    if elapsed_since_advance_s < GATE_PROGRESS_TIMEOUT_S:
+        return False
+    active = int(data.get("active_gate_index", 0) or 0)
+    return active <= last_active
+
+
+def gate_progress_watch_line(data, last_active, elapsed_s):
+    active = int(data.get("active_gate_index", 0) or 0)
+    return (
+        f"[RACE] gate_progress_watch active={active} "
+        f"last_active={last_active} elapsed={elapsed_s:.0f}s"
     )

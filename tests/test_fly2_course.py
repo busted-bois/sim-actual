@@ -26,6 +26,12 @@ class Fly2CourseTests(unittest.TestCase):
         self.assertEqual(gm[0]["pos"], [1.0, 2.0, 3.0])
         self.assertEqual(gm[0]["id"], 0)
 
+    def test_fly2_config_defaults_match_main(self):
+        cfg = Fly2Config()
+        self.assertEqual(cfg.speed, 2.8)
+        self.assertEqual(cfg.lean, 0.12)
+        self.assertEqual(cfg.klat, 0.04)
+
     def test_compute_course_rates_returns_four(self):
         gate_map = [{"pos": [10.0, 0.0, 0.0]}]
         cfg = Fly2Config()

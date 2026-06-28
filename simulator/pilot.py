@@ -8,10 +8,9 @@ for forward motion and an altitude PID for thrust control. Reads shared_data
 from __future__ import annotations
 
 import math
-import os
 import time as _time
 
-from simulator.camera_model import blend_jacobian_p
+from simulator.flight_debug import dbg_now, motion_snapshot
 
 # --------------------------------------------------------------------------------------
 # Constants
@@ -61,35 +60,6 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def _jacobian_blend() -> float:
-    ab = os.environ.get("PILOT_AB", "").strip().lower()
-    if ab in ("jacobian", "main-jacobian"):
-        return 0.4
-    jac = os.environ.get("PILOT_JACOBIAN", "0").strip().lower()
-    if jac not in ("0", "false", "off", "no"):
-        return 0.4
-    return 0.0
-
-
-def _vision_alignment_rates(gate_target: dict) -> tuple[float, float]:  # type: ignore[type-arg]
-    nx = gate_target.get("nx", 0.0)
-    ny = gate_target.get("ny", 0.0)
-    blend = _jacobian_blend()
-    if blend <= 0.0:
-        return VISION_YAW_GAIN * nx, VISION_VY_GAIN * ny
-    confidence = float(gate_target.get("confidence", 0.0) or 0.0)
-    return blend_jacobian_p(
-        nx,
-        ny,
-        float(gate_target.get("u_px", 0.0)),
-        float(gate_target.get("v_px", 0.0)),
-        confidence,
-        VISION_YAW_GAIN,
-        VISION_VY_GAIN,
-        blend=blend,
-    )
-
-
 class Pilot:
     """Gate-traversal pilot using ATTITUDE mode + altitude PID."""
 
@@ -114,6 +84,7 @@ class Pilot:
         self._search_yaw_dir: float = 1.0
         self._search_start_time: float | None = None
         self._mode_str = "???"
+        self._may_fly = False
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + vision/telemetry", flush=True)
@@ -121,6 +92,14 @@ class Pilot:
     @property
     def gates_passed(self) -> int:
         return self._gates_passed
+
+    def on_attempt_start(self) -> None:
+        self._may_fly = True
+        print("[pilot] attempt start — vision flight enabled", flush=True)
+        dbg_now(
+            "pilot",
+            f"may_fly=True armed={self.data.get('armed', False)} {motion_snapshot(self.data)}",
+        )
 
     def reset_for_attempt(self) -> None:
         """Clear flight state after a sim reset so the next attempt starts fresh."""
@@ -142,8 +121,13 @@ class Pilot:
         self._search_yaw_dir = 1.0
         self._search_start_time = None
         self._mode_str = "???"
+        self._may_fly = False
         self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
+        self.controller.set_attitude_rates(0, 0, 0, 0)
+        dbg_now(
+            "pilot",
+            f"reset may_fly=False armed={self.data.get('armed', False)}",
+        )
 
     # ------------------------------------------------------------------
     # Gate selection
@@ -255,6 +239,10 @@ class Pilot:
     # Main tick ΓÇö called every cycle at 250 Hz
     # ------------------------------------------------------------------
     def tick(self) -> None:
+        if not self._may_fly:
+            self.controller.set_attitude_rates(0, 0, 0, 0)
+            return
+
         armed = self.data.get("armed", False)
 
         if not armed:
@@ -372,11 +360,10 @@ class Pilot:
         ny = gate_target.get("ny", 0.0)
         r_frac = gate_target.get("r_frac", 0.0)
 
-        yaw_rate, alt_rate = _vision_alignment_rates(gate_target)
-        yaw_rate = _clamp(yaw_rate, -2.0, 2.0)
+        yaw_rate = _clamp(VISION_YAW_GAIN * nx, -2.0, 2.0)
 
         ny_offset = _clamp(
-            alt_rate, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
+            ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
         )
         odometry = self.data.get("odometry")
         z_now = odometry.get("z", 0.0) if odometry else 0.0
@@ -546,7 +533,8 @@ class Pilot:
             else:
                 obstacles = self.data.get("obstacles", [])
                 obstacle_blocking = (
-                    abs(bearing_error) < 0.4
+                    abs(nx_telemetry) < 0.5
+                    and abs(bearing_error) < 0.4
                     and any(
                         abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.01
                         for o in obstacles
