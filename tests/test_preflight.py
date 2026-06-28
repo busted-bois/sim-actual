@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from simulator.preflight import (
     COUNTDOWN_SCHEDULED_THRESHOLD_MS,
+    GO_POST_HOLD_S,
     GO_POST_MARGIN_MS,
     RACE_COUNTDOWN_MS,
     RaceGoLatch,
@@ -12,6 +13,7 @@ from simulator.preflight import (
     race_finished,
     race_go_allowed,
     race_go_already_passed,
+    wait_after_race_go,
     wait_for_fresh_race_start,
     wait_for_fresh_track,
     wait_for_race_go,
@@ -218,6 +220,73 @@ class PreflightRaceGoTests(unittest.TestCase):
             },
         }
         self.assertTrue(wait_for_fresh_race_start(data, timeout_s=0.5))
+
+    def test_restart_early_delta_does_not_start_early(self):
+        """Regression: restart with sim_boot << race_start must wait for full countdown.
+
+        After sim_reset, sim_boot resets to near-zero.  If we sample race_start
+        before the countdown has advanced 1500 ms, the delta (race_start - sim_boot)
+        exceeds COUNTDOWN_SCHEDULED_THRESHOLD_MS.  Previously this triggered the
+        "scheduled" branch and set go_boot = race_start (countdown-start time),
+        causing the drone to start ~3 s before actual GO.
+        """
+        # Restart context: sim_boot is tiny (post-reset), race_start is countdown start.
+        sim_boot = 500
+        race_start = 3289
+        # delta = 2789 ms > COUNTDOWN_SCHEDULED_THRESHOLD_MS (1500 ms)
+        # is_restart=True must override the delta heuristic.
+        go, branch = latch_race_go_boot_ms(sim_boot, race_start, is_restart=True)
+        self.assertEqual(go, race_start + RACE_COUNTDOWN_MS)
+        self.assertNotEqual(branch, "at_go")
+
+        # Verify race_go_allowed correctly reports NOT allowed before actual GO
+        data = {
+            "race_status": {
+                "sim_boot_time_ms": sim_boot,
+                "race_start_boot_time_ms": race_start,
+            }
+        }
+        self.assertFalse(race_go_allowed(data, go_boot_ms=go))
+
+    def test_wait_for_race_go_restart_early_delta_blocks(self):
+        """wait_for_race_go must not fire early during restart with large delta."""
+        data = {
+            "race_status": {
+                "sim_boot_time_ms": 500,
+                "race_start_boot_time_ms": 3289,
+            }
+        }
+        # With sim_boot=500 < RESTART_ARM_BOOT_THRESHOLD_MS, is_restart auto-detected.
+        with patch("simulator.preflight.RACE_GO_POLL_S", 0.01):
+            self.assertFalse(wait_for_race_go(data, timeout_s=0.05))
+
+    def test_wait_after_race_go_holds_before_flight(self):
+        class FakeController:
+            def __init__(self):
+                self.safe_calls = 0
+                self._controls_enabled = False
+                self._thrust = 0.0
+                self.data = {}
+
+            def set_controls_enabled(self, _enabled):
+                pass
+
+            def send_safe_hold(self):
+                self.safe_calls += 1
+
+        controller = FakeController()
+        t0 = {"now": 100.0}
+
+        def fake_monotonic():
+            return t0["now"]
+
+        def fake_sleep(_dt):
+            t0["now"] += GO_POST_HOLD_S + 0.01
+
+        with patch("simulator.preflight.time.monotonic", side_effect=fake_monotonic):
+            with patch("simulator.preflight.time.sleep", side_effect=fake_sleep):
+                self.assertTrue(wait_after_race_go(controller=controller))
+        self.assertGreaterEqual(controller.safe_calls, 1)
 
     def test_wait_for_visual_go_fallback_when_no_countdown(self):
         data = {}

@@ -6,7 +6,7 @@ import sys
 import time
 
 from simulator.auto_flight import auto_flight_enabled, run_auto_flight_loop
-from simulator.preflight import wait_for_race_go, wait_for_track
+from simulator.preflight import wait_after_race_go, wait_for_race_go, wait_for_track
 from simulator.setup import setup_components
 
 SIM_SERVER_UDP_IP = "127.0.0.1"
@@ -56,6 +56,8 @@ controller.arm()
 if not wait_for_race_go(shared_data, armed_sim_boot_ms=armed_sim_boot_ms):
     print("ERROR: countdown never reached GO", flush=True)
     sys.exit(1)
+
+wait_after_race_go(controller=controller)
 
 if hasattr(pilot, "on_attempt_start"):
     pilot.on_attempt_start()

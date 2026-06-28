@@ -125,10 +125,12 @@ class VisionRX:
         try:
             import time as _time
 
+            from simulator.countdown_detector import countdown_visible, update_countdown_gate
             from simulator.gate_detector import detect_gate
 
             h, w = img.shape[:2]
 
+            update_countdown_gate(self.data, countdown_visible(img))
             detection = detect_gate(img, frame_id, sim_time_ns)
 
             self.data["camera"] = {"received_at": _time.monotonic()}

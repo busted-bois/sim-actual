@@ -21,6 +21,8 @@ COUNTDOWN_SCHEDULED_THRESHOLD_MS = 1500
 TRACK_RACE_START_TOLERANCE_MS = 500
 
 GO_POST_MARGIN_MS = int(os.environ.get("GO_POST_MARGIN_MS", "400"))
+# Hardcoded safety hold after sim GO before arming / enabling flight controls.
+GO_POST_HOLD_S = 5.0
 VISUAL_GO_SEE_TIMEOUT_S = float(os.environ.get("VISUAL_GO_SEE_TIMEOUT_S", "8"))
 PREFLIGHT_SAFE_INTERVAL_S = 0.1
 
@@ -44,22 +46,24 @@ def restart_go_boot_ms(race_start_boot_ms):
 
 def race_go_boot_ms(sim_boot_ms, race_start_boot_ms, is_restart=False):
     """Sim boot ms when on-screen timer hits 0."""
-    del is_restart
     if race_start_boot_ms < 0:
         return None
+    # After sim reset, sim_boot resets to near-zero; always add countdown regardless of delta.
+    if is_restart:
+        return restart_go_boot_ms(race_start_boot_ms)
     delta = race_start_boot_ms - sim_boot_ms
     if delta > COUNTDOWN_SCHEDULED_THRESHOLD_MS:
+        # First run: sim sent race_start as the scheduled GO instant.
         return race_start_boot_ms
     return restart_go_boot_ms(race_start_boot_ms)
 
 
 def race_go_already_passed(data, is_restart=False):
-    del is_restart
     race = data.get("race_status") or {}
     race_start = race.get("race_start_boot_time_ms", -1)
     if race_start < 0:
         return False
-    go_boot = race_go_boot_ms(race.get("sim_boot_time_ms", 0), race_start)
+    go_boot = race_go_boot_ms(race.get("sim_boot_time_ms", 0), race_start, is_restart=is_restart)
     if go_boot is None:
         return False
     return race.get("sim_boot_time_ms", 0) >= go_boot
@@ -67,11 +71,10 @@ def race_go_already_passed(data, is_restart=False):
 
 def latch_race_go_boot_ms(sim_boot_ms, race_start_boot_ms, is_restart=False):
     """Latch GO instant: scheduled race_start or race_start + countdown."""
-    del is_restart
     if race_start_boot_ms < 0:
         return None, None
 
-    go_boot_ms = race_go_boot_ms(sim_boot_ms, race_start_boot_ms)
+    go_boot_ms = race_go_boot_ms(sim_boot_ms, race_start_boot_ms, is_restart=is_restart)
     delta = race_start_boot_ms - sim_boot_ms
     if sim_boot_ms >= go_boot_ms:
         branch = "at_go"
@@ -339,9 +342,11 @@ def wait_for_race_go(
 ):
     print("Waiting for race go (countdown -> 0)...", flush=True)
     deadline = time.time() + timeout_s
-    del is_restart
+    if is_restart is None:
+        current_sim_boot = (data.get("race_status") or {}).get("sim_boot_time_ms", 0)
+        is_restart = is_restart_arm_context(current_sim_boot)
     latch = RaceGoLatch()
-    latch.reset_for_arm(armed_sim_boot_ms, is_restart=False)
+    latch.reset_for_arm(armed_sim_boot_ms, is_restart=is_restart)
     countdown_witnessed = False
     last_phase_log = 0.0
     last_progress_log = 0.0
@@ -422,6 +427,17 @@ def wait_for_race_go(
 
     print("Race go timeout: race never started", flush=True)
     return False
+
+
+def wait_after_race_go(controller=None, hold_s=GO_POST_HOLD_S):
+    """Hold disarmed with zero thrust for hold_s after sim GO before flight."""
+    print(f"[RACE] holding {hold_s:.0f}s after GO before flight...", flush=True)
+    deadline = time.monotonic() + hold_s
+    while time.monotonic() < deadline:
+        preflight_keep_safe(controller)
+        time.sleep(PREFLIGHT_POLL_S)
+    dbg_now("milestone", f"go_hold_complete hold_s={hold_s}")
+    return True
 
 
 def wait_for_visual_go(data, timeout_s=15.0, controller=None):

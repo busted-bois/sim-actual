@@ -11,6 +11,7 @@ import time
 from simulator.flight_debug import dbg_now, motion_snapshot
 from simulator.preflight import (
     preflight_keep_safe,
+    wait_after_race_go,
     wait_for_fresh_race_start,
     wait_for_fresh_track,
     wait_for_race_go,
@@ -76,7 +77,11 @@ def _run_attempt_preflight(controller, shared_data, pilot, attempt: int) -> bool
 
     dbg_now("milestone", f"fresh_race_start_ok {motion_snapshot(shared_data)}")
 
-    if not wait_for_race_go(shared_data, controller=controller):
+    race_before_go = shared_data.get("race_status") or {}
+    armed_sim_boot_ms = race_before_go.get("sim_boot_time_ms", 0)
+    if not wait_for_race_go(
+        shared_data, armed_sim_boot_ms=armed_sim_boot_ms, controller=controller
+    ):
         print("ERROR: countdown never reached GO", flush=True)
         return False
 
@@ -87,6 +92,8 @@ def _run_attempt_preflight(controller, shared_data, pilot, attempt: int) -> bool
         return False
 
     dbg_now("milestone", f"visual_go_ok {motion_snapshot(shared_data)}")
+
+    wait_after_race_go(controller=controller)
 
     race = shared_data.get("race_status") or {}
     go_boot = shared_data.get("_latched_go_boot_ms", "?")
