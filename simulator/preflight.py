@@ -3,6 +3,7 @@ import socket
 import time
 
 PREFLIGHT_TIMEOUT_S = 30.0
+AUTO_TRACK_TIMEOUT_S = 60.0
 PREFLIGHT_POLL_S = 0.1
 RACE_GO_TIMEOUT_S = 45.0
 # Match control loop rate so we react within one tick of GO.
@@ -21,10 +22,9 @@ RESTART_ARM_BOOT_THRESHOLD_MS = int(
 
 
 def is_restart_arm_context(armed_sim_boot_ms):
-    return (
-        armed_sim_boot_ms is not None
-        and armed_sim_boot_ms < RESTART_ARM_BOOT_THRESHOLD_MS
-    )
+    if armed_sim_boot_ms is None or armed_sim_boot_ms <= 0:
+        return False
+    return armed_sim_boot_ms < RESTART_ARM_BOOT_THRESHOLD_MS
 
 
 def restart_go_boot_ms(race_start_boot_ms):
@@ -68,14 +68,12 @@ class RaceGoLatch:
     def __init__(self):
         self.go_boot_ms = None
         self.branch = None
-        self.last_race_start = -1
         self.armed_sim_boot_ms = None
         self.is_restart = False
 
     def reset_for_arm(self, armed_sim_boot_ms=None, is_restart=False):
         self.go_boot_ms = None
         self.branch = None
-        self.last_race_start = -1
         self.armed_sim_boot_ms = armed_sim_boot_ms
         self.is_restart = is_restart
 
@@ -84,9 +82,6 @@ class RaceGoLatch:
             return self.go_boot_ms, self.branch
 
         if race_start_boot_ms < 0:
-            return None, None
-
-        if self.last_race_start >= 0:
             return None, None
 
         if self.armed_sim_boot_ms is not None and sim_boot_ms <= self.armed_sim_boot_ms:
@@ -99,10 +94,6 @@ class RaceGoLatch:
         )
         return self.go_boot_ms, self.branch
 
-    def observe_race_start(self, race_start_boot_ms):
-        if race_start_boot_ms >= 0:
-            self.last_race_start = race_start_boot_ms
-
 
 def poll_race_go(data, latch):
     """One wait_for_race_go iteration. True when sim_boot >= latched GO (timer at 0)."""
@@ -111,7 +102,6 @@ def poll_race_go(data, latch):
     sim_boot = race.get("sim_boot_time_ms", 0)
 
     latch.try_latch(sim_boot, race_start)
-    latch.observe_race_start(race_start)
 
     if latch.go_boot_ms is None:
         return False, None
@@ -154,7 +144,7 @@ def race_go_allowed(data, go_boot_ms=None, is_restart=False):
 
 
 def wait_for_track(data, timeout_s=PREFLIGHT_TIMEOUT_S):
-    print("Preflight: waiting for track_gates...", flush=True)
+    print("Preflight: waiting for track_gates (click Race in FlightSim)...", flush=True)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if data.get("track_gates"):
@@ -165,11 +155,68 @@ def wait_for_track(data, timeout_s=PREFLIGHT_TIMEOUT_S):
     return False
 
 
-def wait_for_race_go(data, timeout_s=RACE_GO_TIMEOUT_S, armed_sim_boot_ms=None):
+def wait_for_fresh_track(data, timeout_s=AUTO_TRACK_TIMEOUT_S):
+    """Wait for a new track burst; clears stale gate data first."""
+    data.pop("track_gates", None)
+    data.pop("gates", None)
+    print(
+        "Preflight: waiting for fresh track_gates "
+        "(click Race or Restart Race in FlightSim)...",
+        flush=True,
+    )
+    print(
+        "  Run make auto first, then click Race "
+        "(or Restart Race if you already raced)",
+        flush=True,
+    )
+    deadline = time.time() + timeout_s
+    last_status = 0.0
+    while time.time() < deadline:
+        if data.get("track_gates"):
+            print("Preflight OK: track_gates loaded", flush=True)
+            return True
+        now = time.time()
+        if now - last_status >= 5.0:
+            race = data.get("race_status") or {}
+            print(
+                "[RACE] waiting... "
+                f"odometry={bool(data.get('odometry'))} "
+                f"race_start={race.get('race_start_boot_time_ms', -1)} "
+                f"track_gates={bool(data.get('track_gates'))}",
+                flush=True,
+            )
+            last_status = now
+        time.sleep(PREFLIGHT_POLL_S)
+    print(
+        "Preflight timeout: track_gates not received — "
+        "click Restart Race in FlightSim, then retry make auto",
+        flush=True,
+    )
+    return False
+
+
+def wait_for_race_start(data, timeout_s=10.0):
+    """Wait until sim reports race_start_boot_time_ms (race countdown scheduled)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        race = data.get("race_status") or {}
+        if race.get("race_start_boot_time_ms", -1) >= 0:
+            return True
+        time.sleep(PREFLIGHT_POLL_S)
+    return False
+
+
+def wait_for_race_go(
+    data,
+    timeout_s=RACE_GO_TIMEOUT_S,
+    armed_sim_boot_ms=None,
+    is_restart=None,
+):
     print("Waiting for race go (countdown -> 0)...", flush=True)
     deadline = time.time() + timeout_s
     latch = RaceGoLatch()
-    is_restart = is_restart_arm_context(armed_sim_boot_ms)
+    if is_restart is None:
+        is_restart = is_restart_arm_context(armed_sim_boot_ms)
     latch.reset_for_arm(armed_sim_boot_ms, is_restart=is_restart)
 
     while time.time() < deadline:

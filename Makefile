@@ -8,10 +8,14 @@ check:
 	uv run ruff format .
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_camera_model tests.test_gate_estimator tests.test_ibvs_comparison tests.test_pilot_profile -v
+	uv run python -m unittest tests.test_preflight tests.test_camera_model tests.test_gate_estimator tests.test_ibvs_comparison tests.test_pilot_profile tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course -v
 
 sim:
 	uv run main.py
+
+# Auto flight — retry until course complete; Ctrl+C / Ctrl+letter cancels to normal sim
+auto:
+	uv run auto.py
 
 # A/B gate-racing profiles (Windows: powershell -File scripts/sim-ab.ps1 -Profile main)
 sim-ab-main:

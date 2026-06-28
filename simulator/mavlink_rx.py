@@ -1,3 +1,4 @@
+import os
 import struct
 import time
 import threading
@@ -7,6 +8,12 @@ from simulator.transforms import quat_to_yaw
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 ENCAPSULATED_TRACK_INFO_MSG_ID = 2
+
+_AUTO_FLIGHT_DEBUG_VALUES = frozenset({"1", "true", "yes"})
+
+
+def _auto_flight_debug() -> bool:
+    return os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower() in _AUTO_FLIGHT_DEBUG_VALUES
 
 
 class MAVLinkRX:
@@ -18,6 +25,8 @@ class MAVLinkRX:
 
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
+        self._debug_last_race_log = 0.0
+        self._debug_logged_track = False
 
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
@@ -207,6 +216,17 @@ class MAVLinkRX:
             "active_gate_index": active_gate_index,
             "last_gate_race_time": last_gate_race_time,
         }
+        if _auto_flight_debug():
+            now = time.monotonic()
+            if now - self._debug_last_race_log >= 2.0:
+                print(
+                    "[AUTO_FLIGHT_DEBUG] race_status "
+                    f"sim_boot={sim_boot_time_ms} "
+                    f"race_start={race_start_boot_time_ms} "
+                    f"active_gate_index={active_gate_index}",
+                    flush=True,
+                )
+                self._debug_last_race_log = now
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
@@ -271,6 +291,12 @@ class MAVLinkRX:
             }
             for g in gates
         ]
+        if _auto_flight_debug() and not self._debug_logged_track:
+            print(
+                f"[AUTO_FLIGHT_DEBUG] track burst received num_gates={num_gates}",
+                flush=True,
+            )
+            self._debug_logged_track = True
 
     def on_actuator_output_status(self, msg):
         pass

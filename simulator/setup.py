@@ -19,7 +19,10 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
         )
     )
     print("Waiting for heartbeat...", flush=True)
-    sim_conn.wait_heartbeat()
+    if not sim_conn.wait_heartbeat(timeout=30):
+        raise TimeoutError(
+            "No MAVLink heartbeat on UDP 14550 — open FlightSim and enter a flight session first"
+        )
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
 
     # -------------------------------

@@ -8,7 +8,7 @@ Presets (PILOT_AB):
 
   branch          — main flight + active_gate telemetry (no Jacobian)
 
-  jacobian        — main flight + yaw-only Jacobian (explicit opt-in via preset)
+  jacobian        — origin/main pilot + optional yaw Jacobian (PILOT_JACOBIAN=1)
 
   main-jacobian   — alias for jacobian
 

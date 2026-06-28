@@ -24,40 +24,33 @@ import time
 import numpy as np
 
 from rl import spec
+from rl.fly2_course import (
+    HOVER_T,
+    Fly2Config,
+    K_ATT,
+    K_YAW,
+    KD_Z,
+    KP_Z,
+    RATE_CLIP,
+    SIGN_PITCH,
+    SIGN_ROLL,
+    SIGN_YAW,
+    YAW_CLIP,
+    compute_course_rates,
+    rpy,
+    wrap,
+)
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
-from simulator.transforms import quat_to_yaw
 
-HOVER_T = 0.27
-KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
-K_ATT = 0.6  # attitude-angle P -> rate command
-K_YAW = 0.6  # was 0.4 — rotate onto next gate's heading quicker
-# Measured command-sign conventions (pitch normal; roll + yaw inverted).
-SIGN_ROLL = -1.0
-SIGN_PITCH = +1.0
-SIGN_YAW = -1.0
-RATE_CLIP = 0.30
-YAW_CLIP = 0.8  # was 0.5 — allow faster yaw to cut turn time between gates
 HZ = 150.0
-
-
-def rpy(q):
-    w, x, y, z = q
-    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
-    pitch = math.asin(max(-1, min(1, 2 * (w * y - z * x))))
-    yaw = quat_to_yaw(*q)
-    return roll, pitch, yaw
-
-
-def wrap(a):
-    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["hover", "course"], default="course")
     ap.add_argument("--seconds", type=float, default=95.0)
-    ap.add_argument("--speed", type=float, default=4.0)  # was 2.8
-    ap.add_argument("--lean", type=float, default=0.18, help="max forward lean (rad)")  # was 0.12
+    ap.add_argument("--speed", type=float, default=4.0)
+    ap.add_argument("--lean", type=float, default=0.18, help="max forward lean (rad)")
     ap.add_argument(
         "--flipz", action="store_true", help="negate gate-map z (climb course)"
     )
@@ -67,7 +60,7 @@ def main():
         default=-1.0,
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
-    ap.add_argument("--klat", type=float, default=0.11, help="cross-track roll gain")  # was 0.04
+    ap.add_argument("--klat", type=float, default=0.11, help="cross-track roll gain")
     ap.add_argument(
         "--no-wait",
         dest="wait",
@@ -81,6 +74,13 @@ def main():
     )
     args = ap.parse_args()
 
+    cfg = Fly2Config(
+        speed=args.speed,
+        lean=args.lean,
+        klat=args.klat,
+        zoff=args.zoff,
+        flipz=args.flipz,
+    )
     gate_map = json.load(open(GATE_MAP_PATH))["gates"]
     n = len(gate_map)
     sim = SimInterface()
@@ -90,7 +90,6 @@ def main():
     if args.reset:
         sim.reset_sim()
         time.sleep(3)
-    # Sync launch to the countdown: wait for the user to hit ENTER at "go".
     if args.wait and args.mode == "course":
         try:
             input("[f2] READY -- press ENTER the moment the countdown hits 0...")
@@ -119,6 +118,14 @@ def main():
 
         if args.mode == "hover":
             tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
+            roll_cmd = float(
+                np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+            )
+            pitch_cmd = float(
+                np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+            )
+            yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+            thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
         else:
             active = int(sim.data.get("active_gate_index", 0) or 0)
             if active != last_active:
@@ -130,44 +137,12 @@ def main():
             if active >= n:
                 reason = "COURSE COMPLETE"
                 break
-            g = np.asarray(gate_map[active]["pos"], float)
-            dx, dy = g[0] - p[0], g[1] - p[1]
-            dist = math.hypot(dx, dy)
-            bearing = math.atan2(dy, dx)
-            yaw_err = wrap(bearing - yaw)
-            speed = float(np.linalg.norm(v[:2]))
-            # Signed lateral (cross-track) offset from the line to the gate, body-right.
-            e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-            align = max(0.0, 1.0 - abs(yaw_err) / 0.5)  # wider: don't kill speed for small heading errors
-            # Slow down when off the gate line so there is time to thread the center:
-            # stays fast on straight shots, eases off on turning/offset gates.
-            lat_align = max(0.3, 1.0 - abs(e_cross) / 2.5)  # slow sooner when off-line (was /3.0)
-            # Reach full speed by ~5m out, but only when well-lined-up (lat_align).
-            v_des = args.speed * align * lat_align * min(1.0, 0.4 + dist / 6.0)
-            # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
-            # Stronger accel gain (0.08, was 0.05) builds speed faster off each gate;
-            # a bit more brake authority (-0.07) keeps overshoot in check at speed.
-            lean = float(np.clip(0.08 * (v_des - speed), -0.07, args.lean))
-            tgt_pitch = -lean
-            # Cross-track roll control: bank toward the gate line (stronger + wider
-            # clip than before so it can re-center laterally at the higher speed).
-            tgt_roll = float(np.clip(args.klat * e_cross, -0.16, 0.16))
-            # Track-data gate z appears sign-flipped vs odometry NED (course climbs).
-            # zoff lifts the aim point so we clear the bottom border of the opening.
-            tgt_z = (-g[2] if args.flipz else g[2]) + args.zoff
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = compute_course_rates(
+                p, v, snap.quat, active, gate_map, hold_z, cfg
+            )
 
-        # Attitude-angle P -> rate commands, with measured sign conventions.
-        roll_cmd = float(
-            np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
-        )
-        pitch_cmd = float(
-            np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
-        )
-        yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
-        thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
         sim.send_attitude_rates(roll_cmd, pitch_cmd, yaw_cmd, thrust)
 
-        # Safety.
         gb_z = (spec.quat_to_R(snap.quat).T @ np.array([0.0, 0, 1.0]))[2]
         if gb_z < 0.0:
             reason = "ABORT flipped"
