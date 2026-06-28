@@ -22,6 +22,8 @@ import time
 import torch
 from ultralytics import YOLO
 
+from simulator.gate_pnp import estimate_gate_pose
+
 _WEIGHTS = os.path.join(os.path.dirname(__file__), "models", "gate_pose.pt")
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _IMGSZ = 640
@@ -53,16 +55,27 @@ def detect(img):
     gates = []
     kp = res.keypoints
     for i in range(len(res.boxes)):
+        kxy = kp.xy[i].cpu().numpy() if kp is not None else None
+        kconf = (
+            kp.conf[i].cpu().numpy()
+            if (kp is not None and kp.conf is not None)
+            else None
+        )
+        box = res.boxes.xyxy[i].cpu().numpy()
+        # Solve gate pose (body frame) here in the detector thread so the
+        # 150 Hz control loop only reads the result, never runs PnP.
+        pose = (
+            estimate_gate_pose(kxy, kconf, box=box)
+            if (kxy is not None and kconf is not None)
+            else None
+        )
         gates.append(
             {
-                "box": res.boxes.xyxy[i].cpu().numpy(),
+                "box": box,
                 "conf": float(res.boxes.conf[i]),
-                "keypoints": kp.xy[i].cpu().numpy() if kp is not None else None,
-                "keypoint_conf": (
-                    kp.conf[i].cpu().numpy()
-                    if (kp is not None and kp.conf is not None)
-                    else None
-                ),
+                "keypoints": kxy,
+                "keypoint_conf": kconf,
+                "pose": pose,
             }
         )
     return gates, res.plot(line_width=2)
