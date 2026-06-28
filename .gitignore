@@ -11,3 +11,4 @@ __pycache__/
 
 # Runtime logs
 logs/
+runs/

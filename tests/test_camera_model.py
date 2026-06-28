@@ -47,6 +47,30 @@ class TestCameraModel(unittest.TestCase):
         b, _ = camera_model.pixel_bearing(camera_model.CX + 32.0, camera_model.CY)
         self.assertAlmostEqual(b, math.atan2(32.0, camera_model.FX), places=5)
 
+    def test_adaptive_blend_stronger_at_large_offset(self):
+        gain = 1.0
+        nx_small, u_small = 0.05, camera_model.CX + 0.05 * (camera_model.IMG_W / 2.0)
+        nx_large, u_large = 0.4, camera_model.CX + 0.4 * (camera_model.IMG_W / 2.0)
+        y_p_small = gain * nx_small
+        y_j_small, _ = camera_model.blend_jacobian_p(
+            nx_small, 0.0, u_small, camera_model.CY, 0.8, gain, 6.0, blend=0.25
+        )
+        y_p_large = gain * nx_large
+        y_j_large, _ = camera_model.blend_jacobian_p(
+            nx_large, 0.0, u_large, camera_model.CY, 0.8, gain, 6.0, blend=0.25
+        )
+        self.assertGreater(abs(y_j_large - y_p_large), abs(y_j_small - y_p_small))
+
+    def test_range_scales_yaw_when_close(self):
+        nx, ny, u = 0.3, 0.1, 400.0
+        y_far, _ = camera_model.blend_jacobian_p(
+            nx, ny, u, 180.0, 0.0, 1.0, 6.0, range_m=20.0
+        )
+        y_close, _ = camera_model.blend_jacobian_p(
+            nx, ny, u, 180.0, 0.0, 1.0, 6.0, range_m=3.0
+        )
+        self.assertLess(abs(y_close), abs(y_far))
+
 
 if __name__ == "__main__":
     unittest.main()

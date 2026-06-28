@@ -19,6 +19,8 @@ IMG_H = 360
 CAM_TILT_DEG = 20.0
 GATE_SIZE_M = 2.72
 
+DEFAULT_JACOBIAN_BLEND = 0.25
+
 _R_BODY_CAM_BASE = np.array(
     [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
     dtype=np.float64,
@@ -107,6 +109,12 @@ def twist_to_body_rates(twist_cam: np.ndarray) -> tuple[float, float, float]:
     return yaw_rate, vz_ned, float(v_body[1])
 
 
+def _range_yaw_scale(range_m: float | None) -> float:
+    if range_m is None or range_m < 0.5:
+        return 1.0
+    return max(0.4, min(1.0, range_m / 15.0))
+
+
 def blend_jacobian_p(
     nx: float,
     ny: float,
@@ -115,26 +123,23 @@ def blend_jacobian_p(
     confidence: float,
     yaw_gain: float,
     vy_gain: float,
-    blend: float = 0.4,
+    blend: float = DEFAULT_JACOBIAN_BLEND,
+    range_m: float | None = None,
 ) -> tuple[float, float]:
-    """Blend P-control with pinhole bearing (projection Jacobian), not full IBVS.
-
-    Full IBVS pseudo-inverse targets body velocity but this sim commands attitude
-    rates; the pseudo-inverse weakens yaw and flips altitude at typical ranges.
-    Bearing from the projection model keeps main-branch behavior at small angles
-    and improves large off-axis alignment without wrong depth scaling.
-    """
-    yaw_p = yaw_gain * nx
+    """Blend P-control with pinhole bearing; adaptive + range-scaled yaw."""
+    scale = _range_yaw_scale(range_m)
+    yaw_p = yaw_gain * nx * scale
     alt_p = vy_gain * ny
 
     if confidence < 0.3:
         return yaw_p, alt_p
 
     bearing_h, _elevation = pixel_bearing(u, v)
-    yaw_j = yaw_gain * bearing_h
-    # Altitude: keep P on ny only — elevation Jacobian diverges when gate is low
-    # in frame (ny>0.8) and caused sporadic dives/climbs in live sim.
-    w = blend * min(confidence, 1.0)
+    yaw_j = yaw_gain * bearing_h * scale
+
+    nx_equiv = abs(nx) * math.pi
+    adapt = min(1.0, abs(bearing_h) / max(nx_equiv, 1e-6))
+    w = blend * min(confidence, 1.0) * adapt
     yaw = (1.0 - w) * yaw_p + w * yaw_j
     return yaw, alt_p
 

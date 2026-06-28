@@ -8,62 +8,89 @@ for forward motion and an altitude PID for thrust control. Reads shared_data
 from __future__ import annotations
 
 import math
+import os
 import time as _time
 
-from simulator.camera_model import blend_jacobian_p
-from simulator.pilot_profile import (
-    CONTROL_DT_S,
-    PASSED_GATE_ANGLE_RAD,
-    PASSED_GATE_NEAR_M,
-    SEARCH_SWEEP_PERIOD_S,
-    SEARCH_SWEEP_YAW_RATE,
-    SEARCH_WARMUP_S,
-    VISION_MAX_AGE_S,
-    VISION_MAX_ALT_ADJUST,
-    VISION_VY_GAIN,
-    VISION_YAW_GAIN,
-    FLYTHROUGH_MIN_PEAK_R_FRAC,
-    FLYTHROUGH_DROP_RATIO,
-    Z_TARGET_NED,
-    load_profile,
-)
+from simulator.camera_model import DEFAULT_JACOBIAN_BLEND, blend_jacobian_p
+from simulator.vision_assist import blend_telemetry_bearing
 
-P = load_profile()
-
-HOVER_THRUST = P.hover_thrust
-CRUISE_THRUST = P.cruise_thrust
-CRUISE_PITCH = P.cruise_pitch
-COLLISION_THRUST = P.collision_thrust
+# --------------------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------------------
+HOVER_THRUST = 0.5
+CRUISE_THRUST = 0.55
+CRUISE_PITCH_RATE = -0.2
+COLLISION_THRUST = 0.4
 COLLISION_HOLD_S = 2.0
 
-ALTITUDE_TRIM = P.altitude_trim
-KP_Z = P.kp_z
-KI_Z = P.ki_z
-KD_Z = P.kd_z
+ALTITUDE_TRIM = 0.55
+KP_Z = 0.15
+KI_Z = 0.01
+KD_Z = 0.20
+Z_TARGET_NED = -5.0
 
-K_ATT = P.k_att
-SIGN_ROLL = P.sign_roll
-SIGN_PITCH = P.sign_pitch
-SIGN_YAW = P.sign_yaw
-RATE_CLIP = P.rate_clip
-YAW_CLIP = P.yaw_clip
+VISION_YAW_GAIN = math.radians(40)
+VISION_CENTER_DEADBAND = 0.30
+VISION_PROXIMITY_R_FRAC = 0.10
+VISION_MAX_AGE_S = 0.5
+VISION_VY_GAIN = 6.0
+VISION_MAX_ALT_ADJUST = 2.0
+STABILIZE_HOLD_S = 0.1
+VISION_ALIGN_PITCH_RATE = -0.15
 
-VISION_CENTER_DEADBAND = P.vision_center_deadband
-VISION_PROXIMITY_R_FRAC = P.vision_proximity_r_frac
-STABILIZE_HOLD_S = P.stabilize_hold_s
-IBVS_BLEND = P.jacobian_blend
+TELEMETRY_YAW_GAIN = 1.0
+TELEMETRY_PROXIMITY_M = 3.0
 
-TELEMETRY_YAW_GAIN = P.telemetry_yaw_gain
-TELEMETRY_PROXIMITY_M = P.telemetry_proximity_m
-TELEMETRY_ALIGN_RAD = P.telemetry_align_rad
+OBSTACLE_CLEAR_ZONE = 0.25
 
-POST_GATE_HOVER_S = P.post_gate_hover_s
-SEARCH_FORWARD_LEAN = P.search_forward_pitch
-OBSTACLE_CLEAR_ZONE = P.obstacle_clear_zone
+POST_GATE_HOVER_S = 2.5
+
+# Search mode — yaw scan to find next gate after fly-through
+SEARCH_SWEEP_YAW_RATE = 0.8
+SEARCH_SWEEP_PERIOD_S = 2.0
+SEARCH_FORWARD_PITCH = -0.04
+SEARCH_WARMUP_S = 1.5
+
+# Passed-gate rejection — position-based internal map
+PASSED_GATE_NEAR_M = 3.0  # Within this dist of a passed gate, reject all
+PASSED_GATE_ANGLE_RAD = math.radians(45)  # Angular match window
+
+CONTROL_DT_S = 1 / 250
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _jacobian_blend() -> float:
+    ab = os.environ.get("PILOT_AB", "").strip().lower()
+    if ab in ("jacobian", "main-jacobian"):
+        return DEFAULT_JACOBIAN_BLEND
+    jac = os.environ.get("PILOT_JACOBIAN", "0").strip().lower()
+    if jac not in ("0", "false", "off", "no"):
+        return DEFAULT_JACOBIAN_BLEND
+    return 0.0
+
+
+def _vision_alignment_rates(gate_target: dict) -> tuple[float, float]:  # type: ignore[type-arg]
+    nx = gate_target.get("nx", 0.0)
+    ny = gate_target.get("ny", 0.0)
+    blend = _jacobian_blend()
+    if blend <= 0.0:
+        return VISION_YAW_GAIN * nx, VISION_VY_GAIN * ny
+    confidence = float(gate_target.get("confidence", 0.0) or 0.0)
+    range_m = gate_target.get("range_m")
+    return blend_jacobian_p(
+        nx,
+        ny,
+        float(gate_target.get("u_px", 0.0)),
+        float(gate_target.get("v_px", 0.0)),
+        confidence,
+        VISION_YAW_GAIN,
+        VISION_VY_GAIN,
+        blend=blend,
+        range_m=float(range_m) if range_m is not None else None,
+    )
 
 
 class Pilot:
@@ -78,7 +105,8 @@ class Pilot:
         self._stabilize_start: float | None = None
         self._advancing: bool = False
         self._peak_r_frac: float = 0.0
-        self._peak_r_frac_advancing: float = 0.0
+        self._peak_abs_nx: float = 1.0
+        self._last_obstacle_log: float = 0.0
         self._post_gate_time: float | None = None
         self._last_gate_id: str | None = None
         self._completed_gates: set[str] = set()
@@ -89,11 +117,8 @@ class Pilot:
         self._search_yaw_dir: float = 1.0
         self._search_start_time: float | None = None
         self._mode_str = "???"
-        self._last_status_log = 0.0
-        print(
-            f"[pilot] A/B profile={P.label} jacobian_blend={P.jacobian_blend:.2f}",
-            flush=True,
-        )
+        controller.set_control_mode("attitude")
+        controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + vision/telemetry", flush=True)
 
     # ------------------------------------------------------------------
@@ -129,7 +154,7 @@ class Pilot:
         self._stabilize_start = None
         self._post_gate_time = None
         self._peak_r_frac = 0.0
-        self._peak_r_frac_advancing = 0.0
+        self._peak_abs_nx = 1.0
         self._vision_suppress_until = 0.0
         self._last_gate_id = None
 
@@ -174,94 +199,11 @@ class Pilot:
 
         return False
 
-    def _get_rpy(self) -> tuple[float, float, float]:
-        odometry = self.data.get("odometry")
-        if odometry is not None:
-            qw = odometry.get("qw", 1.0)
-            qx = odometry.get("qx", 0.0)
-            qy = odometry.get("qy", 0.0)
-            qz = odometry.get("qz", 0.0)
-        else:
-            att = self.data.get("attitude")
-            if att is None:
-                return 0.0, 0.0, self.data.get("yaw_rad", 0.0)
-            return att["roll"], att["pitch"], att["yaw"]
-        roll = math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
-        pitch = math.asin(max(-1.0, min(1.0, 2.0 * (qw * qy - qz * qx))))
-        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-        return roll, pitch, yaw
-
-    def _apply_attitude(
-        self, tgt_roll: float, tgt_pitch: float, yaw_rate: float, thrust: float
-    ) -> None:
-        if P.use_angle_p:
-            roll, pitch, _yaw = self._get_rpy()
-            roll_out = _clamp(
-                SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP
-            )
-            pitch_out = _clamp(
-                SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP
-            )
-            yaw_out = _clamp(SIGN_YAW * yaw_rate, -YAW_CLIP, YAW_CLIP)
-        else:
-            roll_out = 0.0
-            pitch_out = tgt_pitch
-            yaw_out = yaw_rate
-        self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(roll_out, pitch_out, yaw_out, thrust)
-
-    def _vision_alignment(self, gate_target: dict) -> tuple[float, float]:  # type: ignore[type-arg]
-        nx = gate_target.get("nx", 0.0)
-        ny = gate_target.get("ny", 0.0)
-        if IBVS_BLEND <= 0.0:
-            return VISION_YAW_GAIN * nx, VISION_VY_GAIN * ny
-        confidence = float(gate_target.get("confidence", 0.0) or 0.0)
-        return blend_jacobian_p(
-            nx,
-            ny,
-            float(gate_target.get("u_px", 0.0)),
-            float(gate_target.get("v_px", 0.0)),
-            confidence,
-            VISION_YAW_GAIN,
-            VISION_VY_GAIN,
-            blend=IBVS_BLEND,
-        )
-
-    def _advance_cruise_pitch_thrust(
-        self, alignment: float, near: bool, z_target: float
-    ) -> tuple[float, float]:
-        if near:
-            if P.advance_near_hover:
-                pitch = abs(CRUISE_PITCH) * 0.5
-                thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
-            else:
-                pitch = CRUISE_PITCH * 0.7
-                thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_target)
-        elif P.pitch_is_rate:
-            pitch = CRUISE_PITCH * (0.35 + 0.65 * alignment)
-            thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_target)
-        else:
-            pitch = CRUISE_PITCH * (0.6 + 0.4 * alignment)
-            thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_target)
-        return pitch, thrust
-
-    def _obstacle_block(
-        self, yaw_rate: float, z_target: float
-    ) -> tuple[float, float, float] | None:
-        if not P.obstacle_avoidance:
-            return None
-        obstacles = self.data.get("obstacles", [])
-        blocking = any(
-            abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.005
-            for o in obstacles
-        )
-        if not blocking:
-            return None
-        nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
-        yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
-        thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
-        print("[pilot] OBSTACLE blocking, stopping", flush=True)
-        return yaw_rate, 0.0, thrust
+    def _log_obstacle_once(self) -> None:
+        now = _time.monotonic()
+        if now - self._last_obstacle_log >= 1.0:
+            print("[pilot] OBSTACLE blocking, stopping", flush=True)
+            self._last_obstacle_log = now
 
     def _do_search(self) -> None:
         now = _time.monotonic()
@@ -281,24 +223,14 @@ class Pilot:
         drone_pos = self._get_position()
         z_hold = drone_pos[2] if drone_pos else None
         thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_hold)
-        pitch = 0.0 if elapsed < SEARCH_WARMUP_S else SEARCH_FORWARD_LEAN
-        self._apply_attitude(0.0, pitch, yaw_rate, thrust)
+        pitch = 0.0 if elapsed < SEARCH_WARMUP_S else SEARCH_FORWARD_PITCH
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
     # ------------------------------------------------------------------
     # Main tick — called every cycle at 250 Hz
     # ------------------------------------------------------------------
     def tick(self) -> None:
-        now = _time.monotonic()
-        if now - self._last_status_log >= 2.0:
-            odo = self.data.get("odometry")
-            z = f"{odo['z']:+.1f}" if odo else "?"
-            print(
-                f"[pilot] mode={self._mode_str} armed={self.data.get('armed', False)} "
-                f"z={z} gates={len(self.data.get('track_gates') or [])}",
-                flush=True,
-            )
-            self._last_status_log = now
-
         armed = self.data.get("armed", False)
 
         if not armed:
@@ -310,7 +242,8 @@ class Pilot:
         if self._collision_time is not None:
             elapsed = _time.monotonic() - self._collision_time
             if elapsed < COLLISION_HOLD_S:
-                self._apply_attitude(0.0, 0.0, 0.0, COLLISION_THRUST)
+                self.controller.set_control_mode("attitude")
+                self.controller.set_attitude_rates(0, 0, 0, COLLISION_THRUST)
                 self._mode_str = "collision_hold"
                 return
             self._collision_time = None
@@ -367,23 +300,22 @@ class Pilot:
                     self._mode_str = "vision"
                     self._fly_toward_gate_vision(gate_target)
                     return
-                # Passed gate behind us — ignore detection, don't SEARCH-toggle.
+                elif not self._searching:
+                    self._searching = True
+                    self._search_start_time = _time.monotonic()
+                    self._search_yaw_dir = 1.0
+                    print(
+                        "[pilot] Passed gate re-detected, entering SEARCH", flush=True
+                    )
 
         if self._searching:
             self._mode_str = "search"
             self._do_search()
             return
 
-        # Telemetry fallback
+        # Telemetry fallback — find nearest gate by 3D distance
         if track_gates and odometry is not None:
-            if P.telemetry_use_active_gate:
-                active_idx = int(self.data.get("active_gate_index", 0) or 0)
-                if 0 <= active_idx < len(track_gates):
-                    nearest = track_gates[active_idx]
-                else:
-                    nearest = self._find_nearest_gate(track_gates, odometry)
-            else:
-                nearest = self._find_nearest_gate(track_gates, odometry)
+            nearest = self._find_nearest_gate(track_gates, odometry)
             if nearest is not None:
                 gid = self._gate_id(nearest)
                 if gid != self._last_gate_id:
@@ -391,7 +323,7 @@ class Pilot:
                     self._last_gate_id = gid
                     print(f"[pilot] NEW TARGET gate {gid}", flush=True)
                 self._mode_str = "telemetry"
-                self._fly_toward_gate_telemetry(nearest, odometry)
+                self._fly_toward_gate_telemetry(nearest, odometry, gate_target)
                 return
 
         self._mode_str = "no_target"
@@ -403,37 +335,42 @@ class Pilot:
     # ------------------------------------------------------------------
     def _hover(self, z_target: float | None = None) -> None:
         thrust = self._altitude_thrust(HOVER_THRUST, z_target)
-        self._apply_attitude(0.0, 0.0, 0.0, thrust)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, 0, 0, thrust)
 
     def _cruise_forward(self) -> None:
         thrust = self._altitude_thrust(CRUISE_THRUST)
-        self._apply_attitude(0.0, CRUISE_PITCH, 0.0, thrust)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, CRUISE_PITCH_RATE, 0, thrust)
 
     def _fly_toward_gate_vision(self, gate_target: dict) -> None:  # type: ignore[type-arg]
         nx = gate_target.get("nx", 0.0)
         ny = gate_target.get("ny", 0.0)
         r_frac = gate_target.get("r_frac", 0.0)
 
-        yaw_rate, alt_rate = self._vision_alignment(gate_target)
+        yaw_rate, alt_rate = _vision_alignment_rates(gate_target)
         yaw_rate = _clamp(yaw_rate, -2.0, 2.0)
-        ny_offset = _clamp(alt_rate, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST)
+
+        ny_offset = _clamp(
+            alt_rate, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
+        )
         odometry = self.data.get("odometry")
         z_now = odometry.get("z", 0.0) if odometry else 0.0
 
         centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
         z_target = z_now + ny_offset
 
-        self._peak_r_frac = max(self._peak_r_frac, r_frac)
-        if self._advancing:
-            self._peak_r_frac_advancing = max(self._peak_r_frac_advancing, r_frac)
+        if r_frac >= self._peak_r_frac:
+            self._peak_r_frac = r_frac
+            self._peak_abs_nx = abs(nx)
 
-        flew_through = (
+        if (
             self._advancing
-            and self._peak_r_frac_advancing >= FLYTHROUGH_MIN_PEAK_R_FRAC
-            and r_frac < self._peak_r_frac_advancing * FLYTHROUGH_DROP_RATIO
-            and abs(nx) < 0.5
-        )
-        if flew_through:
+            and self._peak_r_frac > 0.15
+            and self._peak_abs_nx < 0.35
+            and r_frac < self._peak_r_frac * 0.6
+            and abs(nx) < 0.4
+        ):
             self._gates_passed += 1
 
             drone_pos = self._get_position()
@@ -462,9 +399,10 @@ class Pilot:
                 f"[pilot] FLY-THROUGH at pos={drone_pos}, hovering to re-acquire",
                 flush=True,
             )
-            pitch = abs(CRUISE_PITCH) * 0.5
+            pitch = abs(CRUISE_PITCH_RATE) * 0.5
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
-            self._apply_attitude(0.0, pitch, yaw_rate, thrust)
+            self.controller.set_control_mode("attitude")
+            self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
             return
 
         if not self._advancing and r_frac > 0.15:
@@ -484,17 +422,27 @@ class Pilot:
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             elif r_frac >= VISION_PROXIMITY_R_FRAC:
-                pitch, thrust = self._advance_cruise_pitch_thrust(
-                    max(0.0, 1.0 - abs(nx)), True, z_target
-                )
+                pitch = abs(CRUISE_PITCH_RATE) * 0.5
+                thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             else:
-                blocked = self._obstacle_block(yaw_rate, z_target)
-                if blocked is not None:
-                    yaw_rate, pitch, thrust = blocked
-                else:
-                    pitch, thrust = self._advance_cruise_pitch_thrust(
-                        max(0.0, 1.0 - abs(nx)), False, z_target
+                obstacles = self.data.get("obstacles", [])
+                obstacle_blocking = (
+                    abs(nx) < 0.5
+                    and any(
+                        abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.01
+                        for o in obstacles
                     )
+                )
+                if obstacle_blocking:
+                    nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
+                    yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
+                    pitch = 0.0
+                    thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
+                    self._log_obstacle_once()
+                else:
+                    alignment = max(0.0, 1.0 - abs(nx))
+                    pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+                    thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_target)
         else:
             # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
@@ -520,9 +468,15 @@ class Pilot:
                 if self._stabilize_start is not None:
                     self._stabilize_start = None
 
-        self._apply_attitude(0.0, pitch, yaw_rate, thrust)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
-    def _fly_toward_gate_telemetry(self, gate: dict, odometry: dict) -> None:  # type: ignore[type-arg]
+    def _fly_toward_gate_telemetry(
+        self,
+        gate: dict,
+        odometry: dict,
+        gate_target: dict | None = None,
+    ) -> None:  # type: ignore[type-arg]
         gx, gy, gz = gate["position_ned"]
         ox, oy, oz = odometry["x"], odometry["y"], odometry.get("z", 0.0)
 
@@ -543,19 +497,21 @@ class Pilot:
         # Normalize to [-pi, pi]
         bearing_error = (bearing_error + math.pi) % (2 * math.pi) - math.pi
 
-        yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_error, -2.0, 2.0)
+        bearing_error = blend_telemetry_bearing(
+            bearing_error,
+            gate_target,
+            now=_time.monotonic(),
+        )
 
-        # Normalized horizontal alignment: 0 = perfectly aligned, 1 = 180 deg off
-        nx_telemetry = bearing_error / math.pi  # [-1, 1]
+        yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_error, -2.0, 2.0)
+        if abs(bearing_error) > math.pi / 2:
+            yaw_rate = _clamp(yaw_rate, -1.0, 1.0)
+
+        nx_telemetry = bearing_error / math.pi
         # Normalized vertical alignment
         ny_telemetry = _clamp((gz - oz) / 5.0, -1, 1)
 
         centered = abs(bearing_error) < 0.2 and abs(ny_telemetry) < 0.3
-
-        if not self._advancing and TELEMETRY_ALIGN_RAD is not None:
-            if abs(bearing_error) < TELEMETRY_ALIGN_RAD:
-                self._advancing = True
-                self._stabilize_start = None
 
         if self._advancing:
             # ADVANCE phase — flying forward toward gate
@@ -570,21 +526,29 @@ class Pilot:
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
             elif dist < TELEMETRY_PROXIMITY_M:
-                if P.advance_near_hover:
+                # Very close — stop pitching, fine-tune yaw+altitude
+                pitch = 0.0
+                thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
+            else:
+                obstacles = self.data.get("obstacles", [])
+                obstacle_blocking = (
+                    abs(nx_telemetry) < 0.5
+                    and abs(bearing_error) < 0.4
+                    and any(
+                        abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.01
+                        for o in obstacles
+                    )
+                )
+                if obstacle_blocking:
+                    nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
+                    yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
                     pitch = 0.0
                     thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
-                else:
-                    pitch = CRUISE_PITCH * 0.5
-                    thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gz)
-            else:
-                blocked = self._obstacle_block(yaw_rate, gz)
-                if blocked is not None:
-                    yaw_rate, pitch, thrust = blocked
+                    self._log_obstacle_once()
                 else:
                     alignment = max(0.0, 1.0 - abs(nx_telemetry))
-                    pitch, thrust = self._advance_cruise_pitch_thrust(
-                        alignment, False, gz
-                    )
+                    pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
+                    thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gz)
         else:
             # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
@@ -606,7 +570,8 @@ class Pilot:
                 if self._stabilize_start is not None:
                     self._stabilize_start = None
 
-        self._apply_attitude(0.0, pitch, yaw_rate, thrust)
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
     # ------------------------------------------------------------------
     # Altitude PID
@@ -631,4 +596,6 @@ class Pilot:
         self._z_integral = _clamp(self._z_integral, -0.5, 0.5)
 
         raw_thrust = ALTITUDE_TRIM + KP_Z * error + KI_Z * self._z_integral + KD_Z * vz
-        return _clamp(raw_thrust, P.thrust_min, P.thrust_max)
+        clamped_thrust = _clamp(raw_thrust, 0.0, 1.0)
+
+        return clamped_thrust

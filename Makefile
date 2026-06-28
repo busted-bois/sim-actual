@@ -8,10 +8,13 @@ check:
 	uv run ruff format .
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_camera_model tests.test_gate_estimator tests.test_ibvs_comparison tests.test_pilot_profile -v
+	uv run python -m unittest tests.test_preflight tests.test_camera_model tests.test_gate_estimator tests.test_ibvs_comparison tests.test_pilot_profile tests.test_vision_assist -v
 
 sim:
 	uv run main.py
+
+sim-ab-jacobian:
+	PILOT_JACOBIAN=1 uv run main.py
 
 # A/B gate-racing profiles (Windows: powershell -File scripts/sim-ab.ps1 -Profile main)
 sim-ab-main:
