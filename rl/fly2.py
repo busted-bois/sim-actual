@@ -25,6 +25,7 @@ import numpy as np
 
 from rl import spec
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from simulator import display
 from simulator.transforms import quat_to_yaw
 
 HOVER_T = 0.27
@@ -103,11 +104,21 @@ def main():
     hold_yaw = rpy(s0.quat)[2]
     print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
 
+    display.start()  # live vision window (what the drone's camera sees)
+
     t0 = time.time()
     last_log = 0.0
     last_active = -1
+    last_shown_frame = -1
     reason = "timeout"
     while time.time() - t0 < args.seconds:
+        # Pump the vision window on each new camera frame (~30 Hz) so it stays
+        # responsive without throttling the 150 Hz control loop below.
+        frame = sim.data.get("frame")
+        if frame is not None and frame["frame_id"] != last_shown_frame:
+            last_shown_frame = frame["frame_id"]
+            display.tick(frame.get("annotated", frame["img"]), time.time() - t0)
+
         snap = sim.snapshot()
         if not snap.has_pose():
             time.sleep(1 / HZ)
@@ -180,6 +191,7 @@ def main():
         time.sleep(1 / HZ)
 
     sim.send_attitude_rates(0, 0, 0, HOVER_T)
+    display.close()
     print(
         f"[f2] === DONE {reason} final={np.round(sim.snapshot().pos_ned, 1)} "
         f"active={sim.data.get('active_gate_index')} ===",

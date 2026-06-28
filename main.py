@@ -4,6 +4,7 @@
 
 import time
 
+from simulator import display
 from simulator.setup import setup_components
 
 # Modify these properties if you want to run the server remotely for example
@@ -28,9 +29,20 @@ vision_rx = components["vision_rx"]
 print("Arming drone...", flush=True)
 controller.arm()
 print("Starting control loop...", flush=True)
+display.start()  # live vision window (what the drone's camera sees)
+t0 = time.monotonic()
+last_shown_frame = -1
 is_running = True
-while is_running:
-    controller.update()
+try:
+    while is_running:
+        controller.update()
+        # Pump the vision window on each new camera frame.
+        frame = shared_data.get("frame")
+        if frame is not None and frame["frame_id"] != last_shown_frame:
+            last_shown_frame = frame["frame_id"]
+            display.tick(frame.get("annotated", frame["img"]), time.monotonic() - t0)
+finally:
+    display.close()
 
 # exit
 ts_loop.get_thread_for_join().join(timeout=1.0)
