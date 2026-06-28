@@ -32,6 +32,20 @@ _video_writer = None
 _window_open = False
 
 
+def pick(data):
+    """Choose what to show from the shared data dict, returning (img, tag).
+    Prefers the YOLO-pose annotated frame (data["pose"]), then the classical
+    overlay, then the raw frame. `tag` changes only when a new frame is
+    available, so callers can skip redundant ticks. (None, None) if no frame."""
+    pose = data.get("pose")
+    if pose is not None and pose.get("annotated") is not None:
+        return pose["annotated"], ("p", pose["frame_id"])
+    frame = data.get("frame")
+    if frame is not None:
+        return frame.get("annotated", frame.get("img")), ("f", frame["frame_id"])
+    return None, None
+
+
 def start():
     """Create the cv2 window. Call once before the first tick()."""
     global _window_open

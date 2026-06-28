@@ -50,9 +50,15 @@ class VisionRX:
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
+        # YOLO-pose gate detector, on its own thread (CPU inference is too slow
+        # to run inline here). Reads data["frame"], writes data["pose"].
+        from simulator.gate_pose import GatePoseRunner
+
+        self.gate_pose = GatePoseRunner(data)
 
     def get_thread_for_join(self):
         self.is_running = False
+        self.gate_pose.is_running = False
         return self.thread
 
     def _vision_loop(self):

@@ -109,15 +109,15 @@ def main():
     t0 = time.time()
     last_log = 0.0
     last_active = -1
-    last_shown_frame = -1
+    last_shown_tag = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
-        # Pump the vision window on each new camera frame (~30 Hz) so it stays
-        # responsive without throttling the 150 Hz control loop below.
-        frame = sim.data.get("frame")
-        if frame is not None and frame["frame_id"] != last_shown_frame:
-            last_shown_frame = frame["frame_id"]
-            display.tick(frame.get("annotated", frame["img"]), time.time() - t0)
+        # Pump the vision window whenever a new (detected) frame is ready, so it
+        # stays responsive without throttling the 150 Hz control loop below.
+        img, tag = display.pick(sim.data)
+        if tag is not None and tag != last_shown_tag:
+            last_shown_tag = tag
+            display.tick(img, time.time() - t0)
 
         snap = sim.snapshot()
         if not snap.has_pose():
