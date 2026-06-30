@@ -1,0 +1,26 @@
+[project]
+name = "aigp-round1-qualifier"
+version = "0.1.0"
+description = "AI-GP Round 1 qualifier pilot."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pymavlink>=2.4.49",
+]
+
+[project.scripts]
+aigp-fly = "fly:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["fly"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
