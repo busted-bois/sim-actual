@@ -119,9 +119,11 @@ def estimate_gate_pose(keypoints, confs, box=None):
     independent of any keypoint-label (L/R) ambiguity in the PnP correspondence,
     which otherwise mirrors the gate to the wrong side.
 
-    Centre pixel = bounding-box centre when `box` (xyxy) is given: it's
-    symmetric and stable, vs the confident-keypoint mean which skews left/right
-    when some corners are lower-confidence (caused a small lateral miss)."""
+    Centre pixel = centroid of the 4 INNER keypoints (the opening corners) when
+    >=2 are confident. That targets the HOLE we must fly through -- immune to the
+    AI-GP box on TOP of the gate, which biases the bounding-box / all-keypoint
+    centre upward and made the drone clip the top or duck under the opening.
+    Falls back to the bbox centre, then any confident keypoints."""
     pose = estimate_pose(keypoints, confs)
     if pose is None:
         return None
@@ -130,7 +132,11 @@ def estimate_gate_pose(keypoints, confs, box=None):
         return None
     kp = np.asarray(keypoints, np.float64)
     cf = np.asarray(confs, np.float64)
-    if box is not None:
+    inner = kp[:4]
+    inner_vis = cf[:4] > KEYPOINT_CONF_THRESHOLD
+    if inner_vis.sum() >= 2:
+        ctr = inner[inner_vis].mean(axis=0)  # opening centre (the hole)
+    elif box is not None:
         b = np.asarray(box, np.float64).reshape(-1)
         ctr = np.array([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0])
     else:
