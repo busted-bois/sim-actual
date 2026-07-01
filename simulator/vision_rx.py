@@ -50,9 +50,15 @@ class VisionRX:
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
+        # YOLO-pose gate detector, on its own thread (CPU inference is too slow
+        # to run inline here). Reads data["frame"], writes data["pose"].
+        from simulator.gate_pose import GatePoseRunner
+
+        self.gate_pose = GatePoseRunner(data)
 
     def get_thread_for_join(self):
         self.is_running = False
+        self.gate_pose.is_running = False
         return self.thread
 
     def _vision_loop(self):
@@ -150,11 +156,8 @@ class VisionRX:
                     "ny": ny,
                     "r_frac": r_frac,
                 }
-                print(
-                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}",
-                    flush=True,
-                )
+                # (classical HSV detector; not used by --mode vision. Silenced to
+                # keep the [f2] flight log readable -- gate_target still feeds pilot.py.)
             else:
                 self.data["gate_target"] = {
                     "detected": False,

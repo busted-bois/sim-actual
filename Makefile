@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check sim capture-gates fly fly-vision hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -19,6 +19,11 @@ capture-gates:
 # Fly the full 6-gate course (resets, arms, flies). Start the race first.
 fly:
 	uv run -m rl.fly2 --mode course
+
+# Fly the course from VISION ONLY -- YOLO gate detection + PnP, no gate map,
+# no hardcoded coordinates. Start the race first.
+fly-vision:
+	uv run -m rl.fly2 --mode vision
 
 # Hold a stable hover (sanity check the controller).
 hover:

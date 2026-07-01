@@ -27,6 +27,7 @@ from rl import spec
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
 from simulator.transforms import quat_to_yaw
+from simulator.vision_nav import VisionGuidance
 
 HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
@@ -55,8 +56,11 @@ def wrap(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["hover", "course"], default="course")
+    ap.add_argument("--mode", choices=["hover", "course", "vision"], default="course")
     ap.add_argument("--seconds", type=float, default=95.0)
+    ap.add_argument(
+        "--gates", type=int, default=6, help="vision mode: stop after N gates passed"
+    )
     ap.add_argument("--speed", type=float, default=2.8)
     ap.add_argument("--lean", type=float, default=0.12, help="max forward lean (rad)")
     ap.add_argument(
@@ -82,8 +86,13 @@ def main():
     )
     args = ap.parse_args()
 
-    gate_map = json.load(open(GATE_MAP_PATH))["gates"]
-    n = len(gate_map)
+    # Vision mode flies purely from detected gates -- no hardcoded map.
+    gate_map = []
+    n = 0
+    if args.mode == "course":
+        gate_map = json.load(open(GATE_MAP_PATH))["gates"]
+        n = len(gate_map)
+    guide = VisionGuidance() if args.mode == "vision" else None
     sim = SimInterface()
     if not sim.wait_for_telemetry():
         print("[f2] no telemetry", flush=True)
@@ -92,7 +101,7 @@ def main():
         sim.reset_sim()
         time.sleep(3)
     # Sync launch to the countdown: wait for the user to hit ENTER at "go".
-    if args.wait and args.mode == "course":
+    if args.wait and args.mode in ("course", "vision"):
         try:
             input("[f2] READY -- press ENTER the moment the countdown hits 0...")
         except EOFError:
@@ -109,15 +118,15 @@ def main():
     t0 = time.time()
     last_log = 0.0
     last_active = -1
-    last_shown_frame = -1
+    last_shown_tag = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
-        # Pump the vision window on each new camera frame (~30 Hz) so it stays
-        # responsive without throttling the 150 Hz control loop below.
-        frame = sim.data.get("frame")
-        if frame is not None and frame["frame_id"] != last_shown_frame:
-            last_shown_frame = frame["frame_id"]
-            display.tick(frame.get("annotated", frame["img"]), time.time() - t0)
+        # Pump the vision window whenever a new (detected) frame is ready, so it
+        # stays responsive without throttling the 150 Hz control loop below.
+        img, tag = display.pick(sim.data)
+        if tag is not None and tag != last_shown_tag:
+            last_shown_tag = tag
+            display.tick(img, time.time() - t0)
 
         snap = sim.snapshot()
         if not snap.has_pose():
@@ -128,8 +137,23 @@ def main():
         roll, pitch, yaw = rpy(snap.quat)
         z, vz = p[2], v[2]
 
+        vstatus = ""
         if args.mode == "hover":
             tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
+        elif args.mode == "vision":
+            pose_data = sim.data.get("pose")
+            gates = pose_data["gates"] if pose_data else []
+            cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
+            tgt_roll, tgt_pitch, yaw_err, tgt_z = (
+                cmd.tgt_roll,
+                cmd.tgt_pitch,
+                cmd.yaw_err,
+                cmd.tgt_z,
+            )
+            vstatus = cmd.status
+            if guide.n_passed >= args.gates:
+                reason = "COURSE COMPLETE (vision)"
+                break
         else:
             active = int(sim.data.get("active_gate_index", 0) or 0)
             if active != last_active:
@@ -184,7 +208,8 @@ def main():
             print(
                 f"[f2] [{now:4.1f}s] rpy=({math.degrees(roll):+4.0f},"
                 f"{math.degrees(pitch):+4.0f},{math.degrees(yaw):+4.0f}) "
-                f"z={z:+5.1f} v=({v[0]:+4.1f},{v[1]:+4.1f},{v[2]:+4.1f}) thr={thrust:.2f}",
+                f"z={z:+5.1f} v=({v[0]:+4.1f},{v[1]:+4.1f},{v[2]:+4.1f}) thr={thrust:.2f}"
+                f"{('  ' + vstatus) if vstatus else ''}",
                 flush=True,
             )
             last_log = now
