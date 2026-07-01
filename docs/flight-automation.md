@@ -36,9 +36,10 @@ After GO the pilot uses the same vision + attitude control as `make sim` (search
 
 Press **Ctrl+C** in the terminal running `make auto`:
 
-→ cancels automation and drops into normal sim control (250 Hz loop, no retry).
+→ first Ctrl+C cancels automation and drops into normal sim control (250 Hz loop, no retry).
+→ **press Ctrl+C again to exit** the process entirely.
 
-You should see `[AUTO] cancel requested (Ctrl+C)` then `[AUTO] cancelled — resuming normal sim mode`.
+You should see `[AUTO] cancel requested (Ctrl+C) — press Ctrl+C again to exit` then `[AUTO] cancelled — resuming normal sim mode`.
 
 ## Stdout markers
 
@@ -81,6 +82,18 @@ You should see `[AUTO] cancel requested (Ctrl+C)` then `[AUTO] cancelled — res
 | `SIM_RESET_WAIT_S` | `5` | Pause after MAVLink sim reset |
 
 ## Troubleshooting
+
+### `ERROR: UDP 14550 already in use by another process`
+
+A stale `make auto`/`make sim` client still holds the MAVLink port, so heartbeats
+never reach your new run. Free it and retry:
+
+```
+make free-port
+```
+
+(Windows: `powershell -File scripts/free-mavlink-port.ps1`. RX threads are daemon
+now, so a normally-exited or Ctrl+C'd client no longer lingers on the port.)
 
 ### Stuck at `Waiting for telemetry...`
 

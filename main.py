@@ -47,8 +47,12 @@ if auto_flight_enabled():
     if outcome == "preflight_fail":
         sys.exit(1)
     if was_flying:
-        while True:
-            controller.update()
+        try:
+            while True:
+                controller.update()
+        except KeyboardInterrupt:
+            print("Exiting.", flush=True)
+            sys.exit(0)
 
 if not wait_for_track(shared_data):
     print("ERROR: start a race in the sim to load track gates", flush=True)
@@ -65,5 +69,9 @@ if not wait_for_race_go(shared_data, armed_sim_boot_ms=armed_sim_boot_ms):
     sys.exit(1)
 
 print("Starting control loop...", flush=True)
-while True:
-    controller.update()
+try:
+    while True:
+        controller.update()
+except KeyboardInterrupt:
+    print("Exiting.", flush=True)
+    sys.exit(0)

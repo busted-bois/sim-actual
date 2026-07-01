@@ -22,7 +22,7 @@ class VisionRX:
         self._gate_estimator = GateEstimator()
         self._no_gate_frames = 0
         self._last_no_gate_log = 0.0
-        self.thread = threading.Thread(target=self._vision_loop, daemon=False)
+        self.thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.is_running = True
         self.thread.start()
 

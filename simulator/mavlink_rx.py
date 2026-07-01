@@ -38,7 +38,7 @@ class MAVLinkRX:
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
         rx = cls(mavlink_connection, data)
-        rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=False)
+        rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=True)
         rx.is_running = True
         rx.thread.start()
         return rx

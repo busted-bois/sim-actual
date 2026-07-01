@@ -314,12 +314,15 @@ def wait_for_race_start(data, timeout_s=10.0, cancel=None):
 
 
 def _race_start_valid_after_baseline(data, race, race_start):
-    """race_start must differ from pre-reset baseline or be scheduled future GO."""
+    """race_start is fresh if the sim rebooted (sim_boot reset small), it's a
+    scheduled future GO, or it differs from the pre-reset baseline."""
     sim_boot = race.get("sim_boot_time_ms", 0)
-    baseline = data.get("_preflight_race_start_baseline")
-    if baseline is not None and race_start != baseline:
+    if is_restart_arm_context(sim_boot):
         return True
     if race_start - sim_boot > COUNTDOWN_SCHEDULED_THRESHOLD_MS:
+        return True
+    baseline = data.get("_preflight_race_start_baseline")
+    if baseline is not None and race_start != baseline:
         return True
     return False
 
@@ -412,6 +415,20 @@ def probe_udp_port(host="0.0.0.0", port=5600):
         return True, None
     except OSError as exc:
         return False, str(exc)
+    finally:
+        sock.close()
+
+
+def udp_port_in_use(host="127.0.0.1", port=14550):
+    """True if another process already holds this UDP port."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind((host, port))
+        return False
+    except OSError:
+        return True
     finally:
         sock.close()
 

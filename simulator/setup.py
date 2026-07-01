@@ -2,6 +2,7 @@ from pymavlink import mavutil
 
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
+from simulator.preflight import udp_port_in_use
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
 
@@ -10,6 +11,12 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
+    if udp_port_in_use(server_ip, server_udp_port):
+        raise TimeoutError(
+            f"UDP {server_udp_port} already in use by another process "
+            "(likely a stale `make auto`/`make sim`). Free it with `make free-port`, "
+            "then retry."
+        )
     # Start a connection listening on a UDP port
     sim_conn = mavutil.mavlink_connection(
         "udpin:%s:%s"

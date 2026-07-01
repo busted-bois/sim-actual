@@ -158,6 +158,7 @@ def _retry_after_outcome(
     hover = _pilot_hover_thrust(pilot)
     controller.set_attitude_rates(0, 0, 0, hover)
     time.sleep(0.2)
+    _clear_attempt_state(shared_data)
     controller.send_sim_reset_command()
     time.sleep(0.5)
     controller.send_sim_reset_command()
@@ -169,7 +170,6 @@ def _retry_after_outcome(
     sim_boot = race.get("sim_boot_time_ms", "?")
     print(f"[RACE] post_reset active={active} sim_boot={sim_boot}ms", flush=True)
     pilot.reset_for_attempt()
-    _clear_attempt_state(shared_data)
     print(
         "[RACE] reset sent — click Restart Race in FlightSim "
         "if countdown doesn't start within 30s",
@@ -179,17 +179,25 @@ def _retry_after_outcome(
 
 
 class CancelListener:
-    """Ctrl+C cancels automation."""
+    """First Ctrl+C cancels automation; handler is restored on stop() so a
+    later Ctrl+C (e.g. in normal sim mode) exits normally."""
 
     def __init__(self) -> None:
         self._cancelled = False
+        self._prev_handler = signal.SIG_DFL
 
     def start(self) -> None:
-        signal.signal(signal.SIGINT, self._on_sigint)
+        self._prev_handler = signal.signal(signal.SIGINT, self._on_sigint)
+
+    def stop(self) -> None:
+        signal.signal(signal.SIGINT, self._prev_handler)
 
     def _on_sigint(self, signum, frame) -> None:
         if not self._cancelled:
-            print("[AUTO] cancel requested (Ctrl+C)", flush=True)
+            print(
+                "[AUTO] cancel requested (Ctrl+C) — press Ctrl+C again to exit",
+                flush=True,
+            )
         self._cancelled = True
 
     def cancelled(self) -> bool:
@@ -204,6 +212,13 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
     """
     cancel = CancelListener()
     cancel.start()
+    try:
+        return _run_auto_flight_loop(controller, pilot, shared_data, cancel)
+    finally:
+        cancel.stop()
+
+
+def _run_auto_flight_loop(controller, pilot, shared_data, cancel) -> tuple[str, bool]:
     print(
         "[AUTO] overnight automation on — same pilot as make sim; "
         "Ctrl+C stops (preflight, flight, or retry)",

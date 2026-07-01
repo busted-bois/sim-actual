@@ -15,7 +15,7 @@ class TimeSync:
     @classmethod
     def create_timesync(cls, mavlink_connection, data):
         ts = cls(mavlink_connection, data)
-        ts.thread = threading.Thread(target=ts.timesync_loop, daemon=False)
+        ts.thread = threading.Thread(target=ts.timesync_loop, daemon=True)
         ts.is_running = True
         ts.thread.start()
         return ts

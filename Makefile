@@ -1,4 +1,4 @@
-.PHONY: i install check test sim doc-context doc-validate doc-update capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim free-port doc-context doc-validate doc-update capture-gates fly hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -27,6 +27,14 @@ sim:
 # Auto flight — continuous overnight retry; Ctrl+C stops
 auto:
 	uv run auto.py
+
+# Kill a stale make auto/make sim client still holding UDP 14550
+free-port:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-mavlink-port.ps1
+else
+	bash scripts/free-mavlink-port.sh
+endif
 
 # A/B gate-racing profiles (Windows: powershell -File scripts/sim-ab.ps1 -Profile main)
 sim-ab-main:
