@@ -2,15 +2,24 @@ import os
 
 from simulator.preflight import race_finished
 
-GATE1_TIMEOUT_S = float(os.environ.get("GATE1_TIMEOUT_S", "10"))
+GATE1_TIMEOUT_S = float(os.environ.get("GATE1_TIMEOUT_S", "15"))
 GATE1_MIN_ELAPSED_S = float(os.environ.get("GATE1_MIN_ELAPSED_S", "8"))
-GATE_PROGRESS_TIMEOUT_S = float(os.environ.get("GATE_PROGRESS_TIMEOUT_S", "20"))
+GATE_PROGRESS_TIMEOUT_S = float(os.environ.get("GATE_PROGRESS_TIMEOUT_S", "15"))
 SIM_RESET_WAIT_S = float(os.environ.get("SIM_RESET_WAIT_S", "5"))
 GATE1_WATCH_INTERVAL_S = float(os.environ.get("GATE1_WATCH_INTERVAL_S", "5"))
+DEFAULT_GATE_COUNT = 6
 
 
 def gate_count(data):
-    return len(data.get("track_gates") or [])
+    if data.get("gate_count"):
+        return int(data["gate_count"])
+    tg = data.get("track_gates")
+    if tg:
+        return len(tg)
+    race = data.get("race_status")
+    if race and race.get("race_start_boot_time_ms", -1) >= 0:
+        return DEFAULT_GATE_COUNT
+    return 0
 
 
 def passed_first_gate(data):
@@ -18,11 +27,11 @@ def passed_first_gate(data):
 
 
 def course_complete(data):
+    if race_finished(data):
+        return True
     n = gate_count(data)
     if n <= 0:
         return False
-    if race_finished(data):
-        return True
     return int(data.get("active_gate_index", 0) or 0) >= n
 
 
@@ -36,6 +45,8 @@ def _quat_to_R(w, x, y, z):
 
 def signed_dist_gate0(data):
     """Signed distance to gate-0 plane (+ = past gate along through-axis)."""
+    if data.get("track_positions_valid") is False:
+        return None
     odometry = data.get("odometry")
     gates = data.get("track_gates") or []
     if not odometry or not gates:
@@ -69,17 +80,10 @@ def gate1_fail(data, elapsed_s, pilot_gates_passed):
         return False
     if elapsed_s <= 0:
         return False
-
+    if pilot_gates_passed > 0:
+        return False
     if elapsed_s > GATE1_TIMEOUT_S:
-        return pilot_gates_passed == 0
-
-    if (
-        elapsed_s > GATE1_MIN_ELAPSED_S
-        and pilot_gates_passed == 0
-        and passed_gate0_plane(data)
-    ):
         return True
-
     return False
 
 

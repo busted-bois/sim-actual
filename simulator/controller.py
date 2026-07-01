@@ -2,7 +2,6 @@ import time
 
 from pymavlink import mavutil
 
-from simulator.flight_debug import dbg, dbg_now, flight_debug_enabled
 from simulator.pilot import Pilot
 
 # --------------------------------------------------------------------------------------
@@ -136,19 +135,6 @@ class Controller:
         self._vz = 0.0
         self.pilot = Pilot(self, data)
         self._disarm_ticks = 0
-        self._controls_enabled = False
-        self._safe_hold_logged = False
-        self._last_mavlink_thrust_log = 0.0
-
-    def set_controls_enabled(self, enabled: bool) -> None:
-        if enabled != self._controls_enabled:
-            dbg_now(
-                "controls",
-                f"enabled={enabled} armed={self.data.get('armed', False)}",
-            )
-        self._controls_enabled = enabled
-        if not enabled:
-            self._disarm_ticks = 0
 
     def set_control_mode(self, mode):
         self.control_mode = mode
@@ -166,47 +152,9 @@ class Controller:
         self._yaw_rate = yaw_rate
 
     def disarm(self):
-        self.sim_conn.mav.command_long_send(
-            self.sim_conn.target_system,
-            self.sim_conn.target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,
-            0,  # disarm
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-        dbg(
-            "disarm",
-            f"armed={self.data.get('armed', False)} controls={self._controls_enabled}",
-            throttle_s=1.0,
-        )
-
-    def send_safe_hold(self) -> None:
-        """Disarm + transmit zero-thrust attitude during preflight."""
-        self.set_attitude_rates(0, 0, 0, 0)
-        self.disarm()
-        self.control_mode = "attitude"
-        _send_attitude_rates(
-            self.sim_conn,
-            self.system_boot_ms,
-            roll_rate=0.0,
-            pitch_rate=0.0,
-            yaw_rate=0.0,
-            thrust=0.0,
-        )
-        if not self._safe_hold_logged:
-            self._safe_hold_logged = True
-            dbg_now("safe_hold", "sent thrust=0")
+        pass
 
     def update(self):
-        if not self._controls_enabled:
-            time.sleep(1.0 / CONTROL_HZ)
-            return
-
         self.pilot.tick()
 
         if not self.data.get("armed", False):
@@ -227,15 +175,6 @@ class Controller:
                 yaw_rate=self._yaw_rate,
                 thrust=self._thrust,
             )
-            if flight_debug_enabled() and self._thrust != 0.0:
-                now = time.monotonic()
-                if now - self._last_mavlink_thrust_log >= 0.5:
-                    self._last_mavlink_thrust_log = now
-                    dbg(
-                        "mavlink",
-                        f"thrust={self._thrust:.3f} mode=attitude",
-                        throttle_s=0.0,
-                    )
         elif self.control_mode == "position":
             _send_velocity_ned(
                 self.sim_conn,
@@ -265,7 +204,6 @@ class Controller:
             0,
             0,
         )
-        dbg_now("arm", f"armed={self.data.get('armed', False)} controls={self._controls_enabled}")
 
     def send_sim_reset_command(self):
         self.sim_conn.mav.command_long_send(

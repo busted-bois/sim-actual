@@ -1,4 +1,4 @@
-﻿"""Pilot ΓÇö attitude-mode gate racer with altitude PID.
+﻿"""Pilot — attitude-mode gate racer with altitude PID.
 
 Called at ~250 Hz by controller.update(). Uses ATTITUDE mode with pitch_rate
 for forward motion and an altitude PID for thrust control. Reads shared_data
@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import math
 import time as _time
-
-from simulator.flight_debug import dbg_now, motion_snapshot
 
 # --------------------------------------------------------------------------------------
 # Constants
@@ -43,13 +41,13 @@ OBSTACLE_CLEAR_ZONE = 0.25
 
 POST_GATE_HOVER_S = 2.5
 
-# Search mode ΓÇö yaw scan to find next gate after fly-through
+# Search mode — yaw scan to find next gate after fly-through
 SEARCH_SWEEP_YAW_RATE = 0.8
 SEARCH_SWEEP_PERIOD_S = 2.0
 SEARCH_FORWARD_PITCH = -0.04
 SEARCH_WARMUP_S = 1.5
 
-# Passed-gate rejection ΓÇö position-based internal map
+# Passed-gate rejection — position-based internal map
 PASSED_GATE_NEAR_M = 3.0  # Within this dist of a passed gate, reject all
 PASSED_GATE_ANGLE_RAD = math.radians(45)  # Angular match window
 
@@ -72,8 +70,6 @@ class Pilot:
         self._stabilize_start: float | None = None
         self._advancing: bool = False
         self._peak_r_frac: float = 0.0
-        self._peak_abs_nx: float = 1.0
-        self._last_obstacle_log: float = 0.0
         self._post_gate_time: float | None = None
         self._last_gate_id: str | None = None
         self._completed_gates: set[str] = set()
@@ -84,7 +80,6 @@ class Pilot:
         self._search_yaw_dir: float = 1.0
         self._search_start_time: float | None = None
         self._mode_str = "???"
-        self._may_fly = False
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + vision/telemetry", flush=True)
@@ -94,23 +89,17 @@ class Pilot:
         return self._gates_passed
 
     def on_attempt_start(self) -> None:
-        self._may_fly = True
-        print("[pilot] attempt start — vision flight enabled", flush=True)
-        dbg_now(
-            "pilot",
-            f"may_fly=True armed={self.data.get('armed', False)} {motion_snapshot(self.data)}",
-        )
+        """Hook for make auto — main pilot needs no extra setup at GO."""
+        pass
 
     def reset_for_attempt(self) -> None:
-        """Clear flight state after a sim reset so the next attempt starts fresh."""
+        """Clear flight state after sim reset between auto-flight retries."""
         self._z_integral = 0.0
         self._last_z_target = None
         self._collision_time = None
         self._stabilize_start = None
         self._advancing = False
         self._peak_r_frac = 0.0
-        self._peak_abs_nx = 1.0
-        self._last_obstacle_log = 0.0
         self._post_gate_time = None
         self._last_gate_id = None
         self._completed_gates = set()
@@ -121,13 +110,8 @@ class Pilot:
         self._search_yaw_dir = 1.0
         self._search_start_time = None
         self._mode_str = "???"
-        self._may_fly = False
         self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, 0, 0, 0)
-        dbg_now(
-            "pilot",
-            f"reset may_fly=False armed={self.data.get('armed', False)}",
-        )
+        self.controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
 
     # ------------------------------------------------------------------
     # Gate selection
@@ -162,7 +146,6 @@ class Pilot:
         self._stabilize_start = None
         self._post_gate_time = None
         self._peak_r_frac = 0.0
-        self._peak_abs_nx = 1.0
         self._vision_suppress_until = 0.0
         self._last_gate_id = None
 
@@ -207,12 +190,6 @@ class Pilot:
 
         return False
 
-    def _log_obstacle_once(self) -> None:
-        now = _time.monotonic()
-        if now - self._last_obstacle_log >= 1.0:
-            print("[pilot] OBSTACLE blocking, stopping", flush=True)
-            self._last_obstacle_log = now
-
     def _do_search(self) -> None:
         now = _time.monotonic()
         elapsed = now - (self._search_start_time or now)
@@ -236,13 +213,9 @@ class Pilot:
         self.controller.set_attitude_rates(0, pitch, yaw_rate, thrust)
 
     # ------------------------------------------------------------------
-    # Main tick ΓÇö called every cycle at 250 Hz
+    # Main tick — called every cycle at 250 Hz
     # ------------------------------------------------------------------
     def tick(self) -> None:
-        if not self._may_fly:
-            self.controller.set_attitude_rates(0, 0, 0, 0)
-            return
-
         armed = self.data.get("armed", False)
 
         if not armed:
@@ -265,7 +238,7 @@ class Pilot:
         if collision is not None:
             self._collision_time = _time.monotonic()
 
-        # Post-gate hover ΓÇö stop and re-acquire next gate after passing through
+        # Post-gate hover — stop and re-acquire next gate after passing through
         if self._post_gate_time is not None:
             elapsed = _time.monotonic() - self._post_gate_time
             if elapsed < POST_GATE_HOVER_S:
@@ -293,7 +266,7 @@ class Pilot:
                 if gid and gid != self._last_gate_id:
                     self._last_gate_id = gid
 
-        # Vision ΓÇö real-time camera (highest priority)
+        # Vision — real-time camera (highest priority)
         gate_target = self.data.get("gate_target")
         cam = self.data.get("camera")
         if gate_target and gate_target.get("detected") and cam is not None:
@@ -306,7 +279,7 @@ class Pilot:
                         self._searching = False
                         self._search_start_time = None
                         print(
-                            f"[pilot] SEARCH ΓåÆ new gate acquired (nx={nx:+.3f})",
+                            f"[pilot] SEARCH → new gate acquired (nx={nx:+.3f})",
                             flush=True,
                         )
                     self._mode_str = "vision"
@@ -325,7 +298,7 @@ class Pilot:
             self._do_search()
             return
 
-        # Telemetry fallback ΓÇö find nearest gate by 3D distance
+        # Telemetry fallback — find nearest gate by 3D distance
         if track_gates and odometry is not None:
             nearest = self._find_nearest_gate(track_gates, odometry)
             if nearest is not None:
@@ -371,17 +344,9 @@ class Pilot:
         centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
         z_target = z_now + ny_offset
 
-        if r_frac >= self._peak_r_frac:
-            self._peak_r_frac = r_frac
-            self._peak_abs_nx = abs(nx)
+        self._peak_r_frac = max(self._peak_r_frac, r_frac)
 
-        if (
-            self._advancing
-            and self._peak_r_frac > 0.15
-            and self._peak_abs_nx < 0.35
-            and r_frac < self._peak_r_frac * 0.6
-            and abs(nx) < 0.4
-        ):
+        if self._peak_r_frac > 0.10 and r_frac < self._peak_r_frac * 0.6:
             self._gates_passed += 1
 
             drone_pos = self._get_position()
@@ -419,15 +384,15 @@ class Pilot:
         if not self._advancing and r_frac > 0.15:
             self._advancing = True
             self._stabilize_start = None
-            print("[pilot] ADVANCE ΓåÆ gate area large, bypassing stabilize", flush=True)
+            print("[pilot] ADVANCE → gate area large, bypassing stabilize", flush=True)
 
         if self._advancing:
-            # ADVANCE phase ΓÇö flying forward through gate
+            # ADVANCE phase — flying forward through gate
             if abs(nx) > 0.7 or abs(ny) > 0.7:
                 self._advancing = False
                 self._stabilize_start = None
                 print(
-                    "[pilot] STABILIZE ΓåÆ gate too far off-center, re-aligning",
+                    "[pilot] STABILIZE → gate too far off-center, re-aligning",
                     flush=True,
                 )
                 pitch = 0.0
@@ -437,25 +402,25 @@ class Pilot:
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
             else:
                 obstacles = self.data.get("obstacles", [])
-                obstacle_blocking = (
-                    abs(nx) < 0.5
-                    and any(
-                        abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.01
-                        for o in obstacles
-                    )
+                obstacle_blocking = any(
+                    abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.005
+                    for o in obstacles
                 )
                 if obstacle_blocking:
                     nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
                     yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
                     pitch = 0.0
                     thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
-                    self._log_obstacle_once()
+                    print(
+                        "[pilot] OBSTACLE blocking, stopping",
+                        flush=True,
+                    )
                 else:
                     alignment = max(0.0, 1.0 - abs(nx))
                     pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
                     thrust = self._altitude_thrust(CRUISE_THRUST, z_target=z_target)
         else:
-            # STABILIZE phase ΓÇö hover, align yaw+altitude only
+            # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=z_target)
 
@@ -467,15 +432,15 @@ class Pilot:
                         flush=True,
                     )
                 elif _time.monotonic() - self._stabilize_start >= STABILIZE_HOLD_S:
-                    # Held center long enough ΓåÆ advance
+                    # Held center long enough → advance
                     self._advancing = True
                     self._stabilize_start = None
                     print(
-                        "[pilot] ADVANCE ΓåÆ gate centered, pitching forward",
+                        "[pilot] ADVANCE → gate centered, pitching forward",
                         flush=True,
                     )
             else:
-                # Not centered ΓÇö reset hold timer
+                # Not centered — reset hold timer
                 if self._stabilize_start is not None:
                     self._stabilize_start = None
 
@@ -504,8 +469,6 @@ class Pilot:
         bearing_error = (bearing_error + math.pi) % (2 * math.pi) - math.pi
 
         yaw_rate = _clamp(TELEMETRY_YAW_GAIN * bearing_error, -2.0, 2.0)
-        if abs(bearing_error) > math.pi / 2:
-            yaw_rate = _clamp(yaw_rate, -1.0, 1.0)
 
         # Normalized horizontal alignment: 0 = perfectly aligned, 1 = 180 deg off
         nx_telemetry = bearing_error / math.pi  # [-1, 1]
@@ -515,43 +478,42 @@ class Pilot:
         centered = abs(bearing_error) < 0.2 and abs(ny_telemetry) < 0.3
 
         if self._advancing:
-            # ADVANCE phase ΓÇö flying forward toward gate
+            # ADVANCE phase — flying forward toward gate
             if abs(bearing_error) > 0.5:
-                # Lost heading ΓåÆ back to stabilize
+                # Lost heading → back to stabilize
                 self._advancing = False
                 self._stabilize_start = None
                 print(
-                    "[pilot] STABILIZE ΓåÆ lost centering, re-aligning",
+                    "[pilot] STABILIZE → lost centering, re-aligning",
                     flush=True,
                 )
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
             elif dist < TELEMETRY_PROXIMITY_M:
-                # Very close ΓÇö stop pitching, fine-tune yaw+altitude
+                # Very close — stop pitching, fine-tune yaw+altitude
                 pitch = 0.0
                 thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
             else:
                 obstacles = self.data.get("obstacles", [])
-                obstacle_blocking = (
-                    abs(nx_telemetry) < 0.5
-                    and abs(bearing_error) < 0.4
-                    and any(
-                        abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.01
-                        for o in obstacles
-                    )
+                obstacle_blocking = any(
+                    abs(o["nx"]) < OBSTACLE_CLEAR_ZONE and o["r_frac"] > 0.005
+                    for o in obstacles
                 )
                 if obstacle_blocking:
                     nearest_obs = min(obstacles, key=lambda o: abs(o["nx"]))
                     yaw_rate = _clamp(-nearest_obs["nx"] * 2.0, -1.0, 1.0)
                     pitch = 0.0
                     thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
-                    self._log_obstacle_once()
+                    print(
+                        "[pilot] OBSTACLE blocking, stopping",
+                        flush=True,
+                    )
                 else:
                     alignment = max(0.0, 1.0 - abs(nx_telemetry))
                     pitch = CRUISE_PITCH_RATE * (0.35 + 0.65 * alignment)
                     thrust = self._altitude_thrust(CRUISE_THRUST, z_target=gz)
         else:
-            # STABILIZE phase ΓÇö hover, align yaw+altitude only
+            # STABILIZE phase — hover, align yaw+altitude only
             pitch = 0.0
             thrust = self._altitude_thrust(HOVER_THRUST, z_target=gz)
 
@@ -559,15 +521,15 @@ class Pilot:
                 if self._stabilize_start is None:
                     self._stabilize_start = _time.monotonic()
                 elif _time.monotonic() - self._stabilize_start >= STABILIZE_HOLD_S:
-                    # Held heading long enough ΓåÆ advance
+                    # Held heading long enough → advance
                     self._advancing = True
                     self._stabilize_start = None
                     print(
-                        "[pilot] ADVANCE ΓåÆ gate centered, pitching forward",
+                        "[pilot] ADVANCE → gate centered, pitching forward",
                         flush=True,
                     )
             else:
-                # Not centered ΓÇö reset hold timer
+                # Not centered — reset hold timer
                 if self._stabilize_start is not None:
                     self._stabilize_start = None
 

@@ -1,4 +1,4 @@
-"""Odometry course controller from measured sim dynamics (rl/fly2).
+"""Fast odometry course controller from ks/improve_speed (rl/fly2 tuning).
 
 Used by make auto and make fly.
 """
@@ -16,12 +16,12 @@ from simulator.transforms import quat_to_yaw
 HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030
 K_ATT = 0.6
-K_YAW = 0.4
+K_YAW = 0.6
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
 RATE_CLIP = 0.30
-YAW_CLIP = 0.5
+YAW_CLIP = 0.8
 
 
 def rpy(q):
@@ -76,9 +76,9 @@ def track_gates_to_gate_map(track_gates: list) -> list:
 
 @dataclass
 class Fly2Config:
-    speed: float = 2.8
-    lean: float = 0.12
-    klat: float = 0.04
+    speed: float = 4.0
+    lean: float = 0.18
+    klat: float = 0.11
     zoff: float = -1.0
     flipz: bool = False
 
@@ -108,12 +108,13 @@ def compute_course_rates(
     yaw_err = wrap(bearing - yaw)
     speed = float(np.linalg.norm(v[:2]))
     e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-    align = max(0.0, 1.0 - abs(yaw_err) / 0.4)
+    align = max(0.0, 1.0 - abs(yaw_err) / 0.5)
+    lat_align = max(0.3, 1.0 - abs(e_cross) / 2.5)
     dist = math.hypot(dx, dy)
-    v_des = cfg.speed * align * min(1.0, 0.3 + dist / 10.0)
-    lean = float(np.clip(0.05 * (v_des - speed), -0.05, cfg.lean))
+    v_des = cfg.speed * align * lat_align * min(1.0, 0.4 + dist / 6.0)
+    lean = float(np.clip(0.08 * (v_des - speed), -0.07, cfg.lean))
     tgt_pitch = -lean
-    tgt_roll = float(np.clip(cfg.klat * e_cross, -0.12, 0.12))
+    tgt_roll = float(np.clip(cfg.klat * e_cross, -0.16, 0.16))
     tgt_z = (-g[2] if cfg.flipz else g[2]) + cfg.zoff
 
     roll_cmd = float(
@@ -128,7 +129,7 @@ def compute_course_rates(
 
 
 class Fly2CoursePilot:
-    """Drop-in pilot using main fly2 measured-dynamics course logic."""
+    """Drop-in pilot using ks/improve_speed fly2 course logic."""
 
     def __init__(self, controller, data, config: Fly2Config | None = None):
         self.controller = controller
@@ -139,9 +140,9 @@ class Fly2CoursePilot:
         self._last_active = -1
         self._last_log = 0.0
         self._unsafe_ticks = 0
-        self._may_fly = False
         controller.set_control_mode("attitude")
-        print("[fly2] course pilot ready (main fly2 measured dynamics)", flush=True)
+        controller.set_attitude_rates(0, 0, 0, HOVER_T)
+        print("[fly2] speed course pilot ready (ks/improve_speed tuning)", flush=True)
 
     @property
     def gates_passed(self) -> int:
@@ -159,7 +160,6 @@ class Fly2CoursePilot:
             self.hold_z = odo.get("z", 0.0)
         self._last_active = -1
         self._unsafe_ticks = 0
-        self._may_fly = True
         print(f"[fly2] loaded {len(self.gate_map)} gates hold_z={self.hold_z:.1f}", flush=True)
         if not self.gate_map:
             print(
@@ -172,18 +172,13 @@ class Fly2CoursePilot:
         self._last_active = -1
         self._last_log = 0.0
         self._unsafe_ticks = 0
-        self._may_fly = False
         self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, 0, 0, 0)
+        self.controller.set_attitude_rates(0, 0, 0, HOVER_T)
 
     def tick(self) -> None:
-        if not self._may_fly:
-            self.controller.set_attitude_rates(0, 0, 0, 0)
-            return
-
         odo = self.data.get("odometry")
         if not odo or not self.gate_map:
-            self.controller.set_attitude_rates(0, 0, 0, 0)
+            self.controller.set_attitude_rates(0, 0, 0, HOVER_T)
             return
 
         quat = (odo["qw"], odo["qx"], odo["qy"], odo["qz"])

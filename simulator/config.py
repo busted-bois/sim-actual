@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 GATE_HEX_COLOR = "#F3390F"
 
-HSV_TOLERANCE = 40  # wider to handle shadow/shading on gate
+HSV_TOLERANCE = 60  # wider for VQ2 R2 scanned environments
 
 # Compute HSV bounds from hex color at import time
 _hex_rgb = tuple(
@@ -36,11 +36,11 @@ HSV_UPPER = np.array(
 
 MORPH_KERNEL_SIZE = 5
 MORPH_ITERS = 2
-MIN_CONTOUR_AREA_PX = 500
+MIN_CONTOUR_AREA_PX = 250
 MAX_ASPECT_RATIO = 5.0
 MIN_ASPECT_RATIO = 0.2
 REFERENCE_GATE_WIDTH_M = 1.5
-FOCAL_LENGTH_PX_INIT = None
+FOCAL_LENGTH_PX_INIT = 320.0
 SELF_CAL_SAMPLES = 10
 YAW_KP = 0.02
 LATERAL_KP = 0.5

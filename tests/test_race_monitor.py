@@ -35,6 +35,13 @@ class RaceMonitorTests(unittest.TestCase):
     def test_gate_count_from_track(self):
         self.assertEqual(gate_count({"track_gates": [{}, {}, {}]}), 3)
 
+    def test_gate_count_from_gate_count_key(self):
+        self.assertEqual(gate_count({"gate_count": 6}), 6)
+
+    def test_gate_count_default_when_race_started(self):
+        data = {"race_status": {"race_start_boot_time_ms": 1000}}
+        self.assertEqual(gate_count(data), 6)
+
     def test_passed_first_gate_at_zero(self):
         self.assertFalse(passed_first_gate({"active_gate_index": 0}))
 
@@ -51,7 +58,7 @@ class RaceMonitorTests(unittest.TestCase):
 
     def test_course_complete_via_active_index(self):
         data = {
-            "track_gates": [{}, {}],
+            "gate_count": 2,
             "race_status": {"race_finish_time_ns": -1},
             "active_gate_index": 2,
         }
@@ -59,7 +66,7 @@ class RaceMonitorTests(unittest.TestCase):
 
     def test_course_not_complete_mid_race(self):
         data = {
-            "track_gates": [{}, {}, {}],
+            "gate_count": 3,
             "race_status": {"race_finish_time_ns": -1},
             "active_gate_index": 1,
         }
@@ -70,17 +77,18 @@ class RaceMonitorTests(unittest.TestCase):
 
     def test_gate1_fail_on_timeout(self):
         data = {"active_gate_index": 0}
-        self.assertTrue(gate1_fail(data, elapsed_s=11.0, pilot_gates_passed=0))
+        self.assertTrue(gate1_fail(data, elapsed_s=16.0, pilot_gates_passed=0))
 
     def test_gate1_fail_not_yet(self):
         data = {"active_gate_index": 0}
-        self.assertFalse(gate1_fail(data, elapsed_s=10.0, pilot_gates_passed=0))
+        self.assertFalse(gate1_fail(data, elapsed_s=15.0, pilot_gates_passed=0))
 
-    def test_gate1_fail_early_past_plane(self):
+    def test_gate1_fail_early_past_plane_vq2_no_odom_fail(self):
+        """VQ2: plane-cross fail removed — timeout only without sim advance."""
         data = _gate0_data(
             odometry={"x": 5.0, "y": 0.0, "z": 0.0},
         )
-        self.assertTrue(gate1_fail(data, elapsed_s=9.0, pilot_gates_passed=0))
+        self.assertFalse(gate1_fail(data, elapsed_s=9.0, pilot_gates_passed=0))
 
     def test_gate1_no_fail_if_sim_passed(self):
         data = {"active_gate_index": 1}
@@ -109,34 +117,33 @@ class RaceMonitorTests(unittest.TestCase):
         self.assertIn("active=0", line)
         self.assertIn("elapsed=12s", line)
 
-    def test_gate_progress_stall_not_yet(self):
-        data = {
-            "track_gates": [{}, {}, {}],
-            "race_status": {"race_finish_time_ns": -1},
-            "active_gate_index": 1,
-        }
-        self.assertFalse(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=19.0))
-
     def test_gate_progress_stall_on_timeout(self):
         data = {
-            "track_gates": [{}, {}, {}],
+            "gate_count": 6,
             "race_status": {"race_finish_time_ns": -1},
-            "active_gate_index": 1,
+            "active_gate_index": 2,
         }
-        self.assertTrue(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=20.0))
+        self.assertTrue(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=16.0))
 
-    def test_gate_progress_stall_false_when_complete(self):
+    def test_gate_progress_stall_not_yet(self):
         data = {
-            "track_gates": [{}, {}],
-            "race_status": {"race_finish_time_ns": 0},
-            "active_gate_index": 1,
+            "gate_count": 6,
+            "race_status": {"race_finish_time_ns": -1},
+            "active_gate_index": 2,
         }
-        self.assertFalse(gate_progress_stall(data, last_active=1, elapsed_since_advance_s=30.0))
+        self.assertFalse(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=14.9))
+
+    def test_gate_progress_stall_no_stall_if_advanced(self):
+        data = {
+            "gate_count": 6,
+            "race_status": {"race_finish_time_ns": -1},
+            "active_gate_index": 3,
+        }
+        self.assertFalse(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=20.0))
 
     def test_gate_progress_watch_line(self):
-        line = gate_progress_watch_line({"active_gate_index": 2}, 1, 15.0)
+        line = gate_progress_watch_line({"active_gate_index": 2}, 1, 12.0)
         self.assertIn("gate_progress_watch", line)
-        self.assertIn("active=2", line)
         self.assertIn("last_active=1", line)
 
 

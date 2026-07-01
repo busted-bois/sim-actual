@@ -4,13 +4,19 @@ import time
 import threading
 
 from simulator.config import TrackGate
-from simulator.flight_debug import dbg_now, flight_debug_enabled
 from simulator.transforms import quat_to_yaw
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 ENCAPSULATED_TRACK_INFO_MSG_ID = 2
 
+# VQ2 competitive: gate poses in track burst may be nulled (all zeros).
+VQ2_DEFAULT_GATE_COUNT = 6
+
 _AUTO_FLIGHT_DEBUG_VALUES = frozenset({"1", "true", "yes"})
+
+
+def _gate_pose_valid(x, y, z, width, height) -> bool:
+    return abs(x) + abs(y) + abs(z) > 0.01 or width > 0.01 or height > 0.01
 
 
 def _auto_flight_debug() -> bool:
@@ -28,7 +34,6 @@ class MAVLinkRX:
         self.expected_num_track_chunks = {}
         self._debug_last_race_log = 0.0
         self._debug_logged_track = False
-        self._last_race_start_logged = None
 
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
@@ -77,19 +82,19 @@ class MAVLinkRX:
                 self.on_timesync(msg)
 
             # --------------------------------------------------------------------------------------
-            # ATTITUDE
+            # ATTITUDE — disabled in VQ2 competitive sim (handler kept for training builds)
             # --------------------------------------------------------------------------------------
             elif msg_type == "ATTITUDE":
                 self.on_attitude(msg)
 
             # --------------------------------------------------------------------------------------
-            # LOCAL_POSITION_NED
+            # LOCAL_POSITION_NED — disabled in VQ2 competitive sim
             # --------------------------------------------------------------------------------------
             elif msg_type == "LOCAL_POSITION_NED":
                 self.on_local_position_ned(msg)
 
             # --------------------------------------------------------------------------------------
-            # ODOMETRY
+            # ODOMETRY — disabled in VQ2 competitive sim
             # --------------------------------------------------------------------------------------
             elif msg_type == "ODOMETRY":
                 self.on_odometry(msg)
@@ -176,7 +181,7 @@ class MAVLinkRX:
         }
 
     def on_highres_imu(self, msg):
-        # Accel (m/s^2) + gyro (rad/s) in body FRD; consumed by the EKF (Module 5).
+        # Accel (m/s^2) + gyro (rad/s) in body FRD; primary sensor in VQ2 competitive.
         self.data["imu"] = {
             "ax": msg.xacc,
             "ay": msg.yacc,
@@ -184,6 +189,8 @@ class MAVLinkRX:
             "gx": msg.xgyro,
             "gy": msg.ygyro,
             "gz": msg.zgyro,
+            "pressure_alt": getattr(msg, "pressure_alt", None),
+            "temperature": getattr(msg, "temperature", None),
             "time_us": msg.time_usec,
         }
 
@@ -218,26 +225,7 @@ class MAVLinkRX:
             "active_gate_index": active_gate_index,
             "last_gate_race_time": last_gate_race_time,
         }
-        if flight_debug_enabled():
-            if race_start_boot_time_ms != self._last_race_start_logged:
-                delta = race_start_boot_time_ms - sim_boot_time_ms
-                dbg_now(
-                    "race_start_chg",
-                    f"{self._last_race_start_logged}->{race_start_boot_time_ms} "
-                    f"sim_boot={sim_boot_time_ms} delta={delta}",
-                )
-                self._last_race_start_logged = race_start_boot_time_ms
-            now = time.monotonic()
-            if now - self._debug_last_race_log >= 2.0:
-                print(
-                    "[AUTO_FLIGHT_DEBUG] race_status "
-                    f"sim_boot={sim_boot_time_ms} "
-                    f"race_start={race_start_boot_time_ms} "
-                    f"active_gate_index={active_gate_index}",
-                    flush=True,
-                )
-                self._debug_last_race_log = now
-        elif _auto_flight_debug():
+        if _auto_flight_debug():
             now = time.monotonic()
             if now - self._debug_last_race_log >= 2.0:
                 print(
@@ -271,9 +259,11 @@ class MAVLinkRX:
             self.on_track_data(full_payload)
 
     def on_track_data(self, payload):
+        # VQ2: burst may still arrive but gate poses are nulled — keep gate_count.
         (num_gates,) = struct.unpack_from("<H", payload)
         payload = payload[2:]
         gates = []
+        positions_valid = False
         for i in range(num_gates):
             (
                 gate_id,
@@ -287,6 +277,14 @@ class MAVLinkRX:
                 width,
                 height,
             ) = struct.unpack_from("<Hfffffffff", payload)
+            if _gate_pose_valid(
+                position_ned_x,
+                position_ned_y,
+                position_ned_z,
+                width,
+                height,
+            ):
+                positions_valid = True
             gates.append(
                 TrackGate(
                     gate_id=gate_id,
@@ -302,9 +300,13 @@ class MAVLinkRX:
                 )
             )
             payload = payload[38:]
+        gate_count = num_gates if num_gates > 0 else VQ2_DEFAULT_GATE_COUNT
+        self.data["gate_count"] = gate_count
+        self.data["track_positions_valid"] = positions_valid
         self.data["gates"] = gates
         self.data["track_gates"] = [
             {
+                "gate_id": g.gate_id,
                 "position_ned": g.pos_ned,
                 "orientation_ned": g.orient_quat,
                 "width": g.width_m,
@@ -312,15 +314,10 @@ class MAVLinkRX:
             }
             for g in gates
         ]
-        if flight_debug_enabled():
-            dbg_now(
-                "track_burst",
-                f"num_gates={num_gates} race_start="
-                f"{(self.data.get('race_status') or {}).get('race_start_boot_time_ms', -1)}",
-            )
-        elif _auto_flight_debug() and not self._debug_logged_track:
+        if _auto_flight_debug() and not self._debug_logged_track:
             print(
-                f"[AUTO_FLIGHT_DEBUG] track burst received num_gates={num_gates}",
+                f"[AUTO_FLIGHT_DEBUG] track burst received num_gates={gate_count} "
+                f"positions_valid={positions_valid}",
                 flush=True,
             )
             self._debug_logged_track = True

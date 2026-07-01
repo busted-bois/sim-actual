@@ -49,8 +49,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["hover", "course"], default="course")
     ap.add_argument("--seconds", type=float, default=95.0)
-    ap.add_argument("--speed", type=float, default=2.8)
-    ap.add_argument("--lean", type=float, default=0.12, help="max forward lean (rad)")
+    ap.add_argument("--speed", type=float, default=4.0)
+    ap.add_argument("--lean", type=float, default=0.18, help="max forward lean (rad)")
     ap.add_argument(
         "--flipz", action="store_true", help="negate gate-map z (climb course)"
     )
@@ -60,7 +60,7 @@ def main():
         default=-1.0,
         help="altitude offset vs gate center (negative = fly higher, NED)",
     )
-    ap.add_argument("--klat", type=float, default=0.04, help="cross-track roll gain")
+    ap.add_argument("--klat", type=float, default=0.11, help="cross-track roll gain")
     ap.add_argument(
         "--no-wait",
         dest="wait",

@@ -21,11 +21,17 @@ from simulator.config import (
 )
 from simulator.transforms import estimate_focal_from_track, pixel_offset_to_bearing
 
-# Default image dimensions (pixels). The estimator does not receive the actual
-# frame size, so it assumes a standard 640x480 image to convert centroid pixel
-# position into an offset from the image center.
+# Default image dimensions (pixels).
 _IMG_W = 640.0
-_IMG_H = 480.0
+_IMG_H = 360.0
+_FX_DEFAULT = 320.0
+
+
+def _gate_has_valid_pose(gate: TrackGate | None) -> bool:
+    if gate is None:
+        return False
+    px, py, pz = gate.pos_ned
+    return abs(px) + abs(py) + abs(pz) > 0.01
 
 
 @dataclass
@@ -56,6 +62,8 @@ class GateEstimator:
         drone_state: DroneState,
         gates: list[TrackGate],
         active_gate_index: int,
+        img_w: float = _IMG_W,
+        img_h: float = _IMG_H,
     ) -> GateEstimate:
         # 1. No detection -> nothing to estimate.
         if detection is None:
@@ -70,8 +78,13 @@ class GateEstimator:
         # Resolve the active track gate (may be None if index is out of range).
         gate = gates[active_gate_index] if active_gate_index < len(gates) else None
 
-        # 2. Self-calibration: collect focal samples from track ground-truth.
-        if gate is not None and drone_state.has_position and detection.width_px > 0:
+        # 2. Self-calibration: collect focal samples from track ground-truth (VQ1 only).
+        if (
+            gate is not None
+            and _gate_has_valid_pose(gate)
+            and drone_state.has_position
+            and detection.width_px > 0
+        ):
             distance = math.sqrt(
                 sum((a - b) ** 2 for a, b in zip(drone_state.pos_ned, gate.pos_ned))
             )
@@ -83,20 +96,19 @@ class GateEstimator:
                 if len(self._cal_samples) >= SELF_CAL_SAMPLES:
                     self.focal_px = float(np.median(self._cal_samples))
 
-        # 3. Range estimation (only when a focal estimate is locked).
+        # 3. Range estimation (focal locked, or VQ2 pixel-width heuristic).
         if self.focal_px is not None:
-            real_width = gate.width_m if gate is not None else REFERENCE_GATE_WIDTH_M
+            real_width = gate.width_m if gate is not None and gate.width_m > 0 else REFERENCE_GATE_WIDTH_M
             range_m = real_width * self.focal_px / max(detection.width_px, 1.0)
+        elif detection.width_px > 0:
+            range_m = REFERENCE_GATE_WIDTH_M * _FX_DEFAULT / max(detection.width_px, 1.0)
         else:
             range_m = None
 
         # 4. Bearing from pixel offset.
-        offset_px = detection.centroid_x_px - _IMG_W / 2.0
-        if self.focal_px is not None:
-            bearing = pixel_offset_to_bearing(offset_px, self.focal_px)
-        else:
-            # Pixel-ratio fallback: normalized offset, NOT radians.
-            bearing = offset_px / _IMG_W
+        offset_px = detection.centroid_x_px - img_w / 2.0
+        focal = self.focal_px if self.focal_px is not None else _FX_DEFAULT
+        bearing = pixel_offset_to_bearing(offset_px, focal)
 
         # 5. Lateral offset (geometric; requires a real range).
         if range_m is not None:
@@ -105,9 +117,12 @@ class GateEstimator:
             lateral_offset_m = None
 
         # 6. Source and confidence.
-        if self.focal_px is not None:
+        if self.focal_px is not None and _gate_has_valid_pose(gate):
             source = "track"
             confidence = 0.8
+        elif range_m is not None:
+            source = "pixel-ratio"
+            confidence = 0.5
         else:
             source = "pixel-ratio"
             confidence = 0.3

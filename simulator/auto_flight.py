@@ -1,21 +1,19 @@
-"""Gate-1 retry loop until course complete. Enabled via AUTO_FLIGHT=1 (make auto)."""
+"""Continuous in-session retry loop. Enabled via AUTO_FLIGHT=1 (make auto)."""
 
 from __future__ import annotations
 
 import os
 import signal
-import sys
-import threading
 import time
 
-from simulator.flight_debug import dbg_now, motion_snapshot
+from simulator.pilot import HOVER_THRUST
 from simulator.preflight import (
-    preflight_keep_safe,
-    wait_after_race_go,
-    wait_for_fresh_race_start,
-    wait_for_fresh_track,
+    is_restart_arm_context,
+    wait_for_fresh_race_start_vq2,
     wait_for_race_go,
-    wait_for_visual_go,
+    wait_for_race_start,
+    wait_for_race_status,
+    wait_for_session_ready,
 )
 from simulator.race_monitor import (
     GATE1_WATCH_INTERVAL_S,
@@ -29,86 +27,80 @@ from simulator.race_monitor import (
 )
 
 _AUTO_FLIGHT_VALUES = frozenset({"1", "true", "yes"})
-CANCEL_CONFIRM_WINDOW_S = float(os.environ.get("CANCEL_CONFIRM_WINDOW_S", "3"))
 
 
 def auto_flight_enabled() -> bool:
     return os.environ.get("AUTO_FLIGHT", "").strip().lower() in _AUTO_FLIGHT_VALUES
 
 
-def is_ctrl_cancel(ch: bytes) -> bool:
-    if not ch:
-        return False
-    code = ch[0]
-    return code == 3 or 1 <= code <= 26
+def _pilot_hover_thrust(pilot) -> float:
+    return HOVER_THRUST
 
 
-def _run_attempt_preflight(controller, shared_data, pilot, attempt: int) -> bool:
-    from simulator.countdown_detector import reset_countdown_gate
+def _sleep_s(cancel: CancelListener, seconds: float) -> bool:
+    """Sleep up to seconds. Returns True if cancelled."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if cancel.cancelled():
+            return True
+        time.sleep(0.05)
+    return False
 
-    print(f"[RACE] attempt={attempt} waiting for track_gates...", flush=True)
-    controller.set_controls_enabled(False)
-    controller.disarm()
-    controller._safe_hold_logged = False
-    reset_countdown_gate(shared_data)
-    dbg_now("milestone", f"preflight_start attempt={attempt} {motion_snapshot(shared_data)}")
 
-    race = shared_data.get("race_status") or {}
-    shared_data["_preflight_race_start_baseline"] = race.get(
-        "race_start_boot_time_ms", -1
-    )
+def _run_attempt_preflight(controller, shared_data, pilot, attempt: int, cancel) -> bool:
+    if attempt == 1:
+        print(f"[RACE] attempt={attempt} waiting for VQ2 session...", flush=True)
+        if not wait_for_session_ready(shared_data, cancel=cancel):
+            return False
 
-    if not wait_for_fresh_track(shared_data, controller=controller):
         print(
-            "ERROR: no track burst — click Restart Race in FlightSim, then retry",
+            "Click Race in FlightSim (SUBMISSION or TRAINING — same map)...",
             flush=True,
         )
-        return False
+        if not wait_for_race_status(shared_data, timeout_s=60.0, cancel=cancel):
+            if cancel.cancelled():
+                return False
+            print("WARNING: race_status not in telemetry yet", flush=True)
 
-    dbg_now("milestone", f"track_ok {motion_snapshot(shared_data)}")
+        if not wait_for_race_start(shared_data, timeout_s=60.0, cancel=cancel):
+            if cancel.cancelled():
+                return False
+            print(
+                "ERROR: Race not started — click Race in FlightSim",
+                flush=True,
+            )
+            return False
+    else:
+        print(f"[RACE] attempt={attempt} waiting for restart countdown...", flush=True)
+        race = shared_data.get("race_status") or {}
+        is_restart = is_restart_arm_context(race.get("sim_boot_time_ms", 0))
+        if not wait_for_fresh_race_start_vq2(
+            shared_data, timeout_s=30.0, cancel=cancel, is_restart=is_restart
+        ):
+            if cancel.cancelled():
+                return False
+            print(
+                "ERROR: no fresh race_start — click Restart Race in FlightSim",
+                flush=True,
+            )
+            return False
 
-    if not wait_for_fresh_race_start(shared_data, timeout_s=15.0, controller=controller):
-        print(
-            "WARNING: race_start stale or missing — "
-            "click Restart Race in FlightSim, then retry",
-            flush=True,
-        )
-        return False
-
-    dbg_now("milestone", f"fresh_race_start_ok {motion_snapshot(shared_data)}")
-
-    race_before_go = shared_data.get("race_status") or {}
-    armed_sim_boot_ms = race_before_go.get("sim_boot_time_ms", 0)
-    if not wait_for_race_go(
-        shared_data, armed_sim_boot_ms=armed_sim_boot_ms, controller=controller
-    ):
-        print("ERROR: countdown never reached GO", flush=True)
-        return False
-
-    dbg_now("milestone", f"race_go_ok {motion_snapshot(shared_data)}")
-
-    if not wait_for_visual_go(shared_data, controller=controller):
-        print("ERROR: visual countdown never cleared", flush=True)
-        return False
-
-    dbg_now("milestone", f"visual_go_ok {motion_snapshot(shared_data)}")
-
-    wait_after_race_go(controller=controller)
-
-    race = shared_data.get("race_status") or {}
-    go_boot = shared_data.get("_latched_go_boot_ms", "?")
     print("Arming drone...", flush=True)
     controller.arm()
-    time.sleep(0.15)
-    controller.set_controls_enabled(True)
-    print(
-        "[RACE] controls enabled "
-        f"sim_boot={race.get('sim_boot_time_ms')}ms "
-        f"race_start={race.get('race_start_boot_time_ms')}ms "
-        f"go_boot={go_boot}ms",
-        flush=True,
-    )
-    dbg_now("milestone", f"controls_enabled {motion_snapshot(shared_data)}")
+    if _sleep_s(cancel, 0.15):
+        return False
+
+    race = shared_data.get("race_status") or {}
+    armed_sim_boot_ms = race.get("sim_boot_time_ms", 0)
+    is_restart = attempt > 1 or is_restart_arm_context(armed_sim_boot_ms)
+
+    if not wait_for_race_go(
+        shared_data,
+        armed_sim_boot_ms=armed_sim_boot_ms,
+        is_restart=is_restart,
+        cancel=cancel,
+    ):
+        return False
 
     if hasattr(pilot, "on_attempt_start"):
         pilot.on_attempt_start()
@@ -117,15 +109,11 @@ def _run_attempt_preflight(controller, shared_data, pilot, attempt: int) -> bool
 
 
 def _clear_attempt_state(shared_data) -> None:
-    from simulator.countdown_detector import reset_countdown_gate
-
-    shared_data.pop("track_gates", None)
-    shared_data.pop("gates", None)
+    race = shared_data.get("race_status") or {}
+    shared_data["_preflight_race_start_baseline"] = race.get(
+        "race_start_boot_time_ms", -1
+    )
     shared_data.pop("_latched_go_boot_ms", None)
-    shared_data.pop("_track_race_start_ms", None)
-    shared_data.pop("_track_sim_boot_ms", None)
-    shared_data.pop("_preflight_race_start_baseline", None)
-    reset_countdown_gate(shared_data)
 
 
 def _sleep_reset_wait(cancel: CancelListener) -> bool:
@@ -138,17 +126,28 @@ def _sleep_reset_wait(cancel: CancelListener) -> bool:
     return False
 
 
-def _retry_after_fail(
+def _retry_after_outcome(
     outcome: str,
     controller,
     pilot,
     shared_data,
     attempt: int,
     cancel: CancelListener,
+    lap_elapsed_s: float | None = None,
+    best_lap_s: float | None = None,
 ) -> bool:
-    """Reset sim after gate fail. Returns True if user cancelled."""
+    """Reset sim after fail/success. Returns True if user cancelled."""
     active = int(shared_data.get("active_gate_index", 0) or 0)
-    if outcome == "gate_stall":
+    if outcome == "success":
+        best_str = (
+            f" best={best_lap_s:.1f}s" if best_lap_s is not None else ""
+        )
+        lap_str = f" lap={lap_elapsed_s:.1f}s" if lap_elapsed_s is not None else ""
+        print(
+            f"[RACE] OUTCOME=success attempt={attempt}{lap_str}{best_str} — restarting",
+            flush=True,
+        )
+    elif outcome == "gate_stall":
         print(
             f"[RACE] OUTCOME=gate_stall attempt={attempt} active={active} retrying",
             flush=True,
@@ -156,9 +155,8 @@ def _retry_after_fail(
     else:
         print(f"[RACE] OUTCOME=gate1_fail attempt={attempt} retrying", flush=True)
 
-    controller.set_controls_enabled(False)
-    controller.set_attitude_rates(0, 0, 0, 0)
-    controller.disarm()
+    hover = _pilot_hover_thrust(pilot)
+    controller.set_attitude_rates(0, 0, 0, hover)
     time.sleep(0.2)
     controller.send_sim_reset_command()
     time.sleep(0.5)
@@ -181,103 +179,57 @@ def _retry_after_fail(
 
 
 class CancelListener:
-    """Ctrl+C or Ctrl+letter twice within window cancels automation."""
+    """Ctrl+C cancels automation."""
 
     def __init__(self) -> None:
-        self._event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._armed = False
-        self._armed_at = 0.0
+        self._cancelled = False
 
     def start(self) -> None:
         signal.signal(signal.SIGINT, self._on_sigint)
-        self._thread = threading.Thread(target=self._listen_keys, daemon=True)
-        self._thread.start()
 
     def _on_sigint(self, signum, frame) -> None:
-        self._handle_cancel_press()
+        if not self._cancelled:
+            print("[AUTO] cancel requested (Ctrl+C)", flush=True)
+        self._cancelled = True
 
     def cancelled(self) -> bool:
-        return self._event.is_set()
-
-    def _handle_cancel_press(self) -> None:
-        now = time.monotonic()
-        with self._lock:
-            if self._event.is_set():
-                return
-            if (
-                self._armed
-                and now - self._armed_at <= CANCEL_CONFIRM_WINDOW_S
-            ):
-                self._event.set()
-                return
-            self._armed = True
-            self._armed_at = now
-        print(
-            "[AUTO] press Ctrl+C or Ctrl+letter again to exit automation",
-            flush=True,
-        )
-
-    def _listen_keys(self) -> None:
-        if sys.platform == "win32":
-            import msvcrt
-
-            while not self._event.is_set():
-                if msvcrt.kbhit():
-                    if is_ctrl_cancel(msvcrt.getch()):
-                        self._handle_cancel_press()
-                time.sleep(0.05)
-            return
-
-        import select
-        import termios
-        import tty
-
-        if not sys.stdin.isatty():
-            return
-
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            while not self._event.is_set():
-                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if not ready:
-                    continue
-                ch = sys.stdin.read(1).encode("latin-1", errors="ignore")
-                if is_ctrl_cancel(ch):
-                    self._handle_cancel_press()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return self._cancelled
 
 
 def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
-    """Run retry loop. Returns (outcome, was_flying).
+    """Run continuous retry loop until Ctrl+C.
 
-    outcome: success | cancelled | preflight_fail
-    was_flying: True if the 250 Hz loop had started at least once
+    Returns (outcome, was_flying).
+    outcome: cancelled | preflight_fail
     """
     cancel = CancelListener()
     cancel.start()
     print(
-        "[AUTO] automation on (vision pilot) — "
-        "Ctrl+C or Ctrl+letter twice cancels to normal sim",
+        "[AUTO] overnight automation on — same pilot as make sim; "
+        "Ctrl+C stops (preflight, flight, or retry)",
         flush=True,
     )
 
     attempt = 0
     was_flying = False
+    best_lap_s: float | None = None
 
     while not cancel.cancelled():
         attempt += 1
-        if not _run_attempt_preflight(controller, shared_data, pilot, attempt):
+        if not _run_attempt_preflight(controller, shared_data, pilot, attempt, cancel):
+            if cancel.cancelled():
+                print("[AUTO] cancelled — resuming normal sim mode", flush=True)
+                return "cancelled", was_flying
+            print(
+                "ERROR: enter AI-GP VIRTUAL QUALIFIER R2 — SUBMISSION or TRAINING",
+                flush=True,
+            )
             return "preflight_fail", was_flying
         if cancel.cancelled():
+            print("[AUTO] cancelled — resuming normal sim mode", flush=True)
             return "cancelled", was_flying
 
         print(f"[RACE] attempt={attempt} control loop started", flush=True)
-        dbg_now("milestone", f"control_loop_start {motion_snapshot(shared_data)}")
         t_go = time.monotonic()
         gate1_latched = False
         retry_attempt = False
@@ -290,14 +242,23 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
             was_flying = True
 
             if course_complete(shared_data):
-                race = shared_data.get("race_status") or {}
-                finish_ns = race.get("race_finish_time_ns", -1)
-                active = shared_data.get("active_gate_index", 0)
-                print(
-                    f"[RACE] OUTCOME=success finish_ns={finish_ns} active={active}",
-                    flush=True,
-                )
-                return "success", was_flying
+                lap_elapsed_s = time.monotonic() - t_go
+                if best_lap_s is None or lap_elapsed_s < best_lap_s:
+                    best_lap_s = lap_elapsed_s
+                if _retry_after_outcome(
+                    "success",
+                    controller,
+                    pilot,
+                    shared_data,
+                    attempt,
+                    cancel,
+                    lap_elapsed_s=lap_elapsed_s,
+                    best_lap_s=best_lap_s,
+                ):
+                    print("[AUTO] cancelled — resuming normal sim mode", flush=True)
+                    return "cancelled", was_flying
+                retry_attempt = True
+                break
 
             active = int(shared_data.get("active_gate_index", 0) or 0)
 
@@ -311,7 +272,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
                     if gate_progress_stall(
                         shared_data, last_active, elapsed_advance
                     ):
-                        if _retry_after_fail(
+                        if _retry_after_outcome(
                             "gate_stall",
                             controller,
                             pilot,
@@ -319,13 +280,14 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
                             attempt,
                             cancel,
                         ):
+                            print(
+                                "[AUTO] cancelled — resuming normal sim mode",
+                                flush=True,
+                            )
                             return "cancelled", was_flying
                         retry_attempt = True
                         break
-                    elif (
-                        time.monotonic() - last_watch_log
-                        >= GATE1_WATCH_INTERVAL_S
-                    ):
+                    if time.monotonic() - last_watch_log >= GATE1_WATCH_INTERVAL_S:
                         print(
                             gate_progress_watch_line(
                                 shared_data, last_active, elapsed_advance
@@ -345,7 +307,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
                 last_watch_log = t_last_advance
                 print("[RACE] GATE1=pass active=1", flush=True)
             elif gate1_fail(shared_data, elapsed, pilot_passed):
-                if _retry_after_fail(
+                if _retry_after_outcome(
                     "gate1_fail",
                     controller,
                     pilot,
@@ -353,6 +315,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
                     attempt,
                     cancel,
                 ):
+                    print("[AUTO] cancelled — resuming normal sim mode", flush=True)
                     return "cancelled", was_flying
                 retry_attempt = True
                 break
@@ -364,8 +327,10 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
                 last_watch_log = time.monotonic()
 
         if cancel.cancelled():
+            print("[AUTO] cancelled — resuming normal sim mode", flush=True)
             return "cancelled", was_flying
         if retry_attempt:
             continue
 
+    print("[AUTO] cancelled — resuming normal sim mode", flush=True)
     return "cancelled", was_flying
