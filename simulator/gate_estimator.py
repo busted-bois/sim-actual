@@ -37,6 +37,7 @@ def _gate_has_valid_pose(gate: TrackGate | None) -> bool:
 @dataclass
 class GateEstimate:
     bearing_rad: float
+    elevation_rad: float
     range_m: float | None
     lateral_offset_m: float | None
     confidence: float  # 0.0 to 1.0
@@ -69,6 +70,7 @@ class GateEstimator:
         if detection is None:
             return GateEstimate(
                 bearing_rad=0.0,
+                elevation_rad=0.0,
                 range_m=None,
                 lateral_offset_m=None,
                 confidence=0.0,
@@ -107,8 +109,10 @@ class GateEstimator:
 
         # 4. Bearing from pixel offset.
         offset_px = detection.centroid_x_px - img_w / 2.0
+        offset_y_px = detection.centroid_y_px - img_h / 2.0
         focal = self.focal_px if self.focal_px is not None else _FX_DEFAULT
         bearing = pixel_offset_to_bearing(offset_px, focal)
+        elevation = pixel_offset_to_bearing(offset_y_px, focal)
 
         # 5. Lateral offset (geometric; requires a real range).
         if range_m is not None:
@@ -129,6 +133,7 @@ class GateEstimator:
 
         return GateEstimate(
             bearing_rad=bearing,
+            elevation_rad=elevation,
             range_m=range_m,
             lateral_offset_m=lateral_offset_m,
             confidence=confidence,

@@ -138,9 +138,11 @@ class Controller:
         from simulator.auto_flight import auto_flight_enabled
 
         if auto_flight_enabled():
-            from simulator.vq2_pilot import VQ2VisionPilot
+            from rl.fly2_course import Fly2Config, Fly2CoursePilot
 
-            return VQ2VisionPilot(self, self.data)
+            # Slower than main's 2.8 m/s default: EKF pose is noisier than
+            # live odometry, so prioritize gate passage over lap time.
+            return Fly2CoursePilot(self, self.data, Fly2Config(speed=1.5))
         from simulator.pilot import Pilot
 
         return Pilot(self, self.data)

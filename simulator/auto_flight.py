@@ -34,7 +34,7 @@ def auto_flight_enabled() -> bool:
 
 
 def _pilot_hover_thrust(pilot) -> float:
-    from simulator.vq2_pilot import HOVER_T
+    from rl.fly2_course import HOVER_T
 
     return HOVER_T
 
@@ -224,7 +224,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
 
 def _run_auto_flight_loop(controller, pilot, shared_data, cancel) -> tuple[str, bool]:
     print(
-        "[AUTO] overnight automation on — VQ2 reactive vision pilot; "
+        "[AUTO] overnight automation on — main fly2 course pilot; "
         "Ctrl+C stops (preflight, flight, or retry)",
         flush=True,
     )

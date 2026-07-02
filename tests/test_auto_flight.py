@@ -70,13 +70,14 @@ class AutoFlightTests(unittest.TestCase):
         }
         self.assertTrue(wait_for_fresh_race_start_vq2(data, timeout_s=0.5))
 
-    def test_controller_uses_vq2_pilot_when_auto(self):
+    def test_controller_uses_fly2_course_pilot_when_auto(self):
         with patch.dict("os.environ", {"AUTO_FLIGHT": "1"}):
+            from rl.fly2_course import Fly2CoursePilot
             from simulator.controller import Controller
-            from simulator.vq2_pilot import VQ2VisionPilot
 
             ctrl = Controller(MagicMock(), {}, 0)
-            self.assertIsInstance(ctrl.pilot, VQ2VisionPilot)
+            self.assertIsInstance(ctrl.pilot, Fly2CoursePilot)
+            self.assertEqual(ctrl.pilot.config.speed, 1.5)
 
     def test_run_auto_flight_preflight_fail_without_vision(self):
         controller = MagicMock()
