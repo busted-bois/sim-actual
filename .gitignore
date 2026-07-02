@@ -11,7 +11,11 @@ __pycache__/
 
 # Runtime logs
 logs/
+rl/data/auto_laps.jsonl
+rl/data/best_lap.txt
 
 # Doc automation artifacts
 .doc-context.txt
 scripts/node_modules/
+# Recorded vision runs
+runs/

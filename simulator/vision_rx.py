@@ -13,6 +13,39 @@ _NO_GATE_LOG_INTERVAL_S = 1.0
 SIM_SERVER_UDP_IP = "0.0.0.0"
 SIM_SERVER_UDP_PORT = 5600
 
+# Overlay colors (BGR).
+_GATE_COLOR = (0, 200, 0)
+_OBSTACLE_COLOR = (0, 0, 255)
+
+
+def _annotate(img, detection, obstacle_px):
+    """Return a copy of img with gate and obstacle overlays for live display."""
+    out = img.copy()
+    if detection is not None:
+        cx, cy = int(detection.centroid_x_px), int(detection.centroid_y_px)
+        x0 = int(cx - detection.width_px / 2.0)
+        y0 = int(cy - detection.height_px / 2.0)
+        x1 = int(cx + detection.width_px / 2.0)
+        y1 = int(cy + detection.height_px / 2.0)
+        cv2.rectangle(out, (x0, y0), (x1, y1), _GATE_COLOR, 2)
+        cv2.circle(out, (cx, cy), 4, _GATE_COLOR, -1)
+        hud = f"GATE cx={cx} cy={cy} area={detection.area_px:.0f}"
+    else:
+        hud = "no gate"
+    for ocx, ocy in obstacle_px:
+        cv2.circle(out, (int(ocx), int(ocy)), 6, _OBSTACLE_COLOR, 2)
+    cv2.putText(
+        out,
+        hud,
+        (10, out.shape[0] - 12),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        _GATE_COLOR,
+        2,
+        cv2.LINE_AA,
+    )
+    return out
+
 
 class VisionRX:
     def __init__(self, data):
@@ -22,6 +55,7 @@ class VisionRX:
         self._gate_estimator = GateEstimator()
         self._no_gate_frames = 0
         self._last_no_gate_log = 0.0
+        self._gate_was_detected = False
         self.thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.is_running = True
         self.thread.start()
@@ -121,6 +155,7 @@ class VisionRX:
                 r_frac = detection.area_px / (w * h)
                 gate_target = {
                     "detected": True,
+                    "frame_id": frame_id,
                     "nx": nx,
                     "ny": ny,
                     "r_frac": r_frac,
@@ -135,24 +170,25 @@ class VisionRX:
                     gate_target["confidence"] = estimate.confidence
                     gate_target["estimate_source"] = estimate.source
                 self.data["gate_target"] = gate_target
-                range_s = (
-                    f" range={estimate.range_m:.1f}m"
-                    if estimate and estimate.range_m
-                    else ""
-                )
-                print(
-                    f"[vision] GATE cx={detection.centroid_x_px:.0f} cy={detection.centroid_y_px:.0f} "
-                    f"area={detection.area_px:.0f} nx={nx:+.3f} ny={ny:+.3f}{range_s}",
-                    flush=True,
+                self._log_gate_detected(
+                    True,
+                    detection.centroid_x_px,
+                    detection.centroid_y_px,
+                    detection.area_px,
+                    nx,
+                    ny,
+                    estimate.range_m if estimate else None,
                 )
                 self._no_gate_frames = 0
             else:
                 self.data["gate_target"] = {
                     "detected": False,
+                    "frame_id": frame_id,
                     "nx": 0.0,
                     "ny": 0.0,
                     "r_frac": 0.0,
                 }
+                self._log_gate_detected(False)
                 self._no_gate_frames += 1
                 if (
                     os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower()
@@ -181,6 +217,7 @@ class VisionRX:
                 obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             obstacles = []
+            obstacle_px = []  # (cx, cy) in pixels, for the live overlay
             for oc in obs_contours:
                 oa = cv2.contourArea(oc)
                 if oa < 800:
@@ -193,12 +230,46 @@ class VisionRX:
                 ony = (ocy - h / 2.0) / (h / 2.0)
                 orf = oa / (w * h)
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
+                obstacle_px.append((ocx, ocy))
             self.data["obstacles"] = obstacles
+            self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
         except Exception as e:
             from simulator import config
 
             if config.DEBUG:
                 print(f"[vision_rx] process_frame error: {e}")
+
+    def _log_gate_detected(
+        self,
+        detected: bool,
+        cx: float | None = None,
+        cy: float | None = None,
+        area: float | None = None,
+        nx: float | None = None,
+        ny: float | None = None,
+        range_m: float | None = None,
+    ) -> None:
+        from simulator.auto_flight import auto_flight_enabled
+
+        if auto_flight_enabled():
+            if detected and not self._gate_was_detected:
+                print("[vision] GATE acquired", flush=True)
+            elif not detected and self._gate_was_detected:
+                print("[vision] GATE lost", flush=True)
+            self._gate_was_detected = detected
+            return
+
+        if not detected:
+            self._gate_was_detected = False
+            return
+
+        range_s = f" range={range_m:.1f}m" if range_m is not None else ""
+        print(
+            f"[vision] GATE cx={cx:.0f} cy={cy:.0f} "
+            f"area={area:.0f} nx={nx:+.3f} ny={ny:+.3f}{range_s}",
+            flush=True,
+        )
+        self._gate_was_detected = True
 
     def _estimate_geometry(self, detection, img_w: int, img_h: int):
         from simulator.config import DroneState, TrackGate

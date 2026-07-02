@@ -5,6 +5,7 @@
 import sys
 import time
 
+from simulator import display
 from simulator.auto_flight import auto_flight_enabled, run_auto_flight_loop
 from simulator.preflight import wait_for_connect, wait_for_race_go, wait_for_track
 from simulator.setup import setup_components
@@ -29,6 +30,9 @@ except TimeoutError as exc:
     sys.exit(1)
 controller = components["controller"]
 pilot = controller.pilot
+ts_loop = components["ts_loop"]
+mavlink_rx = components["mavlink_rx"]
+vision_rx = components["vision_rx"]
 
 if auto_flight_enabled():
     print("VQ2 mode — skipping odometry wait", flush=True)
@@ -69,9 +73,20 @@ if not wait_for_race_go(shared_data, armed_sim_boot_ms=armed_sim_boot_ms):
     sys.exit(1)
 
 print("Starting control loop...", flush=True)
+display.start()  # live vision window (what the drone's camera sees)
+t0 = time.monotonic()
+last_shown_frame = -1
 try:
     while True:
         controller.update()
+        frame = shared_data.get("frame")
+        if frame is not None and frame["frame_id"] != last_shown_frame:
+            last_shown_frame = frame["frame_id"]
+            display.tick(frame.get("annotated", frame["img"]), time.monotonic() - t0)
 except KeyboardInterrupt:
     print("Exiting.", flush=True)
-    sys.exit(0)
+finally:
+    display.close()
+    ts_loop.get_thread_for_join().join(timeout=1.0)
+    mavlink_rx.get_thread_for_join().join(timeout=1.0)
+    vision_rx.get_thread_for_join().join(timeout=1.0)
