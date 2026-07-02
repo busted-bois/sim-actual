@@ -31,16 +31,16 @@ controller.arm()
 print("Starting control loop...", flush=True)
 display.start()  # live vision window (what the drone's camera sees)
 t0 = time.monotonic()
-last_shown_frame = -1
+last_shown_tag = None
 is_running = True
 try:
     while is_running:
         controller.update()
-        # Pump the vision window on each new camera frame.
-        frame = shared_data.get("frame")
-        if frame is not None and frame["frame_id"] != last_shown_frame:
-            last_shown_frame = frame["frame_id"]
-            display.tick(frame.get("annotated", frame["img"]), time.monotonic() - t0)
+        # Pump the vision window whenever a new (detected) frame is ready.
+        img, tag = display.pick(shared_data)
+        if tag is not None and tag != last_shown_tag:
+            last_shown_tag = tag
+            display.tick(img, time.monotonic() - t0)
 finally:
     display.close()
 
