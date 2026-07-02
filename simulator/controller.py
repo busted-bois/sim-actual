@@ -2,8 +2,6 @@ import time
 
 from pymavlink import mavutil
 
-from simulator.pilot import Pilot
-
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 # --------------------------------------------------------------------------------------
@@ -133,8 +131,19 @@ class Controller:
         self._vx = 0.0
         self._vy = 0.0
         self._vz = 0.0
-        self.pilot = Pilot(self, data)
+        self.pilot = self._make_pilot()
         self._disarm_ticks = 0
+
+    def _make_pilot(self):
+        from simulator.auto_flight import auto_flight_enabled
+
+        if auto_flight_enabled():
+            from simulator.vq2_pilot import VQ2VisionPilot
+
+            return VQ2VisionPilot(self, self.data)
+        from simulator.pilot import Pilot
+
+        return Pilot(self, self.data)
 
     def set_control_mode(self, mode):
         self.control_mode = mode

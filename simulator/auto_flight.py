@@ -6,7 +6,7 @@ import os
 import signal
 import time
 
-from simulator.pilot import HOVER_THRUST
+from simulator.lap_log import append_lap
 from simulator.preflight import (
     is_restart_arm_context,
     wait_for_fresh_race_start_vq2,
@@ -34,7 +34,9 @@ def auto_flight_enabled() -> bool:
 
 
 def _pilot_hover_thrust(pilot) -> float:
-    return HOVER_THRUST
+    from simulator.vq2_pilot import HOVER_T
+
+    return HOVER_T
 
 
 def _sleep_s(cancel: CancelListener, seconds: float) -> bool:
@@ -147,6 +149,8 @@ def _retry_after_outcome(
             f"[RACE] OUTCOME=success attempt={attempt}{lap_str}{best_str} — restarting",
             flush=True,
         )
+        if lap_elapsed_s is not None and best_lap_s is not None:
+            append_lap(attempt, lap_elapsed_s, best_lap_s)
     elif outcome == "gate_stall":
         print(
             f"[RACE] OUTCOME=gate_stall attempt={attempt} active={active} retrying",
@@ -220,7 +224,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
 
 def _run_auto_flight_loop(controller, pilot, shared_data, cancel) -> tuple[str, bool]:
     print(
-        "[AUTO] overnight automation on — same pilot as make sim; "
+        "[AUTO] overnight automation on — VQ2 reactive vision pilot; "
         "Ctrl+C stops (preflight, flight, or retry)",
         flush=True,
     )
