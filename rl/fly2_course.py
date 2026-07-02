@@ -95,6 +95,19 @@ def resolve_gate_map(data: dict) -> list:
         return []
 
 
+def rates_from_attitude_targets(roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z):
+    """Attitude-angle targets -> rate commands with measured sign conventions."""
+    roll_cmd = float(
+        np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+    )
+    pitch_cmd = float(
+        np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+    )
+    yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+    thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
+    return roll_cmd, pitch_cmd, yaw_cmd, thrust
+
+
 @dataclass
 class Fly2Config:
     speed: float = 2.8
@@ -137,15 +150,9 @@ def compute_course_rates(
     tgt_roll = float(np.clip(cfg.klat * e_cross, -0.12, 0.12))
     tgt_z = (-g[2] if cfg.flipz else g[2]) + cfg.zoff
 
-    roll_cmd = float(
-        np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+    return rates_from_attitude_targets(
+        roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
     )
-    pitch_cmd = float(
-        np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
-    )
-    yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
-    thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
-    return roll_cmd, pitch_cmd, yaw_cmd, thrust
 
 
 class Fly2CoursePilot:
