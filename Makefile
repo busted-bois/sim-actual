@@ -1,4 +1,4 @@
-.PHONY: i install check sim capture-gates fly fly-vision hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check sim view capture-gates fly fly-vision hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -9,6 +9,11 @@ check:
 
 sim:
 	uv run main.py
+
+# Passive live vision window (camera + YOLO gate detection). No MAVLink, no
+# arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
+view:
+	uv run -m simulator.vision_view
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
