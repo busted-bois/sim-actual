@@ -9,6 +9,8 @@ bad fallback is diagnosable from the flight log).
 
 from __future__ import annotations
 
+import csv
+import os
 import time
 
 import numpy as np
@@ -26,6 +28,7 @@ from simulator.vision_nav import VisionGuidance
 from simulator.vq2_pose import VQ2PoseEstimator
 
 STATUS_LOG_INTERVAL_S = 1.0
+NAV_LOG_INTERVAL_S = 0.1  # 10 Hz per-attempt CSV of guidance phase + errors
 
 
 class VisionNavPilot:
@@ -42,6 +45,9 @@ class VisionNavPilot:
         self._unsafe_ticks = 0
         self._last_status_log = 0.0
         self._last_pose_frame_id = None
+        self._nav_log = None
+        self._nav_wr = None
+        self._last_nav_log = 0.0
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_T)
         print("[vnav] vision navigator pilot ready (YOLO+PnP gates)", flush=True)
@@ -68,6 +74,34 @@ class VisionNavPilot:
         self._unsafe_ticks = 0
         self._last_status_log = 0.0
         self._last_pose_frame_id = None
+        self._open_nav_log()
+
+    def _open_nav_log(self) -> None:
+        """One CSV per attempt: how each miss happens (stalled short? off-axis?
+        target dropped?) survives the overnight retry loop."""
+        self._close_nav_log()
+        try:
+            os.makedirs(os.path.join("rl", "data"), exist_ok=True)
+            path = os.path.join(
+                "rl", "data", time.strftime("nav_log_auto_%Y%m%d_%H%M%S.csv")
+            )
+            self._nav_log = open(path, "w", newline="")
+            self._nav_wr = csv.writer(self._nav_log)
+            self._nav_wr.writerow(
+                "t phase s lat vert dist pn pe pd status n_passed".split()
+            )
+            print(f"[vnav] nav log -> {path}", flush=True)
+        except OSError as e:  # telemetry must never ground the pilot
+            print(f"[vnav] nav log unavailable: {e}", flush=True)
+            self._nav_log, self._nav_wr = None, None
+
+    def _close_nav_log(self) -> None:
+        if self._nav_log is not None:
+            try:
+                self._nav_log.close()
+            except OSError:
+                pass
+        self._nav_log, self._nav_wr = None, None
 
     def reset_for_attempt(self) -> None:
         self.guide = VisionGuidance()
@@ -77,6 +111,7 @@ class VisionNavPilot:
         self._pose_source = None
         self._unsafe_ticks = 0
         self._last_pose_frame_id = None
+        self._close_nav_log()
         self.data.pop("gate_target", None)
         self.data.pop("pose", None)
         self.controller.set_control_mode("attitude")
@@ -127,6 +162,27 @@ class VisionNavPilot:
         if now - self._last_status_log >= STATUS_LOG_INTERVAL_S:
             self._last_status_log = now
             print(f"[vnav] {cmd.status}", flush=True)
+        if self._nav_wr is not None and now - self._last_nav_log >= NAV_LOG_INTERVAL_S:
+            self._last_nav_log = now
+            dbg = getattr(self.guide, "debug", None) or {}
+            self._nav_wr.writerow(
+                [
+                    round(now, 2),
+                    dbg.get("phase", ""),
+                    *(
+                        None if x is None else round(float(x), 2)
+                        for x in (
+                            dbg.get("s"),
+                            dbg.get("lat"),
+                            dbg.get("vert"),
+                            dbg.get("dist"),
+                        )
+                    ),
+                    *(round(float(x), 2) for x in pos),
+                    cmd.status,
+                    self.guide.n_passed,
+                ]
+            )
 
         roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
             roll, pitch, z, vz, cmd.tgt_roll, cmd.tgt_pitch, cmd.yaw_err, cmd.tgt_z

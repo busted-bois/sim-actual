@@ -15,6 +15,7 @@ Modes:
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -105,6 +106,22 @@ def main():
     hold_yaw = rpy(s0.quat)[2]
     print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
 
+    # Per-run nav telemetry: guidance phase + axis-frame errors at 10 Hz, so a
+    # miss can be diagnosed after the fact (stalled short? off-axis? target
+    # dropped?) and fixes measured run over run.
+    nav_log, nav_wr, last_nav_t, min_gate_d = None, None, 0.0, None
+    if args.mode == "vision":
+        os.makedirs(os.path.join("rl", "data"), exist_ok=True)
+        nav_path = os.path.join(
+            "rl", "data", time.strftime("nav_log_%Y%m%d_%H%M%S.csv")
+        )
+        nav_log = open(nav_path, "w", newline="")
+        nav_wr = csv.writer(nav_log)
+        nav_wr.writerow(
+            "t phase s lat vert dist pn pe pd vn ve vd status n_passed".split()
+        )
+        print(f"[f2] nav log -> {nav_path}", flush=True)
+
     display.start()  # live vision window (what the drone's camera sees)
 
     t0 = time.time()
@@ -146,6 +163,25 @@ def main():
                 gates = pose_data["gates"]
             cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
             vstatus = cmd.status
+            if nav_wr is not None and time.time() - last_nav_t >= 0.1:
+                last_nav_t = time.time()
+                dbg = getattr(guide, "debug", None) or {}
+                d = dbg.get("dist")
+                if d is not None:
+                    min_gate_d = d if min_gate_d is None else min(min_gate_d, d)
+                nav_wr.writerow(
+                    [
+                        round(time.time() - t0, 2),
+                        dbg.get("phase", ""),
+                        *(
+                            None if x is None else round(float(x), 2)
+                            for x in (dbg.get("s"), dbg.get("lat"), dbg.get("vert"), d)
+                        ),
+                        *(round(float(x), 2) for x in (*p, *v)),
+                        cmd.status,
+                        guide.n_passed,
+                    ]
+                )
             if guide.n_passed >= args.gates:
                 reason = "COURSE COMPLETE (vision)"
                 break
@@ -191,6 +227,13 @@ def main():
 
     sim.send_attitude_rates(0, 0, 0, HOVER_T)
     display.close()
+    if nav_log is not None:
+        nav_log.close()
+        print(
+            f"[f2] nav summary: passed={guide.n_passed if guide else 0} "
+            f"closest_gate={min_gate_d if min_gate_d is not None else 'n/a'}",
+            flush=True,
+        )
     print(
         f"[f2] === DONE {reason} final={np.round(sim.snapshot().pos_ned, 1)} "
         f"active={sim.data.get('active_gate_index')} ===",
