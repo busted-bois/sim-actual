@@ -111,6 +111,7 @@ def main():
     last_log = 0.0
     last_active = -1
     last_shown_tag = None
+    last_pose_frame_id = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
         # Pump the vision window whenever a new (detected) frame is ready, so it
@@ -136,8 +137,13 @@ def main():
                 roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
             )
         elif args.mode == "vision":
+            # Feed detections only once per inference frame so min_hits counts
+            # frames, not 150 Hz loop iterations.
             pose_data = sim.data.get("pose")
-            gates = pose_data["gates"] if pose_data else []
+            gates = []
+            if pose_data and pose_data.get("frame_id") != last_pose_frame_id:
+                last_pose_frame_id = pose_data.get("frame_id")
+                gates = pose_data["gates"]
             cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
             vstatus = cmd.status
             if guide.n_passed >= args.gates:

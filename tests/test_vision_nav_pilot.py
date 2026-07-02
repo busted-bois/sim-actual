@@ -57,13 +57,24 @@ class VisionNavPilotTests(unittest.TestCase):
         # Level at target altitude -> hover thrust.
         self.assertAlmostEqual(thrust, HOVER_T, places=6)
 
-    def test_tick_passes_pose_gates_to_guidance(self):
+    def test_tick_passes_pose_gates_to_guidance_once_per_frame(self):
         gates = [{"conf": 0.9, "pose": {"gate_pos_body": [5.0, 0.0, 0.0]}}]
-        data = {"odometry": dict(_LEVEL_ODO), "pose": {"gates": gates}}
+        data = {
+            "odometry": dict(_LEVEL_ODO),
+            "pose": {"frame_id": 1, "gates": gates},
+        }
         pilot, _ = self._make_pilot(data)
         pilot.guide = MagicMock()
         pilot.guide.update.return_value = Cmd(0.0, 0.0, 0.0, -5.0, "GO")
         pilot.guide.n_passed = 0
+        pilot.tick()
+        self.assertIs(pilot.guide.update.call_args[0][0], gates)
+        # Same inference frame on the next tick: detections must NOT be fed
+        # again (min_hits counts frames, not 250 Hz ticks).
+        pilot.tick()
+        self.assertEqual(pilot.guide.update.call_args[0][0], [])
+        # New frame feeds again.
+        data["pose"] = {"frame_id": 2, "gates": gates}
         pilot.tick()
         self.assertIs(pilot.guide.update.call_args[0][0], gates)
 

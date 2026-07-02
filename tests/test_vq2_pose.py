@@ -3,7 +3,11 @@ import unittest
 
 import numpy as np
 
-from rl.vision_fusion import fuse_gate_bearing_yaw, fuse_gate_target_position
+from rl.vision_fusion import (
+    fuse_gate_bearing_yaw,
+    fuse_gate_target_position,
+    fuse_pnp_gate,
+)
 from rl.ekf import ESKF
 from simulator.transforms import quat_to_yaw
 from simulator.vq2_pose import (
@@ -82,9 +86,7 @@ class VQ2PoseTests(unittest.TestCase):
         }
         gate_world = np.array([10.0, 0.0, -5.0])
         q = np.array([1.0, 0.0, 0.0, 0.0])
-        self.assertTrue(
-            fuse_gate_target_position(ekf, gate_target, gate_world, q)
-        )
+        self.assertTrue(fuse_gate_target_position(ekf, gate_target, gate_world, q))
         self.assertGreater(np.linalg.norm(ekf.p - np.zeros(3)), 0.5)
 
     def test_vision_fusion_uses_cam_to_body_not_body_to_cam(self):
@@ -122,6 +124,59 @@ class VQ2PoseTests(unittest.TestCase):
             self.assertTrue(ok)
         yaw = quat_to_yaw(*ekf.q)
         self.assertAlmostEqual(abs(yaw), math.pi, delta=0.3)
+
+    def test_fuse_pnp_gate_moves_position(self):
+        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3))
+        det = {
+            "conf": 0.9,
+            "pose": {
+                "gate_pos_body": [10.5, 0.0, -0.5],
+                "range_m": 10.5,
+                "reproj_px": 2.0,
+                "yaw_bearing": 0.0,
+            },
+        }
+        gate_world = np.array([10.0, 0.0, -5.0])
+        self.assertTrue(fuse_pnp_gate(ekf, det, gate_world))
+        self.assertGreater(np.linalg.norm(ekf.p), 0.3)
+        self.assertAlmostEqual(ekf.p[1], 0.0, delta=1e-6)
+
+    def test_fuse_pnp_gate_rejects_wrong_gate(self):
+        """A detection implying a drone position far from the prediction (e.g.
+        the NEXT gate in frame, not the active one) must not poison the EKF."""
+        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3))
+        det = {
+            "conf": 0.9,
+            "pose": {
+                "gate_pos_body": [5.0, 0.0, 0.0],
+                "range_m": 5.0,
+                "reproj_px": 2.0,
+                "yaw_bearing": 0.0,
+            },
+        }
+        gate_world = np.array([20.0, 0.0, -5.0])  # implies drone at x=15
+        self.assertFalse(fuse_pnp_gate(ekf, det, gate_world))
+        np.testing.assert_allclose(ekf.p, np.zeros(3))
+
+    def test_pnp_fusion_dedup_skips_repeated_frame(self):
+        est = VQ2PoseEstimator()
+        gate_map = [{"pos": [10.0, 0.0, -5.0]}]
+        est.reset(gate_map)
+        det = {
+            "conf": 0.9,
+            "pose": {
+                "gate_pos_body": [13.0, 0.0, 0.0],
+                "range_m": 13.0,
+                "reproj_px": 2.0,
+                "yaw_bearing": 0.0,
+            },
+        }
+        data = {"pose": {"frame_id": 7, "gates": [det]}, "active_gate_index": 0}
+        est.tick(data, gate_map)
+        p_after_first = est.ekf.p.copy()
+        self.assertFalse(np.allclose(p_after_first, spawn_position_ned(gate_map)))
+        est.tick(data, gate_map)
+        np.testing.assert_allclose(est.ekf.p, p_after_first)
 
     def test_gate_target_dedup_skips_repeated_frame(self):
         """The same camera frame must not be fused as independent

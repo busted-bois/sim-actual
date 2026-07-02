@@ -73,6 +73,47 @@ def _quat_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
     )
 
 
+def fuse_pnp_gate(ekf, det: dict, gate_world_pos, max_pred_err_m: float = 6.0) -> bool:
+    """Fuse a YOLO+PnP gate detection against the active gate's world position.
+
+    gate_pos_body is a full 3D body-frame measurement, so the implied drone
+    position is p = gate_world - R_wb @ gate_body — far stronger than the HSV
+    bearing/range path. Also anchors yaw the same way as fuse_gate_bearing_yaw.
+    Gated on prediction error so a detection of the WRONG gate (two gates in
+    frame) cannot poison the filter. Returns True when a position update ran.
+    """
+    pose = det.get("pose") or {}
+    gate_body = pose.get("gate_pos_body")
+    conf = float(det.get("conf", 0.0) or 0.0)
+    if gate_body is None or conf < 0.5:
+        return False
+    reproj = float(pose.get("reproj_px", 1e9))
+    range_m = float(pose.get("range_m", 0.0))
+    if reproj > 10.0 or not (0.5 < range_m < 40.0):
+        return False
+
+    g = np.asarray(gate_world_pos, float)
+    R_wb = spec.quat_to_R(np.asarray(ekf.q, float))
+    p_meas = g - R_wb @ np.asarray(gate_body, float)
+    p_prior = ekf.p.copy()
+    if float(np.linalg.norm(p_meas - p_prior)) > max_pred_err_m:
+        return False
+    sigma = 1.2 - min(conf, 0.9)  # 0.3–0.7 m by detection confidence
+    ekf.update_position(p_meas, sigma=sigma)
+
+    # Yaw anchor: world bearing to the gate vs the body-frame PnP bearing.
+    dx, dy = g[0] - p_prior[0], g[1] - p_prior[1]
+    if math.hypot(dx, dy) >= 0.5:
+        yaw_bearing = float(
+            pose.get("yaw_bearing", math.atan2(gate_body[1], gate_body[0]))
+        )
+        yaw_meas = _wrap(math.atan2(dy, dx) - yaw_bearing)
+        roll, pitch, _ = _rpy_from_quat(ekf.q)
+        q_meas = _quat_from_rpy(roll, pitch, yaw_meas)
+        ekf.update_attitude(q_meas, sigma=YAW_SIGMA_RAD * (1.1 - min(conf, 1.0)))
+    return True
+
+
 def fuse_gate_bearing_yaw(
     ekf,
     gate_target: dict,

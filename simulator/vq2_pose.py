@@ -7,7 +7,11 @@ import math
 import numpy as np
 
 from rl.ekf import ESKF
-from rl.vision_fusion import fuse_gate_bearing_yaw, fuse_gate_target_position
+from rl.vision_fusion import (
+    fuse_gate_bearing_yaw,
+    fuse_gate_target_position,
+    fuse_pnp_gate,
+)
 
 SPAWN_BEFORE_GATE_M = 15.0
 SPAWN_ABOVE_GATE_M = 1.0
@@ -58,6 +62,7 @@ class VQ2PoseEstimator:
         self._pressure_alt_ref: float | None = None
         self._flipz = False
         self._last_gate_frame_id = None
+        self._last_pnp_frame_id = None
 
     def reset(
         self, gate_map: list, hold_z: float | None = None, flipz: bool = False
@@ -70,6 +75,7 @@ class VQ2PoseEstimator:
         self._last_imu_time_us = None
         self._pressure_alt_ref = None
         self._last_gate_frame_id = None
+        self._last_pnp_frame_id = None
 
     def tick(self, data: dict, gate_map: list) -> dict | None:
         if self.ekf is None:
@@ -97,6 +103,24 @@ class VQ2PoseEstimator:
                 fuse_gate_bearing_yaw(self.ekf, gate_target, drone_pos, gate_world)
         if frame_id is not None:
             self._last_gate_frame_id = frame_id
+
+        # YOLO+PnP detections: full 3D gate-in-body measurement, much stronger
+        # than the HSV bearing/range above. Fuse the highest-confidence gate in
+        # each new inference frame against the active gate's world position.
+        pnp = data.get("pose") or {}
+        pnp_frame_id = pnp.get("frame_id")
+        if pnp_frame_id is not None and pnp_frame_id != self._last_pnp_frame_id:
+            self._last_pnp_frame_id = pnp_frame_id
+            active = int(data.get("active_gate_index", 0) or 0)
+            if gate_map and 0 <= active < len(gate_map):
+                pos = gate_map[active]["pos"]
+                gate_world = np.array(
+                    [pos[0], pos[1], gate_z_ned(pos, self._flipz)], dtype=float
+                )
+                dets = [g for g in pnp.get("gates", []) if g.get("pose")]
+                if dets:
+                    best = max(dets, key=lambda g: float(g.get("conf", 0.0) or 0.0))
+                    fuse_pnp_gate(self.ekf, best, gate_world)
 
         st = self.ekf.state()
         p, v, q = st["p"], st["v"], st["q"]

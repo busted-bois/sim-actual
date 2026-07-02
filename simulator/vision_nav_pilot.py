@@ -41,6 +41,7 @@ class VisionNavPilot:
         self._pose_source: str | None = None
         self._unsafe_ticks = 0
         self._last_status_log = 0.0
+        self._last_pose_frame_id = None
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_T)
         print("[vnav] vision navigator pilot ready (YOLO+PnP gates)", flush=True)
@@ -66,6 +67,7 @@ class VisionNavPilot:
         self._pose_source = None
         self._unsafe_ticks = 0
         self._last_status_log = 0.0
+        self._last_pose_frame_id = None
 
     def reset_for_attempt(self) -> None:
         self.guide = VisionGuidance()
@@ -74,6 +76,7 @@ class VisionNavPilot:
         self._pose = VQ2PoseEstimator()
         self._pose_source = None
         self._unsafe_ticks = 0
+        self._last_pose_frame_id = None
         self.data.pop("gate_target", None)
         self.data.pop("pose", None)
         self.controller.set_control_mode("attitude")
@@ -110,8 +113,14 @@ class VisionNavPilot:
         if self.hold_z is None:
             self.hold_z = z
 
+        # Feed detections only once per inference frame: the 250 Hz loop would
+        # otherwise re-count the same frame's gates every tick, confirming a
+        # map entry (min_hits) off a single -- possibly corrupt -- frame.
         pose_data = self.data.get("pose")
-        gates = pose_data["gates"] if pose_data else []
+        gates = []
+        if pose_data and pose_data.get("frame_id") != self._last_pose_frame_id:
+            self._last_pose_frame_id = pose_data.get("frame_id")
+            gates = pose_data["gates"]
         cmd = self.guide.update(gates, pos, vel, quat, yaw, time.monotonic())
 
         now = time.monotonic()

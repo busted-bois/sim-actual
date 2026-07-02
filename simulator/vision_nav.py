@@ -5,7 +5,7 @@ into a WORLD NED gate position (drone_pos + R_wb @ gate_body). Confirmed gates
 (seen >= min_hits times, deduped) accumulate into a persistent map, so the drone
 locks the next gate the instant one exists -- even after it leaves the FOV.
 
-Control (yaw HELD; translate with pitch+roll). Driven by the gate's BODY-frame
+Control (slow yaw-track toward the target; translate with pitch+roll). Driven by the gate's BODY-frame
 offset (reliable position) and its time-derivative -- NOT odometry velocity
 (its body components are unreliable: under-reads forward -> speed runaway; as a
 damping term it cancelled the lateral correction).
@@ -77,6 +77,11 @@ class VisionGuidance:
         min_acq_fwd=1.5,  # only lock a mapped gate at least this far ahead (m)
         cone_half=0.7,  # ...and within this bearing (rad) -- else yaw-scan to it
         scan_yaw=0.35,  # yaw error injected while scanning for the next gate
+        max_brake=0.08,  # backward-tilt cap when braking (rad) -- was max_tilt:
+        #                  closing-rate spikes then pitched the drone into
+        #                  full-reverse flight
+        yaw_track_clip=0.5,  # yaw toward the target (rad cap) so the gate stays
+        #                      in the camera FOV all the way through; 0 = hold
     ):
         self.p = dict(
             max_speed=max_speed,
@@ -103,6 +108,8 @@ class VisionGuidance:
             min_acq_fwd=min_acq_fwd,
             cone_half=cone_half,
             scan_yaw=scan_yaw,
+            max_brake=max_brake,
+            yaw_track_clip=yaw_track_clip,
         )
         self.target = None  # world NED of the gate being flown
         self.gates_map = []  # [{"p": world NED, "n": hits}, ...]
@@ -233,7 +240,7 @@ class VisionGuidance:
         # --- FORWARD: closing-speed regulation; LATERAL: PD on offset -------
         v_des = float(np.clip(dh, p["thru_speed"], p["max_speed"]))
         lean = float(
-            np.clip(p["k_fwd"] * (v_des - closing), -p["max_tilt"], p["max_lean"])
+            np.clip(p["k_fwd"] * (v_des - closing), -p["max_brake"], p["max_lean"])
         )
         tgt_pitch = -lean
         tgt_roll = float(
@@ -243,10 +250,20 @@ class VisionGuidance:
                 p["max_tilt"],
             )
         )
+        # Yaw toward the target (body-frame bearing, same convention as fly2's
+        # course yaw_err) so the gate stays in the FOV and keeps refining --
+        # with yaw held, any course turn slid the gate out of frame mid-approach.
+        yaw_err = float(
+            np.clip(
+                np.arctan2(lat, max(fwd_to_t, 0.5)),
+                -p["yaw_track_clip"],
+                p["yaw_track_clip"],
+            )
+        )
         return Cmd(
             tgt_roll,
             tgt_pitch,
-            0.0,
+            yaw_err,
             self.target[2] + p["zoff"],
             f"GO d={dh:.1f} fwd={fwd_to_t:+.1f} lat={lat:+.1f} c={closing:+.1f} passed={self.n_passed} map={len(self.gates_map)}",
         )
