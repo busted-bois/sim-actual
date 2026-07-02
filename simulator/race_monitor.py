@@ -3,6 +3,7 @@ import os
 from simulator.preflight import race_finished
 
 GATE1_TIMEOUT_S = float(os.environ.get("GATE1_TIMEOUT_S", "15"))
+GATE1_HARD_TIMEOUT_S = float(os.environ.get("GATE1_HARD_TIMEOUT_S", "60"))
 GATE1_MIN_ELAPSED_S = float(os.environ.get("GATE1_MIN_ELAPSED_S", "8"))
 GATE_PROGRESS_TIMEOUT_S = float(os.environ.get("GATE_PROGRESS_TIMEOUT_S", "15"))
 SIM_RESET_WAIT_S = float(os.environ.get("SIM_RESET_WAIT_S", "5"))
@@ -80,6 +81,10 @@ def gate1_fail(data, elapsed_s, pilot_gates_passed):
         return False
     if elapsed_s <= 0:
         return False
+    # Hard cap: a pilot-counted pass the sim never registered must not block
+    # the retry loop forever.
+    if elapsed_s > GATE1_HARD_TIMEOUT_S:
+        return True
     if pilot_gates_passed > 0:
         return False
     if elapsed_s > GATE1_TIMEOUT_S:

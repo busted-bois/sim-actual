@@ -95,7 +95,9 @@ def resolve_gate_map(data: dict) -> list:
         return []
 
 
-def rates_from_attitude_targets(roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z):
+def rates_from_attitude_targets(
+    roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
+):
     """Attitude-angle targets -> rate commands with measured sign conventions."""
     roll_cmd = float(
         np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)

@@ -6,32 +6,33 @@ Continuous overnight retry loop via `make auto`. Normal `make sim` is unchanged.
 
 | Command | Behavior |
 |---------|----------|
-| `make auto` | VQ2 R2 overnight automation — main `fly2` course pilot, continuous in-session retry |
+| `make auto` | VQ2 R2 overnight automation — vision navigator (YOLO+PnP), continuous in-session retry |
 | `make sim` | Standard sim — vision pilot, single run, no auto-retry |
-| `make capture-gates` | One-time: save `rl/data/gate_map.json` from a VQ2 race start (required for `make auto`) |
+| `make fly-vision` | Manual single run of the same vision navigator via `rl.fly2 --mode vision` |
+| `make capture-gates` | Optional: save `rl/data/gate_map.json` (only used to seed the EKF pose fallback) |
 
 ## Flight controller
 
-`make auto` uses the **main-branch `fly2` course controller** (`rl/fly2_course.py`) for **AI-GP VIRTUAL QUALIFIER R2** (sim v1.0.3379+):
+`make auto` uses the **vision navigator** (`simulator/vision_nav_pilot.py` wrapping
+`simulator/vision_nav.py`) for **AI-GP VIRTUAL QUALIFIER R2** (sim v1.0.3379+):
 
 - **TRAINING** — recommended for overnight practice runs
 - **SUBMISSION** — same map, same client steps
 
-VQ2 blocks sim odometry and live gate-map poses. Automation uses:
+The navigator flies purely from detections — no gate map, no hardcoded coordinates:
 
-- Captured **`rl/data/gate_map.json`** (from `make capture-gates`)
-- **ESKF pose** — IMU predict + vision bearing/range fusion (`simulator/vq2_pose.py`)
-- FPV vision (UDP :5600) for gate detection and pose updates
-- `HIGHRES_IMU` (`pressure_alt` for altitude)
-- `race_status` (`active_gate_index`, GO timing)
+- **YOLO11n-pose gate detector** (`simulator/gate_pose.py`, weights `simulator/models/gate_pose.pt`) on its own thread
+- **PnP gate pose** (`simulator/gate_pnp.py`) — body-frame gate position per detection
+- **Persistent gate map** built in-flight (`VisionGuidance`): confirmed gates (3+ hits, deduped), closing-speed-regulated approach (max 1.5 m/s), PD lateral control, yaw-scan when no gate in view
+- **Pose**: sim odometry when the session provides it, else the ESKF estimate (`simulator/vq2_pose.py`); the active source is printed as `[vnav] pose source: ...`
+- `race_status` (`active_gate_index`, GO timing) for retry outcomes
 
-`make sim` still uses the vision `Pilot`; only `make auto` swaps to fly2.
+`make sim` still uses the vision `Pilot`; only `make auto` swaps to the navigator.
 
 ## Overnight workflow
 
 1. Launch **FlightSim v1.0.3379** and enter **AI-GP VIRTUAL QUALIFIER R2 — TRAINING** (or SUBMISSION).
-2. Run **`make capture-gates`** once if `rl/data/gate_map.json` is missing — click **Race** while it listens.
-3. Run **`make auto`** — should reach `[AUTO] overnight automation on` within seconds (no 30s odometry wait).
+2. Run **`make auto`** — should reach `[AUTO] overnight automation on` within seconds (no 30s odometry wait).
 4. When prompted on attempt 1, click **Race** in FlightSim.
 5. Automation flies, retries on gate timeout or course complete, and loops until you stop it.
 6. After each run the client sends MAVLink reset and waits for a fresh countdown in the same session.
@@ -51,9 +52,13 @@ You should see `[AUTO] cancel requested (Ctrl+C) — press Ctrl+C again to exit`
 |--------|---------|
 | `VQ2 mode — skipping odometry wait` | Startup using IMU/vision, not odometry |
 | `Connect OK: imu=... vision=...` | MAVLink sensors ready |
-| `[AUTO] overnight automation on — main fly2 course pilot` | Continuous auto-flight active |
-| `[fly2] main course pilot ready` | Fly2CoursePilot armed |
-| `[fly2] ACTIVE GATE -> N` | Sim advanced target gate |
+| `[AUTO] overnight automation on — vision navigator (YOLO+PnP)` | Continuous auto-flight active |
+| `[vnav] vision navigator pilot ready` | VisionNavPilot armed |
+| `[gate_pose] YOLO loaded on cpu/cuda` | Gate detector model up |
+| `[vnav] pose source: odometry` / `EKF` | Which pose estimate is flying |
+| `[vnav] GO d=… passed=N map=M` | Navigator chasing a confirmed gate |
+| `[vnav] SCAN n=… map=…` | No confirmed gate ahead — yaw-scanning |
+| `[vnav] PASSED gN` | Navigator counted a gate pass |
 | `[AUTO] cancel requested (Ctrl+C)` | User cancelled |
 | `[AUTO] cancelled — resuming normal sim mode` | Automation stopped; normal sim continues |
 | `Preflight OK: vision streaming` | Inside SUBMISSION/TRAINING session |
@@ -94,6 +99,7 @@ Stdout still prints `[RACE] OUTCOME=success attempt=N lap=Xs best=Ys`.
 | `AUTO_FLIGHT` | unset | Set to `1` by `make auto` |
 | `AUTO_FLIGHT_DEBUG` | unset | Vision miss logs |
 | `GATE1_TIMEOUT_S` | `15` (`make auto` sets `30`) | Max seconds after GO to pass gate 1 |
+| `GATE1_HARD_TIMEOUT_S` | `60` | Hard gate-1 retry cap even if the pilot counted a pass the sim didn't |
 | `GATE_PROGRESS_TIMEOUT_S` | `15` (`make auto` sets `25`) | Max seconds without gate advance after gate 1 |
 | `GATE1_WATCH_INTERVAL_S` | `5` | Seconds between progress watch logs |
 | `SIM_RESET_WAIT_S` | `5` | Pause after MAVLink sim reset |

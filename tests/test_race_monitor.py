@@ -100,6 +100,11 @@ class RaceMonitorTests(unittest.TestCase):
         )
         self.assertFalse(gate1_fail(data, elapsed_s=20.0, pilot_gates_passed=1))
 
+    def test_gate1_hard_timeout_overrides_pilot_passed(self):
+        data = {"active_gate_index": 0}
+        self.assertFalse(gate1_fail(data, elapsed_s=59.0, pilot_gates_passed=1))
+        self.assertTrue(gate1_fail(data, elapsed_s=61.0, pilot_gates_passed=1))
+
     def test_signed_dist_gate0(self):
         data = _gate0_data(odometry={"x": 3.0, "y": 0.0, "z": 0.0})
         signed = signed_dist_gate0(data)

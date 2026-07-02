@@ -138,11 +138,11 @@ class Controller:
         from simulator.auto_flight import auto_flight_enabled
 
         if auto_flight_enabled():
-            from rl.fly2_course import Fly2Config, Fly2CoursePilot
+            from simulator.vision_nav_pilot import VisionNavPilot
 
-            # Slower than main's 2.8 m/s default: EKF pose is noisier than
-            # live odometry, so prioritize gate passage over lap time.
-            return Fly2CoursePilot(self, self.data, Fly2Config(speed=1.5))
+            # Vision-only navigator (YOLO+PnP gate detections); its default
+            # 1.5 m/s max closing speed prioritizes gate passage over lap time.
+            return VisionNavPilot(self, self.data)
         from simulator.pilot import Pilot
 
         return Pilot(self, self.data)

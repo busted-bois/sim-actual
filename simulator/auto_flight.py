@@ -224,7 +224,7 @@ def run_auto_flight_loop(controller, pilot, shared_data) -> tuple[str, bool]:
 
 def _run_auto_flight_loop(controller, pilot, shared_data, cancel) -> tuple[str, bool]:
     print(
-        "[AUTO] overnight automation on — main fly2 course pilot; "
+        "[AUTO] overnight automation on — vision navigator (YOLO+PnP); "
         "Ctrl+C stops (preflight, flight, or retry)",
         flush=True,
     )
