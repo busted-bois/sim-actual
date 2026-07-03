@@ -27,19 +27,23 @@ from rl import spec
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
 from simulator.transforms import quat_to_yaw
-from simulator.vision_nav import VisionGuidance
+from simulator.vision_nav import VisionGuidance, VisualServo
 
 HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
 K_ATT = 0.6  # attitude-angle P -> rate command
 K_YAW = 0.4
-# Measured command-sign conventions (pitch normal; roll + yaw inverted).
+# Measured command-sign conventions vs ODOMETRY attitude (pitch normal;
+# roll + yaw inverted). Tuned in Training mode.
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
+# Vs the GYRO-integrated estimator attitude the plant is inverted on ALL
+# axes (measured live 2026-07-01: cmd +0.2 -> gyro ~-0.48 on each axis).
+EST_SIGNS = (-1.0, -1.0, -1.0)
 RATE_CLIP = 0.30
 YAW_CLIP = 0.5
-HZ = 150.0
+HZ = 90.0  # spec VADR-TS-003 4.4: command rate must stay < 100 Hz
 
 
 def rpy(q):
@@ -84,6 +88,12 @@ def main():
         action="store_true",
         help="send a sim reset before launching (else rely on race restart)",
     )
+    ap.add_argument(
+        "--est",
+        action="store_true",
+        help="fly on the IMU+vision state estimator even if odometry is present "
+        "(VQ2 dress rehearsal; odometry then only feeds the shadow CSV)",
+    )
     args = ap.parse_args()
 
     # Vision mode flies purely from detected gates -- no hardcoded map.
@@ -92,14 +102,17 @@ def main():
     if args.mode == "course":
         gate_map = json.load(open(GATE_MAP_PATH))["gates"]
         n = len(gate_map)
-    guide = VisionGuidance() if args.mode == "vision" else None
-    sim = SimInterface()
+    guide = None  # constructed after est_mode is known (speed differs)
+    sim = SimInterface(use_estimator=args.est)
     if not sim.wait_for_telemetry():
         print("[f2] no telemetry", flush=True)
         os._exit(1)
     if args.reset:
         sim.reset_sim()
         time.sleep(3)
+        # The teleport invalidates the gyro-integrated attitude: re-init.
+        sim.estimator.reset()
+        time.sleep(1.5)
     # Sync launch to the countdown: wait for the user to hit ENTER at "go".
     if args.wait and args.mode in ("course", "vision"):
         try:
@@ -111,7 +124,24 @@ def main():
     s0 = sim.snapshot()
     hold_z = s0.pos_ned[2]
     hold_yaw = rpy(s0.quat)[2]
-    print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
+    # Estimator-driven flight needs the gyro-frame command signs.
+    est_mode = args.est or sim.data.get("odometry") is None
+    s_roll, s_pitch, s_yaw = (
+        EST_SIGNS if est_mode else (SIGN_ROLL, SIGN_PITCH, SIGN_YAW)
+    )
+    if args.mode == "vision":
+        # Estimator pose is coarser than odometry: approach slower so the
+        # aim tolerance at the opening is larger.
+        # Estimator regime: body-frame visual servoing -- world-position
+        # drift cannot create phantom targets (measured failure of the
+        # map-based guidance without odometry). Training/odometry keeps the
+        # original world-map guidance.
+        guide = VisualServo() if est_mode else VisionGuidance()
+    print(
+        f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}"
+        f" est_mode={est_mode}",
+        flush=True,
+    )
 
     display.start()  # live vision window (what the drone's camera sees)
 
@@ -119,6 +149,10 @@ def main():
     last_log = 0.0
     last_active = -1
     last_shown_tag = None
+    last_pose_fid = None
+    last_col = sim.data.get("last_collision")  # ignore stale pre-run hits
+    last_col_t = -1e9
+    scan_since = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
         # Pump the vision window whenever a new (detected) frame is ready, so it
@@ -140,10 +174,29 @@ def main():
         vstatus = ""
         if args.mode == "hover":
             tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
+        elif args.mode == "vision" and time.time() - t0 < 1.2:
+            # TAKEOFF: the drone spawns nose-down on a ramp -- level out and
+            # climb clear of it before chasing gates (guidance during the
+            # ramp scrape pollutes the map and flips the drone).
+            tgt_roll, tgt_pitch, yaw_err, tgt_z = 0.0, 0.0, 0.0, hold_z - 2.0
+            vstatus = "TAKEOFF"
         elif args.mode == "vision":
+            # YOLO runs at 3-10 Hz; the 150 Hz loop must only ingest each
+            # pose frame ONCE -- re-feeding a stale detection against the
+            # moving estimate corrupts both the map and the landmark fixes.
             pose_data = sim.data.get("pose")
-            gates = pose_data["gates"] if pose_data else []
+            fresh = pose_data is not None and pose_data["frame_id"] != last_pose_fid
+            if fresh:
+                last_pose_fid = pose_data["frame_id"]
+            gates = pose_data["gates"] if fresh else []
             cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
+            # Re-observed confirmed gates are landmarks: p = map - R_wb @ body.
+            # Only when the estimator drives the pose -- else the map lives in
+            # the odometry frame and would corrupt the boot-anchored filter.
+            if est_mode and fresh:
+                R_wb = spec.quat_to_R(snap.quat)
+                for map_p, gate_body in guide.last_matches:
+                    sim.estimator.update_landmark(map_p - R_wb @ gate_body)
             tgt_roll, tgt_pitch, yaw_err, tgt_z = (
                 cmd.tgt_roll,
                 cmd.tgt_pitch,
@@ -151,6 +204,23 @@ def main():
                 cmd.tgt_z,
             )
             vstatus = cmd.status
+            # A collision kicks the real state; let the estimator re-anchor.
+            # Scrapes emit collisions at 60 Hz -- treat them as ONE episode
+            # (repeated covariance inflation would blow the filter open).
+            col = sim.data.get("last_collision")
+            if col is not None and col != last_col:
+                last_col = col
+                if time.time() - last_col_t > 1.0:
+                    last_col_t = time.time()
+                    if est_mode:
+                        sim.estimator.notify_collision()
+                    print(f"[f2] [{time.time() - t0:4.1f}s] COLLISION", flush=True)
+            # Track how long we've been scanning with no confirmed gate.
+            if cmd.status.startswith("SCAN"):
+                if scan_since is None:
+                    scan_since = time.time()
+            else:
+                scan_since = None
             if guide.n_passed >= args.gates:
                 reason = "COURSE COMPLETE (vision)"
                 break
@@ -185,13 +255,28 @@ def main():
 
         # Attitude-angle P -> rate commands, with measured sign conventions.
         roll_cmd = float(
-            np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+            np.clip(s_roll * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
         )
         pitch_cmd = float(
-            np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+            np.clip(s_pitch * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
         )
-        yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
-        thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
+        yaw_cmd = float(np.clip(s_yaw * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+        # Vision mode: bound vertical authority hard. A collision-opened
+        # covariance lets one landmark yank z metres from target; unclamped
+        # PD then saturates thrust (0.5 = ~18 m/s^2, measured: rockets to the
+        # ceiling). Clamp the error AND the thrust range (~+/-3 m/s^2 max).
+        if args.mode == "vision":
+            z_err = float(np.clip(z - tgt_z, -3.0, 3.0))
+            vz_c = float(np.clip(vz, -4.0, 4.0))
+            thrust = float(np.clip(HOVER_T + KP_Z * z_err + KD_Z * vz_c, 0.20, 0.36))
+        else:
+            thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
+        # Lost (scanning >1.5s with no confirmed gate): the z estimate can't
+        # be trusted, so bleed REAL altitude gently -- gates live near the
+        # floor; this brings a ceiling-wanderer back into vision range.
+        if args.mode == "vision" and scan_since is not None:
+            if time.time() - scan_since > 1.5:
+                thrust = HOVER_T - 0.012
         sim.send_attitude_rates(roll_cmd, pitch_cmd, yaw_cmd, thrust)
 
         # Safety.
@@ -199,7 +284,10 @@ def main():
         if gb_z < 0.0:
             reason = "ABORT flipped"
             break
-        if z < hold_z - 30 or z > hold_z + 30:
+        # In est mode z is an ESTIMATE with no baro backup -- a tight bound
+        # aborts recoverable runs on estimator drift alone.
+        z_abort = 60 if est_mode else 30
+        if z < hold_z - z_abort or z > hold_z + z_abort:
             reason = "ABORT altitude"
             break
 
