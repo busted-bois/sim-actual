@@ -135,14 +135,23 @@ class Controller:
         self._disarm_ticks = 0
 
     def _make_pilot(self):
+        import os
+
         from simulator.auto_flight import auto_flight_enabled
 
         if auto_flight_enabled():
-            from simulator.vision_nav_pilot import VisionNavPilot
+            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
+            # pixel servo: it needs no position estimate at all -- measured
+            # 2026-07-02, the VQ2 EKF pose was non-finite from the first tick
+            # of every attempt, so the map-based navigator never left SCAN.
+            # AUTO_PILOT=vnav restores the world-map vision navigator.
+            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
+                from simulator.vision_nav_pilot import VisionNavPilot
 
-            # Vision-only navigator (YOLO+PnP gate detections); its default
-            # 1.5 m/s max closing speed prioritizes gate passage over lap time.
-            return VisionNavPilot(self, self.data)
+                return VisionNavPilot(self, self.data)
+            from simulator.ibvs_pilot import IBVSPilot
+
+            return IBVSPilot(self, self.data)
         from simulator.pilot import Pilot
 
         return Pilot(self, self.data)

@@ -70,8 +70,18 @@ class AutoFlightTests(unittest.TestCase):
         }
         self.assertTrue(wait_for_fresh_race_start_vq2(data, timeout_s=0.5))
 
-    def test_controller_uses_vision_nav_pilot_when_auto(self):
-        with patch.dict("os.environ", {"AUTO_FLIGHT": "1"}):
+    def test_controller_uses_ibvs_pilot_when_auto(self):
+        with patch.dict("os.environ", {"AUTO_FLIGHT": "1"}, clear=False):
+            from simulator.controller import Controller
+            from simulator.ibvs_pilot import IBVSPilot
+
+            ctrl = Controller(MagicMock(), {}, 0)
+            self.assertIsInstance(ctrl.pilot, IBVSPilot)
+
+    def test_controller_uses_vision_nav_pilot_when_requested(self):
+        with patch.dict(
+            "os.environ", {"AUTO_FLIGHT": "1", "AUTO_PILOT": "vnav"}, clear=False
+        ):
             from simulator.controller import Controller
             from simulator.vision_nav_pilot import VisionNavPilot
 
@@ -121,9 +131,7 @@ class AutoFlightTests(unittest.TestCase):
         }
 
         with patch("simulator.auto_flight.course_complete", return_value=True):
-            outcome, was_flying = run_auto_flight_loop(
-                controller, pilot, shared_data
-            )
+            outcome, was_flying = run_auto_flight_loop(controller, pilot, shared_data)
 
         mock_retry.assert_called_once()
         self.assertEqual(mock_retry.call_args[0][0], "success")
