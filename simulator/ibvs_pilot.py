@@ -33,13 +33,11 @@ import time
 import numpy as np
 
 from rl.fly2_course import (
+    EST_SIGNS,
     HOVER_T,
     K_ATT,
     K_YAW,
     RATE_CLIP,
-    SIGN_PITCH,
-    SIGN_ROLL,
-    SIGN_YAW,
     YAW_CLIP,
 )
 
@@ -66,10 +64,13 @@ class _TiltFilter:
         self.alpha = alpha
         self.roll = 0.0
         self.pitch = 0.0
+        self.roll_acc = 0.0  # last accel-only tilt, logged so a single run
+        self.pitch_acc = 0.0  # shows whether gyro and accel conventions agree
         self._last_us = None
 
     def reset(self):
         self.roll, self.pitch, self._last_us = 0.0, 0.0, None
+        self.roll_acc, self.pitch_acc = 0.0, 0.0
 
     def update(self, imu: dict) -> None:
         vals = [imu.get(k) for k in ("ax", "ay", "az", "gx", "gy", "gz", "time_us")]
@@ -84,11 +85,11 @@ class _TiltFilter:
         self._last_us = t_us
         f = math.sqrt(ax * ax + ay * ay + az * az)
         if 8.0 < f < 12.0:  # not accelerating hard: accel points along gravity
-            roll_acc = math.atan2(-ay, -az)
-            pitch_acc = math.atan2(ax, math.hypot(ay, az))
+            self.roll_acc = math.atan2(-ay, -az)
+            self.pitch_acc = math.atan2(ax, math.hypot(ay, az))
             a = self.alpha
-            self.roll = (1 - a) * self.roll + a * roll_acc
-            self.pitch = (1 - a) * self.pitch + a * pitch_acc
+            self.roll = (1 - a) * self.roll + a * self.roll_acc
+            self.pitch = (1 - a) * self.pitch + a * self.pitch_acc
 
 
 class IBVSPilot:
@@ -184,7 +185,9 @@ class IBVSPilot:
             )
             self._nav_log = open(path, "w", newline="")
             self._nav_wr = csv.writer(self._nav_log)
-            self._nav_wr.writerow("t phase ex ey spread roll pitch n_passed".split())
+            self._nav_wr.writerow(
+                "t phase ex ey spread roll pitch roll_acc pitch_acc n_passed".split()
+            )
             print(f"[ibvs] nav log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
             print(f"[ibvs] nav log unavailable: {e}", flush=True)
@@ -376,13 +379,19 @@ class IBVSPilot:
                 self._pa_hold = self._pa_hold if self._pa_hold is not None else pa
 
         thrust = self._thrust(pa, pixel_ey)
+        # EST signs: this pilot's attitude is gyro-integrated, and against
+        # that estimate the plant responds inverted on ALL axes. The first
+        # live IBVS runs used the odometry signs (pitch +1) -- positive
+        # feedback on pitch, and the drone flipped (nav_log_ibvs 20:24/20:25:
+        # roll wound up to 9.7 rad, final pitch -86 deg).
+        s_roll, s_pitch, s_yaw = EST_SIGNS
         roll_cmd = float(
-            np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+            np.clip(s_roll * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
         )
         pitch_cmd = float(
-            np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+            np.clip(s_pitch * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
         )
-        yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+        yaw_cmd = float(np.clip(s_yaw * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
 
         # Safety: flipped by the complementary attitude -> cut to hover.
         unsafe = math.cos(roll) * math.cos(pitch) < 0.1
@@ -413,6 +422,8 @@ class IBVSPilot:
                     round(self._spread, 1),
                     round(roll, 3),
                     round(pitch, 3),
+                    round(self.tilt.roll_acc, 3),
+                    round(self.tilt.pitch_acc, 3),
                     self.n_passed,
                 ]
             )

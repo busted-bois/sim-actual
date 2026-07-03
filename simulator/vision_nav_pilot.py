@@ -17,6 +17,7 @@ import numpy as np
 
 from rl import spec
 from rl.fly2_course import (
+    EST_SIGNS,
     HOVER_T,
     detect_climb_course,
     rates_from_attitude_targets,
@@ -48,6 +49,7 @@ class VisionNavPilot:
         self._nav_log = None
         self._nav_wr = None
         self._last_nav_log = 0.0
+        self._warned_bad_odo = False
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_T)
         print("[vnav] vision navigator pilot ready (YOLO+PnP gates)", flush=True)
@@ -74,6 +76,7 @@ class VisionNavPilot:
         self._unsafe_ticks = 0
         self._last_status_log = 0.0
         self._last_pose_frame_id = None
+        self._warned_bad_odo = False
         self._open_nav_log()
 
     def _open_nav_log(self) -> None:
@@ -122,11 +125,30 @@ class VisionNavPilot:
             self._pose_source = source
             print(f"[vnav] pose source: {source}", flush=True)
 
+    @staticmethod
+    def _odo_finite(odo: dict) -> bool:
+        try:
+            return all(
+                np.isfinite(float(odo.get(k, 0.0)))
+                for k in ("x", "y", "z", "vx", "vy", "vz", "qw", "qx", "qy", "qz")
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _current_odometry(self) -> dict | None:
         odo = self.data.get("odometry")
         if odo is not None:
-            self._log_pose_source("odometry")
-            return odo
+            # Under the VQ2 block the sim may still emit ODOMETRY frames
+            # filled with NaN (spec 9.3 lists it as blocked) -- feeding those
+            # to guidance produced 100% SCAN attempts. Treat as absent.
+            if self._odo_finite(odo):
+                self._log_pose_source("odometry")
+                return odo
+            if not self._warned_bad_odo:
+                self._warned_bad_odo = True
+                print(
+                    "[vnav] odometry non-finite (VQ2 block?) -- using EKF", flush=True
+                )
         est = self._pose.tick(self.data, self.gate_map)
         if est is not None:
             self._log_pose_source("EKF")
@@ -184,8 +206,21 @@ class VisionNavPilot:
                 ]
             )
 
+        # Attitude-source-dependent sign convention: the EKF attitude is
+        # gyro-integrated, and against it the plant is inverted on ALL axes
+        # (EST_SIGNS). Flying EKF attitude with odometry signs makes the pitch
+        # loop positive feedback -- the flip observed in live VQ2 attempts.
+        signs = EST_SIGNS if self._pose_source != "odometry" else None
         roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
-            roll, pitch, z, vz, cmd.tgt_roll, cmd.tgt_pitch, cmd.yaw_err, cmd.tgt_z
+            roll,
+            pitch,
+            z,
+            vz,
+            cmd.tgt_roll,
+            cmd.tgt_pitch,
+            cmd.yaw_err,
+            cmd.tgt_z,
+            signs=signs,
         )
 
         gb_z = (spec.quat_to_R(quat).T @ np.array([0.0, 0.0, 1.0]))[2]

@@ -115,7 +115,9 @@ def _send_velocity_ned(
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
-CONTROL_HZ = 250
+# Spec VADR-TS-003 4.4: command rate MUST stay below 100 Hz (was 250 --
+# out-of-spec commands may be dropped or applied erratically by the sim).
+CONTROL_HZ = 90
 
 
 class Controller:
@@ -140,18 +142,17 @@ class Controller:
         from simulator.auto_flight import auto_flight_enabled
 
         if auto_flight_enabled():
-            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
-            # pixel servo: it needs no position estimate at all -- measured
-            # 2026-07-02, the VQ2 EKF pose was non-finite from the first tick
-            # of every attempt, so the map-based navigator never left SCAN.
-            # AUTO_PILOT=vnav restores the world-map vision navigator.
-            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
-                from simulator.vision_nav_pilot import VisionNavPilot
+            # AUTO_PILOT selects the auto-flight brain. Default is the
+            # world-map vision navigator, now with a NaN-proofed EKF pose and
+            # EST-sign attitude control (ladder option 2). AUTO_PILOT=ibvs
+            # selects the pixel-servo pilot (option 1).
+            if os.environ.get("AUTO_PILOT", "vnav").strip().lower() == "ibvs":
+                from simulator.ibvs_pilot import IBVSPilot
 
-                return VisionNavPilot(self, self.data)
-            from simulator.ibvs_pilot import IBVSPilot
+                return IBVSPilot(self, self.data)
+            from simulator.vision_nav_pilot import VisionNavPilot
 
-            return IBVSPilot(self, self.data)
+            return VisionNavPilot(self, self.data)
         from simulator.pilot import Pilot
 
         return Pilot(self, self.data)

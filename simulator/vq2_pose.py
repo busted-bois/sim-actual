@@ -34,6 +34,8 @@ def spawn_position_ned(gate_map: list, flipz: bool = False) -> np.ndarray:
     if not gate_map:
         return np.array([0.0, 0.0, DEFAULT_SPAWN_Z], dtype=float)
     g0 = np.asarray(gate_map[0]["pos"], float)
+    if not np.isfinite(g0).all():  # corrupt map entry must not seed a NaN EKF
+        return np.array([0.0, 0.0, DEFAULT_SPAWN_Z], dtype=float)
     z0 = gate_z_ned(g0, flipz)
     return np.array(
         [g0[0] + SPAWN_BEFORE_GATE_M, g0[1], z0 - SPAWN_ABOVE_GATE_M], dtype=float
@@ -63,6 +65,7 @@ class VQ2PoseEstimator:
         self._flipz = False
         self._last_gate_frame_id = None
         self._last_pnp_frame_id = None
+        self._nan_resets = 0
 
     def reset(
         self, gate_map: list, hold_z: float | None = None, flipz: bool = False
@@ -76,6 +79,26 @@ class VQ2PoseEstimator:
         self._pressure_alt_ref = None
         self._last_gate_frame_id = None
         self._last_pnp_frame_id = None
+        self._nan_resets = 0
+
+    def _check(self, stage: str, gate_map: list) -> bool:
+        """True while the filter is finite; on the FIRST divergence name the
+        stage that broke it (the 2026-07-02 runs were NaN from tick one with
+        no way to tell where), re-seed the filter and count the reset."""
+        if self.ekf is None or self.ekf.healthy():
+            return True
+        self._nan_resets += 1
+        if self._nan_resets <= 3:  # don't spam the flight log
+            print(
+                f"[vq2] EKF non-finite after {stage} -- reset #{self._nan_resets}",
+                flush=True,
+            )
+        p0 = spawn_position_ned(gate_map, flipz=self._flipz)
+        yaw0 = spawn_heading_ned(gate_map)
+        self.ekf = ESKF(p0=p0, v0=np.zeros(3), q0=_level_quat(yaw0))
+        self._last_imu_time_us = None
+        self._pressure_alt_ref = None
+        return False
 
     def tick(self, data: dict, gate_map: list) -> dict | None:
         if self.ekf is None:
@@ -85,6 +108,8 @@ class VQ2PoseEstimator:
         if imu is not None:
             self._predict_imu(imu)
             self._update_z_from_pressure(imu)
+        if not self._check("imu predict", gate_map):
+            return None
 
         gate_target = data.get("gate_target") or {}
         frame_id = gate_target.get("frame_id")
@@ -122,6 +147,8 @@ class VQ2PoseEstimator:
                     best = max(dets, key=lambda g: float(g.get("conf", 0.0) or 0.0))
                     fuse_pnp_gate(self.ekf, best, gate_world)
 
+        if not self._check("vision fusion", gate_map):
+            return None
         st = self.ekf.state()
         p, v, q = st["p"], st["v"], st["q"]
         return {
@@ -139,19 +166,20 @@ class VQ2PoseEstimator:
 
     def _predict_imu(self, imu: dict) -> None:
         t_us = imu.get("time_us")
-        if t_us is None:
+        if t_us is None or not math.isfinite(float(t_us)):
             return
         if self._last_imu_time_us is not None:
             dt = (int(t_us) - int(self._last_imu_time_us)) * 1e-6
             if 0.0 < dt < 0.5:
                 accel = (imu["ax"], imu["ay"], imu["az"])
                 gyro = (imu["gx"], imu["gy"], imu["gz"])
+                # ekf.predict rejects non-finite samples internally
                 self.ekf.predict(accel, gyro, dt)
         self._last_imu_time_us = int(t_us)
 
     def _update_z_from_pressure(self, imu: dict) -> None:
         pa = imu.get("pressure_alt")
-        if pa is None or self.ekf is None:
+        if pa is None or self.ekf is None or not math.isfinite(float(pa)):
             return
         if self._pressure_alt_ref is None:
             self._pressure_alt_ref = float(pa)

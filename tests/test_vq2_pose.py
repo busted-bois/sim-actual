@@ -198,6 +198,49 @@ class VQ2PoseTests(unittest.TestCase):
         est.tick(data, gate_map)
         np.testing.assert_allclose(est.ekf.p, p_after_first)
 
+    def test_nan_imu_does_not_poison_pose(self):
+        """Live 2026-07-02: the pose was NaN from the first tick of every
+        auto attempt. Non-finite IMU samples must be rejected and the
+        returned pose must stay finite."""
+        est = VQ2PoseEstimator()
+        gate_map = [{"pos": [10.0, 0.0, -5.0]}]
+        est.reset(gate_map)
+        bad = {
+            "imu": {
+                "time_us": 0,
+                "ax": float("nan"),
+                "ay": float("nan"),
+                "az": float("nan"),
+                "gx": float("nan"),
+                "gy": float("nan"),
+                "gz": float("nan"),
+                "pressure_alt": float("nan"),
+            },
+            "active_gate_index": 0,
+        }
+        for t in range(5):
+            bad["imu"]["time_us"] = t * 10000
+            odo = est.tick(bad, gate_map)
+            if odo is not None:
+                self.assertTrue(
+                    all(math.isfinite(v) for v in odo.values()),
+                    f"non-finite pose leaked: {odo}",
+                )
+        self.assertTrue(est.ekf.healthy())
+
+    def test_diverged_ekf_auto_resets(self):
+        """A filter that somehow went non-finite must self-reset instead of
+        staying dead for the rest of the attempt."""
+        est = VQ2PoseEstimator()
+        gate_map = [{"pos": [10.0, 0.0, -5.0]}]
+        est.reset(gate_map)
+        est.ekf.p[:] = float("nan")  # simulate divergence
+        self.assertIsNone(est.tick({"active_gate_index": 0}, gate_map))
+        self.assertTrue(est.ekf.healthy())  # re-seeded
+        odo = est.tick({"active_gate_index": 0}, gate_map)
+        self.assertIsNotNone(odo)
+        self.assertTrue(all(math.isfinite(v) for v in odo.values()))
+
     def test_gate_target_new_frame_is_fused(self):
         est = VQ2PoseEstimator()
         gate_map = [{"pos": [10.0, 0.0, -5.0]}]

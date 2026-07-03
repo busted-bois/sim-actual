@@ -70,23 +70,23 @@ class AutoFlightTests(unittest.TestCase):
         }
         self.assertTrue(wait_for_fresh_race_start_vq2(data, timeout_s=0.5))
 
-    def test_controller_uses_ibvs_pilot_when_auto(self):
+    def test_controller_uses_vision_nav_pilot_when_auto(self):
         with patch.dict("os.environ", {"AUTO_FLIGHT": "1"}, clear=False):
-            from simulator.controller import Controller
-            from simulator.ibvs_pilot import IBVSPilot
-
-            ctrl = Controller(MagicMock(), {}, 0)
-            self.assertIsInstance(ctrl.pilot, IBVSPilot)
-
-    def test_controller_uses_vision_nav_pilot_when_requested(self):
-        with patch.dict(
-            "os.environ", {"AUTO_FLIGHT": "1", "AUTO_PILOT": "vnav"}, clear=False
-        ):
             from simulator.controller import Controller
             from simulator.vision_nav_pilot import VisionNavPilot
 
             ctrl = Controller(MagicMock(), {}, 0)
             self.assertIsInstance(ctrl.pilot, VisionNavPilot)
+
+    def test_controller_uses_ibvs_pilot_when_requested(self):
+        with patch.dict(
+            "os.environ", {"AUTO_FLIGHT": "1", "AUTO_PILOT": "ibvs"}, clear=False
+        ):
+            from simulator.controller import Controller
+            from simulator.ibvs_pilot import IBVSPilot
+
+            ctrl = Controller(MagicMock(), {}, 0)
+            self.assertIsInstance(ctrl.pilot, IBVSPilot)
 
     def test_run_auto_flight_preflight_fail_without_vision(self):
         controller = MagicMock()

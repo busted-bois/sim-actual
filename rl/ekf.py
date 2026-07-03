@@ -82,12 +82,25 @@ class ESKF:
         self.sa, self.sg = sigma_accel, sigma_gyro
         self.s_pos, self.s_att = sigma_pos, sigma_att
 
+    def healthy(self) -> bool:
+        """False once any state/covariance entry is non-finite (diverged)."""
+        return bool(
+            np.isfinite(self.p).all()
+            and np.isfinite(self.v).all()
+            and np.isfinite(self.q).all()
+            and np.isfinite(self.P).all()
+        )
+
     # ---- prediction --------------------------------------------------------
     def predict(self, accel_body, gyro_body, dt):
         if dt <= 0 or dt > 0.5:
             return
         accel_body = np.asarray(accel_body, float)
         gyro_body = np.asarray(gyro_body, float)
+        # One bad IMU packet must not poison the filter (measured 2026-07-02:
+        # the pose was NaN from the first tick of every auto attempt).
+        if not (np.isfinite(accel_body).all() and np.isfinite(gyro_body).all()):
+            return
         R = quat_to_R(self.q)
         a_world = R @ accel_body + G_WORLD
 
@@ -111,8 +124,16 @@ class ESKF:
 
     # ---- generic update ----------------------------------------------------
     def _update(self, H, r, Rm):
+        r = np.asarray(r, float)
+        if not np.isfinite(r).all():
+            return  # reject non-finite measurements outright
         S = H @ self.P @ H.T + Rm
-        Kk = self.P @ H.T @ np.linalg.inv(S)
+        try:
+            Kk = self.P @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return
+        if not np.isfinite(Kk).all():
+            return
         dx = Kk @ r
         self._inject(dx)
         I_KH = np.eye(9) - Kk @ H

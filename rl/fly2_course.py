@@ -20,9 +20,18 @@ HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030
 K_ATT = 0.6
 K_YAW = 0.4
+# Measured command-sign conventions vs ODOMETRY attitude (pitch normal;
+# roll + yaw inverted). Valid when the attitude fed to the rate law comes
+# from sim odometry (Training mode).
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
+# Vs a GYRO-INTEGRATED attitude estimate (EKF/complementary filter -- the
+# only attitude available under the VQ2 block, spec 9.3) the plant responds
+# inverted on ALL axes (measured live 2026-07-01: cmd +0.2 -> gyro ~-0.48 on
+# each axis). Using the odometry signs against an estimated attitude makes
+# the pitch loop positive feedback -> the drone flips (observed live).
+EST_SIGNS = (-1.0, -1.0, -1.0)
 RATE_CLIP = 0.30
 YAW_CLIP = 0.5
 
@@ -96,16 +105,27 @@ def resolve_gate_map(data: dict) -> list:
 
 
 def rates_from_attitude_targets(
-    roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
+    roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z, signs=None
 ):
-    """Attitude-angle targets -> rate commands with measured sign conventions."""
-    roll_cmd = float(
-        np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
+    """Attitude-angle targets -> rate commands with measured sign conventions.
+
+    `signs` selects the convention for the attitude SOURCE: default = odometry
+    attitude; pass EST_SIGNS when roll/pitch/yaw come from a gyro-integrated
+    estimate (VQ2 regime)."""
+    s_roll, s_pitch, s_yaw = (
+        signs
+        if signs is not None
+        else (
+            SIGN_ROLL,
+            SIGN_PITCH,
+            SIGN_YAW,
+        )
     )
+    roll_cmd = float(np.clip(s_roll * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP))
     pitch_cmd = float(
-        np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+        np.clip(s_pitch * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
     )
-    yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+    yaw_cmd = float(np.clip(s_yaw * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
     thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
     return roll_cmd, pitch_cmd, yaw_cmd, thrust
 
