@@ -50,6 +50,209 @@ class Cmd:
     status: str
 
 
+class VisualServo:
+    """Body-frame visual servoing for the VQ2 estimator regime.
+
+    Chase the gate the camera SEES. No world map in the control path, so
+    world-position drift cannot create phantom targets (the failure mode of
+    the map-based guidance without odometry). Between vision frames (YOLO at
+    3-10 Hz on CPU) the target vector is propagated by the attitude delta
+    (gyro -- reliable) plus estimated-velocity translation (fine over 0.3 s).
+    Only DELTAS of the estimator's position enter control -- never absolutes.
+    """
+
+    def __init__(
+        self,
+        max_speed=1.0,
+        thru_speed=0.45,
+        k_fwd=0.25,
+        max_lean=0.15,
+        kp_lat=0.12,
+        kd_lat=0.25,
+        roll_dir=-1.0,
+        max_tilt=0.30,
+        zoff=0.3,  # aim below the detected centre (measured high bias)
+        box_conf=0.5,
+        pass_range=2.8,  # target this close + lost/behind -> passed
+        lost_t=1.2,  # forget a target unseen this long (s)
+        dash_t=0.4,  # fly straight this long after a pass (through + clear)
+        brake_t=1.4,  # then brake this long -- kill speed so the CNN can
+        # re-acquire the next gate (measured: too fast after a pass)
+        k_brake=0.25,  # brake lean per m/s of estimated velocity
+        scan_yaw=0.5,
+        rate_ema=0.4,
+        vel_dt=0.05,
+        min_fwd=0.3,  # ignore detections closer than this ahead
+        acq_max=18.0,  # only ACQUIRE a new target within this range (m)
+        match_dist=3.0,  # a detection within this of the held target updates it
+    ):
+        self.p = dict(
+            max_speed=max_speed,
+            thru_speed=thru_speed,
+            k_fwd=k_fwd,
+            max_lean=max_lean,
+            kp_lat=kp_lat,
+            kd_lat=kd_lat,
+            roll_dir=roll_dir,
+            max_tilt=max_tilt,
+            zoff=zoff,
+            box_conf=box_conf,
+            pass_range=pass_range,
+            lost_t=lost_t,
+            dash_t=dash_t,
+            brake_t=brake_t,
+            k_brake=k_brake,
+            scan_yaw=scan_yaw,
+            rate_ema=rate_ema,
+            vel_dt=vel_dt,
+            min_fwd=min_fwd,
+            acq_max=acq_max,
+            match_dist=match_dist,
+        )
+        self.t_b = None  # body-frame vector to the target gate centre
+        self.last_seen = None
+        self.n_passed = 0
+        self.dash_until = 0.0
+        self.brake_until = 0.0
+        self.scan_dir = 1.0
+        self.last_matches = []  # API compat (no map -> no landmark pairs)
+        self._prev_R = None
+        self._prev_pos = None
+        self._prev_fwd = None
+        self._prev_lat = 0.0
+        self._prev_t = None
+        self._closing = 0.0
+        self._lat_rate = 0.0
+
+    def _rates(self, fwd, lat, now):
+        p = self.p
+        if self._prev_t is None or (now - self._prev_t) > 0.5:
+            self._prev_fwd, self._prev_lat, self._prev_t = fwd, lat, now
+            self._closing, self._lat_rate = 0.0, 0.0
+        elif (now - self._prev_t) >= p["vel_dt"]:
+            dt = now - self._prev_t
+            a = p["rate_ema"]
+            cl = float(np.clip(-(fwd - self._prev_fwd) / dt, -15, 15))
+            lr = float(np.clip((lat - self._prev_lat) / dt, -15, 15))
+            self._closing = a * cl + (1 - a) * self._closing
+            self._lat_rate = a * lr + (1 - a) * self._lat_rate
+            self._prev_fwd, self._prev_lat, self._prev_t = fwd, lat, now
+        return self._closing, self._lat_rate
+
+    def update(self, gates, pos, vel, quat, yaw, now):
+        p = self.p
+        pos = np.asarray(pos, float)
+        R = _quat_to_R(quat)
+
+        # --- propagate the held target through our own motion ---------------
+        if self.t_b is not None and self._prev_R is not None:
+            t_w = self._prev_R @ self.t_b  # world offset from previous pose
+            dp = pos - self._prev_pos  # estimator DELTA (drift-free short-term)
+            self.t_b = R.T @ (t_w - dp)
+        self._prev_R, self._prev_pos = R, pos
+
+        # --- ingest fresh detections (gates is [] on stale ticks) ------------
+        # Track discipline: while a target is HELD, only the detection that
+        # MATCHES it may update it (switching to whichever detection is most
+        # confident each frame thrashes between near and 80 m background
+        # gates -- measured). Acquire fresh targets only within acq_max.
+        dets = []
+        for g in gates or []:
+            if g.get("conf", 0.0) < p["box_conf"] or g.get("pose") is None:
+                continue
+            gb = np.asarray(g["pose"]["gate_pos_body"], float)
+            if gb[0] < p["min_fwd"]:
+                continue
+            dets.append((float(g["conf"]), gb))
+        if dets and now >= self.dash_until:
+            if self.t_b is not None:
+                match, md = None, 1e9
+                for _, gb in dets:
+                    d = float(np.linalg.norm(gb - self.t_b))
+                    if d < md:
+                        md, match = d, gb
+                if match is not None and md < p["match_dist"]:
+                    self.t_b = match
+                    self.last_seen = now
+            else:
+                near = [(c, gb) for c, gb in dets if np.linalg.norm(gb) < p["acq_max"]]
+                if near:
+                    self.t_b = max(near, key=lambda x: x[0])[1]
+                    self.last_seen = now
+
+        # --- dash straight through after a pass, then BRAKE ------------------
+        if now < self.dash_until:
+            return Cmd(0.0, -0.03, 0.0, pos[2], f"DASH passed={self.n_passed}")
+        if now < self.brake_until:
+            if self.t_b is not None and self.last_seen == now:
+                self.brake_until = now  # next gate acquired -- resume servoing
+            else:
+                # Lean AGAINST the estimated velocity to actively kill the
+                # carried speed -- at speed the CNN can't line up the next
+                # gate in time (measured). Velocity here is the thrust-model
+                # estimate: exactly the motion we commanded, so it is the
+                # right thing to cancel.
+                v_b = R.T @ np.asarray(vel, float)
+                bp = float(np.clip(self.p["k_brake"] * v_b[0], -0.06, 0.18))
+                br = float(
+                    np.clip(
+                        -self.p["roll_dir"] * self.p["k_brake"] * v_b[1], -0.15, 0.15
+                    )
+                )
+                return Cmd(br, bp, 0.0, pos[2], f"BRAKE passed={self.n_passed}")
+
+        # --- pass detection: target was close, now behind or lost ------------
+        if self.t_b is not None:
+            dist = float(np.linalg.norm(self.t_b))
+            lost = self.last_seen is not None and (now - self.last_seen) > 0.3
+            if dist < p["pass_range"] and (self.t_b[0] < 0.0 or lost):
+                self.n_passed += 1
+                self.t_b = None
+                self.dash_until = now + p["dash_t"]
+                self.brake_until = now + p["dash_t"] + p["brake_t"]
+                return Cmd(0.0, -0.06, 0.0, pos[2], f"PASSED g{self.n_passed}")
+
+        # --- stale target -> forget it and scan ------------------------------
+        if self.t_b is not None and (now - self.last_seen) > p["lost_t"]:
+            self.t_b = None
+        if self.t_b is None:
+            self._prev_t = None
+            return Cmd(
+                0.0,
+                0.02,
+                self.scan_dir * p["scan_yaw"],
+                pos[2],
+                f"SCAN passed={self.n_passed}",
+            )
+
+        # --- servo on the body-frame target ----------------------------------
+        fwd, lat = float(self.t_b[0]), float(self.t_b[1])
+        dist = float(np.hypot(fwd, lat))
+        closing, lat_rate = self._rates(fwd, lat, now)
+        v_des = float(np.clip(dist, p["thru_speed"], p["max_speed"]))
+        lean = float(
+            np.clip(p["k_fwd"] * (v_des - closing), -p["max_tilt"], p["max_lean"])
+        )
+        tgt_pitch = -lean
+        tgt_roll = float(
+            np.clip(
+                p["roll_dir"] * (p["kp_lat"] * lat + p["kd_lat"] * lat_rate),
+                -p["max_tilt"],
+                p["max_tilt"],
+            )
+        )
+        yaw_err = float(np.arctan2(lat, max(fwd, 0.3)))
+        dz_world = float((R @ self.t_b)[2])
+        tgt_z = pos[2] + dz_world + p["zoff"]
+        return Cmd(
+            tgt_roll,
+            tgt_pitch,
+            yaw_err,
+            tgt_z,
+            f"GO d={dist:.1f} fwd={fwd:+.1f} lat={lat:+.1f} c={closing:+.1f} passed={self.n_passed}",
+        )
+
+
 class VisionGuidance:
     def __init__(
         self,
@@ -77,6 +280,8 @@ class VisionGuidance:
         min_acq_fwd=1.5,  # only lock a mapped gate at least this far ahead (m)
         cone_half=0.7,  # ...and within this bearing (rad) -- else yaw-scan to it
         scan_yaw=0.35,  # yaw error injected while scanning for the next gate
+        entry_ttl=4.0,  # drop a map entry unseen for this long (s) -- under a
+        # drifting pose estimate stale entries become phantoms
     ):
         self.p = dict(
             max_speed=max_speed,
@@ -103,6 +308,7 @@ class VisionGuidance:
             min_acq_fwd=min_acq_fwd,
             cone_half=cone_half,
             scan_yaw=scan_yaw,
+            entry_ttl=entry_ttl,
         )
         self.target = None  # world NED of the gate being flown
         self.gates_map = []  # [{"p": world NED, "n": hits}, ...]
@@ -116,6 +322,9 @@ class VisionGuidance:
         self._prev_t = None
         self._closing = 0.0
         self._lat_rate = 0.0
+        # (map_pos, gate_body) pairs for detections that re-associated with a
+        # CONFIRMED map entry this update -- landmark fixes for the estimator.
+        self.last_matches = []
 
     @property
     def n_passed(self):
@@ -149,10 +358,12 @@ class VisionGuidance:
             self.hold_z = pos[2]
 
         # --- build/confirm the persistent gate map from detections ----------
+        self.last_matches = []
         for g in gates or []:
             if g.get("conf", 0.0) < p["box_conf"] or g.get("pose") is None:
                 continue
-            gw = pos + R_wb @ np.asarray(g["pose"]["gate_pos_body"], float)
+            gate_body = np.asarray(g["pose"]["gate_pos_body"], float)
+            gw = pos + R_wb @ gate_body
             if self._near_passed(gw):
                 continue  # already flew this one
             best, bd = None, 1e9
@@ -161,11 +372,20 @@ class VisionGuidance:
                 if d < bd:
                     bd, best = d, e
             if best is not None and bd < p["reassoc_radius"]:
+                # Landmark pair BEFORE the ema refine: the stable map position
+                # is the reference the estimator corrects against.
+                if best["n"] >= p["min_hits"]:
+                    self.last_matches.append((best["p"].copy(), gate_body))
                 best["p"] = (1 - p["ema"]) * best["p"] + p["ema"] * gw
                 best["n"] += 1
+                best["t"] = now
             else:
-                self.gates_map.append({"p": gw, "n": 1})
-        self.gates_map = [e for e in self.gates_map if not self._near_passed(e["p"])]
+                self.gates_map.append({"p": gw, "n": 1, "t": now})
+        self.gates_map = [
+            e
+            for e in self.gates_map
+            if not self._near_passed(e["p"]) and (now - e["t"]) < p["entry_ttl"]
+        ]
 
         # --- target: keep current (snap to its refined entry) or acquire the
         # nearest CONFIRMED unpassed gate that is ahead and within the cone ---

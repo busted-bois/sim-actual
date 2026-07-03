@@ -22,7 +22,9 @@ from simulator.vision_rx import VisionRX
 def main():
     data: dict = {}
     VisionRX(data)  # binds UDP 5600, starts the camera + YOLO threads
-    print("[view] camera + YOLO up -- start the sim/race to see detections.", flush=True)
+    print(
+        "[view] camera + YOLO up -- start the sim/race to see detections.", flush=True
+    )
 
     display.start()
     t0 = time.monotonic()
@@ -34,7 +36,9 @@ def main():
                 last_tag = tag
                 display.tick(img, time.monotonic() - t0)
             else:
-                display.tick(None, time.monotonic() - t0)  # pump waitKey, stay responsive
+                display.tick(
+                    None, time.monotonic() - t0
+                )  # pump waitKey, stay responsive
             time.sleep(0.005)
     except KeyboardInterrupt:
         print("\n[view] exiting", flush=True)

@@ -24,7 +24,9 @@ from pymavlink import mavutil
 
 from simulator.controller import _send_attitude_rates
 from simulator.mavlink_rx import MAVLinkRX
+from simulator.state_estimator import StateEstimator, quat_mult
 from simulator.timesync import TimeSync
+from simulator.transforms import quat_to_yaw
 from simulator.vision_rx import VisionRX
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -55,14 +57,28 @@ class Snapshot:
 
 
 class SimInterface:
-    def __init__(self, ip: str = DEFAULT_IP, mav_port: int = DEFAULT_MAV_PORT):
+    def __init__(
+        self,
+        ip: str = DEFAULT_IP,
+        mav_port: int = DEFAULT_MAV_PORT,
+        use_estimator: bool = False,
+    ):
         self.data: dict = {}
         self.system_boot_ms = int(time.time() * 1000)
+        # ESKF on HIGHRES_IMU: the state source under the VQ2 telemetry block.
+        # use_estimator forces it even when odometry is present (dress rehearsal);
+        # otherwise it's the automatic fallback when odometry is blocked.
+        self.estimator = StateEstimator()
+        self.use_estimator = use_estimator
+        self._shadow = None  # lazy CSV: estimator-vs-odometry error log
+        self._shadow_next_t = 0.0
         print(f"[sim] connecting MAVLink udpin:{ip}:{mav_port} ...", flush=True)
         self.conn = mavutil.mavlink_connection(f"udpin:{ip}:{mav_port}")
         self.conn.wait_heartbeat()
         print(f"[sim] heartbeat from system {self.conn.target_system}", flush=True)
-        self.mavlink_rx = MAVLinkRX.create_mavlink_rx(self.conn, self.data)
+        self.mavlink_rx = MAVLinkRX.create_mavlink_rx(
+            self.conn, self.data, estimator=self.estimator
+        )
         self.timesync = TimeSync(self.conn, self.data)
         self.timesync.thread = None  # TimeSync.create starts a thread; start manually
         self._start_timesync()
@@ -79,11 +95,14 @@ class SimInterface:
 
     # ---- telemetry -------------------------------------------------------
     def wait_for_telemetry(self, timeout_s: float = 15.0) -> bool:
-        """Block until odometry + a camera frame have arrived."""
+        """Block until IMU + a camera frame have arrived (odometry optional --
+        it's blocked in Qualification; the estimator covers self-state)."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout_s:
-            if self.data.get("odometry") is not None and self.data.get("frame"):
-                return True
+            if self.data.get("imu") is not None and self.data.get("frame"):
+                # Give the estimator its ground-init window before flying.
+                if self.estimator.ready:
+                    return True
             time.sleep(0.05)
         return False
 
@@ -92,6 +111,7 @@ class SimInterface:
         odo = d.get("odometry")
         frame = d.get("frame")
         att = d.get("attitude")
+        imu = d.get("imu")
         pos = quat = vel = ang = None
         yaw = d.get("yaw_rad")
         if odo is not None:
@@ -101,6 +121,15 @@ class SimInterface:
             ang = (odo["roll_speed"], odo["pitch_speed"], odo["yaw_speed"])
         elif att is not None:
             ang = (att["roll_speed"], att["pitch_speed"], att["yaw_speed"])
+        est_pose = self.estimator.pose() if self.estimator.ready else None
+        if est_pose is not None and odo is not None:
+            self._shadow_log(odo, est_pose)
+        if est_pose is not None and (odo is None or self.use_estimator):
+            p_e, v_e, q_e = est_pose
+            pos, vel, quat = tuple(p_e), tuple(v_e), tuple(q_e)
+            yaw = quat_to_yaw(*q_e)
+            if ang is None and imu is not None:
+                ang = (imu["gx"], imu["gy"], imu["gz"])
         return Snapshot(
             t_mono=time.monotonic(),
             armed=bool(d.get("armed", False)),
@@ -114,6 +143,55 @@ class SimInterface:
             frame_time_ns=frame["sim_time_ns"] if frame else None,
             gates=self.gate_list(),
         )
+
+    def _shadow_log(self, odo: dict, est_pose, hz: float = 5.0):
+        """Estimator-vs-odometry error CSV (Training-mode validation).
+
+        The estimator frame is boot-anchored (p=0, yaw=0 at init) while
+        odometry has its own origin/heading -- the two differ by a FIXED yaw
+        rotation + translation, captured from the first sample.
+        """
+        now = time.monotonic()
+        if now < self._shadow_next_t:
+            return
+        self._shadow_next_t = now + 1.0 / hz
+        p_e, v_e, q_e = est_pose
+        p_o = np.array([odo["x"], odo["y"], odo["z"]])
+        v_o = np.array([odo["vx"], odo["vy"], odo["vz"]])
+        q_o = np.array([odo["qw"], odo["qx"], odo["qy"], odo["qz"]])
+        if self._shadow is None:
+            dyaw = quat_to_yaw(*q_o) - quat_to_yaw(*q_e)
+            c, s = np.cos(dyaw), np.sin(dyaw)
+            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+            os.makedirs(DATA_DIR, exist_ok=True)
+            path = os.path.join(
+                DATA_DIR, f"shadow_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+            )
+            f = open(path, "w")
+            f.write("t,pos_err,vel_err,att_err_deg,z_err,ex,ey,ez,ox,oy,oz\n")
+            q_align = np.array([np.cos(dyaw / 2), 0, 0, np.sin(dyaw / 2)])
+            self._shadow = {
+                "f": f,
+                "t0": now,
+                "Rz": Rz,
+                "off": p_o - Rz @ p_e,
+                "q_align": q_align,
+            }
+            print(f"[sim] shadow log -> {path}", flush=True)
+        sh = self._shadow
+        p_ea = sh["Rz"] @ p_e + sh["off"]  # estimator pose in the odometry frame
+        v_ea = sh["Rz"] @ v_e
+        q_ea = quat_mult(sh["q_align"], q_e)
+        dq = quat_mult(np.array([q_o[0], -q_o[1], -q_o[2], -q_o[3]]), q_ea)
+        att_err = np.degrees(2 * np.arccos(min(1.0, abs(float(dq[0])))))
+        sh["f"].write(
+            f"{now - sh['t0']:.2f},{np.linalg.norm(p_ea - p_o):.3f},"
+            f"{np.linalg.norm(v_ea - v_o):.3f},{att_err:.2f},"
+            f"{abs(p_ea[2] - p_o[2]):.3f},"
+            f"{p_ea[0]:.2f},{p_ea[1]:.2f},{p_ea[2]:.2f},"
+            f"{p_o[0]:.2f},{p_o[1]:.2f},{p_o[2]:.2f}\n"
+        )
+        sh["f"].flush()
 
     def gate_list(self) -> list:
         gates = self.data.get("gates") or []
@@ -169,6 +247,9 @@ class SimInterface:
         )
 
     def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        # The estimator predicts velocity from the commanded thrust (this
+        # sim's accelerometer is garbage under power) -- keep it informed.
+        self.estimator.thrust_cmd = float(thrust)
         _send_attitude_rates(
             self.conn,
             self.system_boot_ms,
