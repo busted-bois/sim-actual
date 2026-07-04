@@ -142,17 +142,17 @@ class Controller:
         from simulator.auto_flight import auto_flight_enabled
 
         if auto_flight_enabled():
-            # AUTO_PILOT selects the auto-flight brain. Default is the
-            # world-map vision navigator, now with a NaN-proofed EKF pose and
-            # EST-sign attitude control (ladder option 2). AUTO_PILOT=ibvs
-            # selects the pixel-servo pilot (option 1).
-            if os.environ.get("AUTO_PILOT", "vnav").strip().lower() == "ibvs":
-                from simulator.ibvs_pilot import IBVSPilot
+            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
+            # pixel servo (needs no position estimate; smoothest live flight
+            # so far). AUTO_PILOT=vnav selects the world-map vision navigator
+            # (NaN-proofed EKF pose).
+            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
+                from simulator.vision_nav_pilot import VisionNavPilot
 
-                return IBVSPilot(self, self.data)
-            from simulator.vision_nav_pilot import VisionNavPilot
+                return VisionNavPilot(self, self.data)
+            from simulator.ibvs_pilot import IBVSPilot
 
-            return VisionNavPilot(self, self.data)
+            return IBVSPilot(self, self.data)
         from simulator.pilot import Pilot
 
         return Pilot(self, self.data)

@@ -17,7 +17,6 @@ import numpy as np
 
 from rl import spec
 from rl.fly2_course import (
-    EST_SIGNS,
     HOVER_T,
     detect_climb_course,
     rates_from_attitude_targets,
@@ -206,21 +205,11 @@ class VisionNavPilot:
                 ]
             )
 
-        # Attitude-source-dependent sign convention: the EKF attitude is
-        # gyro-integrated, and against it the plant is inverted on ALL axes
-        # (EST_SIGNS). Flying EKF attitude with odometry signs makes the pitch
-        # loop positive feedback -- the flip observed in live VQ2 attempts.
-        signs = EST_SIGNS if self._pose_source != "odometry" else None
+        # Odometry sign convention regardless of pose source: applying
+        # EST_SIGNS to the EKF attitude flew the drone INVERTED (live
+        # 2026-07-02) -- that hypothesis is falsified.
         roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
-            roll,
-            pitch,
-            z,
-            vz,
-            cmd.tgt_roll,
-            cmd.tgt_pitch,
-            cmd.yaw_err,
-            cmd.tgt_z,
-            signs=signs,
+            roll, pitch, z, vz, cmd.tgt_roll, cmd.tgt_pitch, cmd.yaw_err, cmd.tgt_z
         )
 
         gb_z = (spec.quat_to_R(quat).T @ np.array([0.0, 0.0, 1.0]))[2]

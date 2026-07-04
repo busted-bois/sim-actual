@@ -26,11 +26,11 @@ K_YAW = 0.4
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = -1.0
-# Vs a GYRO-INTEGRATED attitude estimate (EKF/complementary filter -- the
-# only attitude available under the VQ2 block, spec 9.3) the plant responds
-# inverted on ALL axes (measured live 2026-07-01: cmd +0.2 -> gyro ~-0.48 on
-# each axis). Using the odometry signs against an estimated attitude makes
-# the pitch loop positive feedback -> the drone flips (observed live).
+# HISTORICAL / FALSIFIED: the vq2 branch measured "inverted on all axes vs
+# gyro-integrated attitude" (2026-07-01) and derived these signs -- but
+# applying them to the EKF attitude flew the drone UPSIDE DOWN live
+# (2026-07-02). Estimated attitude (accel-anchored) is truth-convention:
+# use the default odometry signs. Kept only for reference/experiments.
 EST_SIGNS = (-1.0, -1.0, -1.0)
 RATE_CLIP = 0.30
 YAW_CLIP = 0.5
