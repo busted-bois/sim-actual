@@ -77,22 +77,26 @@ class _TiltFilter:
         self.roll_acc = 0.0  # last accel-only tilt, logged so a single run
         self.pitch_acc = 0.0  # shows whether gyro and accel conventions agree
         self.f_ok = False  # last specific force was gravity-like (tilt valid)
+        self.gyro_mag = 0.0  # |gyro| of the last sample (rotation = not static)
         self._last_us = None
 
     def reset(self):
         self.roll, self.pitch, self._last_us = 0.0, 0.0, None
         self.roll_acc, self.pitch_acc = 0.0, 0.0
         self.f_ok = False
+        self.gyro_mag = 0.0
 
-    def update(self, imu: dict, allow_accel: bool = True) -> None:
+    def update(self, imu: dict, allow_accel: bool = True, boost: bool = False) -> None:
         """allow_accel=False integrates gyro only: under sustained commanded
         acceleration (commit dash) the specific force tilts away from gravity
         and the accel blend biases pitch backward -- over-lean, runaway speed,
-        the late tumble of the first live IBVS runs."""
+        the late tumble of the first live IBVS runs. boost=True blends hard
+        (quasi-static: the accel IS gravity, trust it)."""
         vals = [imu.get(k) for k in ("ax", "ay", "az", "gx", "gy", "gz", "time_us")]
         if any(v is None for v in vals) or not all(np.isfinite(float(v)) for v in vals):
             return
         ax, ay, az, gx, gy, gz, t_us = (float(v) for v in vals)
+        self.gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
         if self._last_us is not None:
             dt = (t_us - self._last_us) * 1e-6
             if 0.0 < dt < 0.5:
@@ -105,9 +109,17 @@ class _TiltFilter:
             self.roll_acc = math.atan2(-ay, -az)
             self.pitch_acc = math.atan2(ax, math.hypot(ay, az))
             if allow_accel:
-                a = self.alpha
+                a = 0.25 if boost else self.alpha
                 self.roll = (1 - a) * self.roll + a * self.roll_acc
                 self.pitch = (1 - a) * self.pitch + a * self.pitch_acc
+
+    def sync_to_accel(self) -> bool:
+        """Hard-set the estimate to the accel tilt. Only valid quasi-static
+        (spawn, resting) -- the caller gates that; returns True on success."""
+        if not self.f_ok:
+            return False
+        self.roll, self.pitch = self.roll_acc, self.pitch_acc
+        return True
 
 
 class IBVSPilot:
@@ -140,9 +152,22 @@ class IBVSPilot:
             t_brake=1.2,  # reverse-lean brake after the dash (s)
             brake_lean=0.05,  # backward tilt while braking
             scan_yaw=0.35,  # yaw error injected while scanning
+            t_settle_min=2.0,  # post-reset SETTLE: orient + see before flying
+            t_settle_max=5.0,  # ...but never sit longer than this
+            settle_climb=1.5,  # gentle climb (m of pressure alt) off the ramp
+            settle_att_tol=0.1,  # filter-vs-accel agreement to leave SETTLE (rad)
+            settle_frames=5,  # fresh YOLO frames of the NEW world required
+            quasi_pa=0.3,  # |pressure-alt rate| below this = quasi-static (m/s)
+            down_cos=-0.3,  # accel cos(roll)cos(pitch) below this = inverted
+            down_t=1.0,  # ...sustained this long while static -> GROUNDED
         )
         self.n_passed = 0
-        self.phase = "SCAN"
+        self.phase = "SETTLE"  # never fly blind: orient + see, then chase
+        self._settle_t0 = None
+        self._settle_synced = False
+        self._frames_seen = 0
+        self._down_since = None
+        self._down_logged = False
         self.tilt = _TiltFilter()
         self._ctr = None  # (u, v) of the held gate centre
         self._ex = 0.0
@@ -174,7 +199,12 @@ class IBVSPilot:
 
     def _reset_state(self) -> None:
         self.n_passed = 0
-        self.phase = "SCAN"
+        self.phase = "SETTLE"
+        self._settle_t0 = None
+        self._settle_synced = False
+        self._frames_seen = 0
+        self._down_since = None
+        self._down_logged = False
         self.tilt.reset()
         self._ctr = None
         self._last_seen = None
@@ -258,6 +288,7 @@ class IBVSPilot:
         if not pose or pose.get("frame_id") == self._last_frame_id:
             return
         self._last_frame_id = pose.get("frame_id")
+        self._frames_seen += 1  # fresh frames of the CURRENT world (SETTLE gate)
         cands = []
         for g in pose.get("gates") or []:
             if float(g.get("conf", 0.0) or 0.0) < self.p["box_conf"]:
@@ -335,11 +366,23 @@ class IBVSPilot:
         p = self.p
         now = time.monotonic()
         imu = self.data.get("imu")
+        quasi = abs(self._pa_rate) < p["quasi_pa"]  # not moving vertically
         if imu:
             # Gyro-only while accelerating hard: the accel blend would read
-            # the commanded forward lean as a backward-pitch error.
+            # the commanded forward lean as a backward-pitch error. Blend
+            # HARD only while we KNOW we are static: SETTLE/DOWN, no vertical
+            # rate AND a silent gyro (rotation = airborne/leveling, where the
+            # accel measures the thrust axis, not gravity -- boosting there
+            # erased the captured ramp tilt / shortened the dash in sim).
             hard_accel = self.phase == "COMMIT" or abs(self._last_tgt_pitch) > 0.05
-            self.tilt.update(imu, allow_accel=not hard_accel)
+            static_now = (
+                self.phase in ("SETTLE", "DOWN") and quasi and self.tilt.gyro_mag < 0.05
+            )
+            # During SETTLE: blend ONLY while static (on the ramp the accel is
+            # gravity-true); once lifting/leveling go pure gyro so the truth
+            # captured by the sync is not eroded before flight begins.
+            allow = (not hard_accel) and (self.phase != "SETTLE" or static_now)
+            self.tilt.update(imu, allow_accel=allow, boost=static_now)
         pa = self._update_pressure(imu, now)
         self._ingest(now)
 
@@ -349,7 +392,73 @@ class IBVSPilot:
         tgt_roll, tgt_pitch, yaw_err = 0.0, 0.0, 0.0
         pixel_ey = None
 
-        if now < self._commit_until:
+        # --- GROUNDED inverted: static and the accel (gravity, since we are
+        # not moving) says upside down. Flying commands only thrash the wreck
+        # -- go limp and let the race-monitor countdown reset the attempt.
+        inverted_acc = (
+            self.tilt.f_ok
+            and quasi
+            and math.cos(self.tilt.roll_acc) * math.cos(self.tilt.pitch_acc)
+            < p["down_cos"]
+        )
+        if inverted_acc:
+            if self._down_since is None:
+                self._down_since = now
+            elif now - self._down_since > p["down_t"] and self.phase != "DOWN":
+                self.phase = "DOWN"
+                self._commit_until = 0.0
+                if not self._down_logged:
+                    self._down_logged = True
+                    print("[ibvs] GROUNDED inverted -- waiting for reset", flush=True)
+        else:
+            self._down_since = None
+            if self.phase == "DOWN":  # bounced/rolled upright: re-orient
+                self.phase = "SETTLE"
+                self._settle_t0 = None
+                self._settle_synced = False
+        down = self.phase == "DOWN"
+
+        # --- SETTLE: orient + SEE the new environment before flying. Live
+        # logs 2026-07-04: the drone spawns ~18 deg nose-down (pitch_acc
+        # -0.311 from row 1) while the fresh filter reads level, and TRACK
+        # engaged 0.3 s after reset -- it darted off un-oriented every time.
+        settling = self.phase == "SETTLE"
+        if settling:
+            if self._settle_t0 is None:
+                self._settle_t0 = now
+                self._frames_seen = 0
+                if pa is not None:  # gentle climb clear of the spawn ramp
+                    self._pa_hold = pa + p["settle_climb"]
+            if not self._settle_synced:
+                # Static at GO: one accel sample IS the true attitude.
+                self._settle_synced = self.tilt.sync_to_accel()
+            dt_settle = now - self._settle_t0
+            converged = (
+                self.tilt.f_ok
+                and abs(roll - self.tilt.roll_acc) < p["settle_att_tol"]
+                and abs(pitch - self.tilt.pitch_acc) < p["settle_att_tol"]
+            )
+            ready = (
+                dt_settle >= p["t_settle_min"]
+                and converged
+                and self._frames_seen >= p["settle_frames"]
+            )
+            if ready or dt_settle >= p["t_settle_max"]:
+                print(
+                    f"[ibvs] SETTLE done in {dt_settle:.1f}s "
+                    f"(frames={self._frames_seen} "
+                    f"pitch={math.degrees(pitch):+.0f}deg)",
+                    flush=True,
+                )
+                self.phase = "SCAN"
+                settling = False
+                if pa is not None:
+                    self._pa_hold = pa  # hold the altitude we reached
+            # while settling: targets stay level, thrust holds the climb;
+            # detections are ingested (target may be pre-held) but not acted on
+            roll, pitch = _wrap(self.tilt.roll), _wrap(self.tilt.pitch)
+
+        if not settling and not down and now < self._commit_until:
             self.phase = "COMMIT"
             tgt_pitch = -p["commit_lean"]
             # Guided commit: while the gate is STILL visible, keep trimming
@@ -375,7 +484,7 @@ class IBVSPilot:
             else:
                 self.phase = "SCAN"
 
-        if self.phase not in ("COMMIT", "BRAKE"):
+        if not settling and not down and self.phase not in ("COMMIT", "BRAKE"):
             seen_age = None if self._last_seen is None else now - self._last_seen
             tracking = seen_age is not None and seen_age < p["lost_hold_t"]
             if tracking:
@@ -448,7 +557,10 @@ class IBVSPilot:
             self._unsafe_ticks += 1
         else:
             self._unsafe_ticks = 0
-        if self._unsafe_ticks >= 5:
+        if down:
+            # Limp on the ground: zero rates, minimum thrust, wait for reset.
+            self.controller.set_attitude_rates(0.0, 0.0, 0.0, 0.18)
+        elif self._unsafe_ticks >= 5:
             self._commit_until = 0.0  # a tumble voids any pending commit
             self.phase = "RIGHT"
             r_w, p_w = _wrap(roll), _wrap(pitch)
