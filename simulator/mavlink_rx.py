@@ -24,9 +24,10 @@ def _auto_flight_debug() -> bool:
 
 
 class MAVLinkRX:
-    def __init__(self, mavlink_connection, data):
+    def __init__(self, mavlink_connection, data, estimator=None):
         self.mavlink_conn = mavlink_connection
         self.data = data
+        self.estimator = estimator
         self.thread = None
         self.is_running = False
 
@@ -36,8 +37,8 @@ class MAVLinkRX:
         self._debug_logged_track = False
 
     @classmethod
-    def create_mavlink_rx(cls, mavlink_connection, data):
-        rx = cls(mavlink_connection, data)
+    def create_mavlink_rx(cls, mavlink_connection, data, estimator=None):
+        rx = cls(mavlink_connection, data, estimator=estimator)
         rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=True)
         rx.is_running = True
         rx.thread.start()
@@ -181,18 +182,28 @@ class MAVLinkRX:
         }
 
     def on_highres_imu(self, msg):
-        # Accel (m/s^2) + gyro (rad/s) in body FRD; primary sensor in VQ2 competitive.
-        self.data["imu"] = {
+        # Full HIGHRES_IMU: accel (m/s^2) + gyro (rad/s) body FRD, mag (gauss),
+        # baro. Under the VQ2 telemetry block this is the ONLY self-state source,
+        # so keep every field and feed the state estimator inline (same thread,
+        # constant sensor-rate dt).
+        imu = {
             "ax": msg.xacc,
             "ay": msg.yacc,
             "az": msg.zacc,
             "gx": msg.xgyro,
             "gy": msg.ygyro,
             "gz": msg.zgyro,
-            "pressure_alt": getattr(msg, "pressure_alt", None),
-            "temperature": getattr(msg, "temperature", None),
+            "mx": msg.xmag,
+            "my": msg.ymag,
+            "mz": msg.zmag,
+            "abs_pressure": msg.abs_pressure,
+            "pressure_alt": msg.pressure_alt,
+            "temperature": msg.temperature,
             "time_us": msg.time_usec,
         }
+        self.data["imu"] = imu
+        if self.estimator is not None:
+            self.estimator.on_imu(imu)
 
     def on_encapsulated_data(self, msg):
         if msg:
@@ -218,6 +229,8 @@ class MAVLinkRX:
             last_gate_race_time,
         ) = struct.unpack_from("<BQqqIq", raw_payload)
         self.data["active_gate_index"] = active_gate_index
+        self.data["race_started"] = race_start_boot_time_ms >= 0
+        self.data["race_finish_time_ns"] = race_finish_time_ns
         self.data["race_status"] = {
             "sim_boot_time_ms": sim_boot_time_ms,
             "race_start_boot_time_ms": race_start_boot_time_ms,

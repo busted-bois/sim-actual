@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port doc-context doc-validate doc-update capture-gates fly fly-vision hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -41,21 +41,14 @@ else
 	bash scripts/free-mavlink-port.sh
 endif
 
-# A/B gate-racing profiles (Windows: powershell -File scripts/sim-ab.ps1 -Profile main)
-sim-ab-main:
-	PILOT_AB=main uv run main.py
+# Passive MAVLink probe: per-message rates + IMU conventions. Run in Training
+# AND in VQ2 to see exactly what the event block removes.
+probe:
+	uv run -m simulator.telemetry_probe
 
-sim-ab-branch:
-	PILOT_AB=branch uv run main.py
-
-sim-ab-jacobian:
-	PILOT_AB=jacobian uv run main.py
-
-sim-ab-main-jacobian:
-	PILOT_AB=main-jacobian uv run main.py
-
-sim-ab-branch-legacy:
-	PILOT_AB=branch-legacy uv run main.py
+# Offline selftest for the VQ2 state estimator (ESKF + tilt/mag/baro/landmarks).
+est-selftest:
+	uv run -m simulator.state_estimator --selftest
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
@@ -68,9 +61,15 @@ fly:
 	uv run -m rl.fly2 --mode course
 
 # Fly the course from VISION ONLY -- YOLO gate detection + PnP, no gate map,
-# no hardcoded coordinates. Start the race first.
+# no hardcoded coordinates. Start the race first. Under the VQ2 block the
+# IMU+vision estimator takes over automatically (odometry absent).
 fly-vision:
 	uv run -m rl.fly2 --mode vision
+
+# VQ2 dress rehearsal in Training mode: fly on the estimator even though
+# odometry exists; odometry only feeds the shadow error CSV (rl/data/shadow_*).
+fly-vision-est:
+	uv run -m rl.fly2 --mode vision --est
 
 # Hold a stable hover (sanity check the controller).
 hover:
@@ -103,6 +102,7 @@ fly-policy:
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:
+	uv run -m simulator.state_estimator --selftest
 	uv run -m rl.dataset --selftest
 	uv run -m rl.gatenet --selftest
 	uv run -m rl.pnp --selftest

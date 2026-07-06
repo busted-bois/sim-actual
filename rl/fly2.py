@@ -26,6 +26,7 @@ import numpy as np
 
 from rl import spec
 from rl.fly2_course import (
+    EST_SIGNS,
     HOVER_T,
     Fly2Config,
     compute_course_rates,
@@ -35,9 +36,9 @@ from rl.fly2_course import (
 )
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
-from simulator.vision_nav import VisionGuidance
+from simulator.vision_nav import VisionGuidance, VisualServo
 
-HZ = 150.0
+HZ = 90.0  # spec VADR-TS-003 4.4: command rate must stay < 100 Hz
 
 
 def main():
@@ -70,6 +71,12 @@ def main():
         action="store_true",
         help="send a sim reset before launching (else rely on race restart)",
     )
+    ap.add_argument(
+        "--est",
+        action="store_true",
+        help="fly on the IMU+vision state estimator even if odometry is present "
+        "(VQ2 dress rehearsal; odometry then only feeds the shadow CSV)",
+    )
     args = ap.parse_args()
 
     cfg = Fly2Config(
@@ -85,14 +92,17 @@ def main():
     if args.mode == "course":
         gate_map = json.load(open(GATE_MAP_PATH))["gates"]
         n = len(gate_map)
-    guide = VisionGuidance() if args.mode == "vision" else None
-    sim = SimInterface()
+    guide = None  # constructed after est_mode is known (speed differs)
+    sim = SimInterface(use_estimator=args.est)
     if not sim.wait_for_telemetry():
         print("[f2] no telemetry", flush=True)
         os._exit(1)
     if args.reset:
         sim.reset_sim()
         time.sleep(3)
+        # The teleport invalidates the gyro-integrated attitude: re-init.
+        sim.estimator.reset()
+        time.sleep(1.5)
     # Sync launch to the countdown: wait for the user to hit ENTER at "go".
     if args.wait and args.mode in ("course", "vision"):
         try:
@@ -104,11 +114,22 @@ def main():
     s0 = sim.snapshot()
     hold_z = s0.pos_ned[2]
     hold_yaw = rpy(s0.quat)[2]
-    print(f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}", flush=True)
+    # Estimator-driven flight needs the gyro-frame command signs.
+    est_mode = args.est or sim.data.get("odometry") is None
+    att_signs = EST_SIGNS if est_mode else None
+    if args.mode == "vision":
+        # Estimator regime: body-frame visual servoing -- world-position
+        # drift cannot create phantom targets (measured failure of the
+        # map-based guidance without odometry). Training/odometry keeps the
+        # original world-map guidance.
+        guide = VisualServo() if est_mode else VisionGuidance()
+    print(
+        f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}"
+        f" est_mode={est_mode}",
+        flush=True,
+    )
 
-    # Per-run nav telemetry: guidance phase + axis-frame errors at 10 Hz, so a
-    # miss can be diagnosed after the fact (stalled short? off-axis? target
-    # dropped?) and fixes measured run over run.
+    # Per-run nav telemetry: guidance phase + axis-frame errors at 10 Hz.
     nav_log, nav_wr, last_nav_t, min_gate_d = None, None, 0.0, None
     if args.mode == "vision":
         os.makedirs(os.path.join("rl", "data"), exist_ok=True)
@@ -128,11 +149,13 @@ def main():
     last_log = 0.0
     last_active = -1
     last_shown_tag = None
-    last_pose_frame_id = None
+    last_pose_fid = None
+    last_col = sim.data.get("last_collision")  # ignore stale pre-run hits
+    last_col_t = -1e9
+    scan_since = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
-        # Pump the vision window whenever a new (detected) frame is ready, so it
-        # stays responsive without throttling the 150 Hz control loop below.
+        # Pump the vision window whenever a new (detected) frame is ready.
         img, tag = display.pick(sim.data)
         if tag is not None and tag != last_shown_tag:
             last_shown_tag = tag
@@ -149,19 +172,34 @@ def main():
 
         vstatus = ""
         if args.mode == "hover":
-            tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
             roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
-                roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
+                roll,
+                pitch,
+                z,
+                vz,
+                0.0,
+                0.0,
+                wrap(hold_yaw - yaw),
+                hold_z,
+                signs=att_signs,
             )
+        elif args.mode == "vision" and time.time() - t0 < 1.2:
+            # TAKEOFF: level out and climb clear of the spawn ramp.
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
+                roll, pitch, z, vz, 0.0, 0.0, 0.0, hold_z - 2.0, signs=att_signs
+            )
+            vstatus = "TAKEOFF"
         elif args.mode == "vision":
-            # Feed detections only once per inference frame so min_hits counts
-            # frames, not 150 Hz loop iterations.
             pose_data = sim.data.get("pose")
-            gates = []
-            if pose_data and pose_data.get("frame_id") != last_pose_frame_id:
-                last_pose_frame_id = pose_data.get("frame_id")
-                gates = pose_data["gates"]
+            fresh = pose_data is not None and pose_data["frame_id"] != last_pose_fid
+            if fresh:
+                last_pose_fid = pose_data["frame_id"]
+            gates = pose_data["gates"] if fresh else []
             cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
+            if est_mode and fresh:
+                R_wb = spec.quat_to_R(snap.quat)
+                for map_p, gate_body in guide.last_matches:
+                    sim.estimator.update_landmark(map_p - R_wb @ gate_body)
             vstatus = cmd.status
             if nav_wr is not None and time.time() - last_nav_t >= 0.1:
                 last_nav_t = time.time()
@@ -182,12 +220,41 @@ def main():
                         guide.n_passed,
                     ]
                 )
+            col = sim.data.get("last_collision")
+            if col is not None and col != last_col:
+                last_col = col
+                if time.time() - last_col_t > 1.0:
+                    last_col_t = time.time()
+                    if est_mode:
+                        sim.estimator.notify_collision()
+                    print(f"[f2] [{time.time() - t0:4.1f}s] COLLISION", flush=True)
+            if cmd.status.startswith("SCAN"):
+                if scan_since is None:
+                    scan_since = time.time()
+            else:
+                scan_since = None
             if guide.n_passed >= args.gates:
                 reason = "COURSE COMPLETE (vision)"
                 break
             roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
-                roll, pitch, z, vz, cmd.tgt_roll, cmd.tgt_pitch, cmd.yaw_err, cmd.tgt_z
+                roll,
+                pitch,
+                z,
+                vz,
+                cmd.tgt_roll,
+                cmd.tgt_pitch,
+                cmd.yaw_err,
+                cmd.tgt_z,
+                signs=att_signs,
             )
+            # Vision mode: bound vertical authority hard.
+            z_err = float(np.clip(z - cmd.tgt_z, -3.0, 3.0))
+            vz_c = float(np.clip(vz, -4.0, 4.0))
+            thrust = float(
+                np.clip(HOVER_T + 0.025 * z_err + 0.030 * vz_c, 0.20, 0.36)
+            )
+            if scan_since is not None and time.time() - scan_since > 1.5:
+                thrust = HOVER_T - 0.012
         else:
             active = int(sim.data.get("active_gate_index", 0) or 0)
             if active != last_active:
@@ -209,7 +276,8 @@ def main():
         if gb_z < 0.0:
             reason = "ABORT flipped"
             break
-        if z < hold_z - 30 or z > hold_z + 30:
+        z_abort = 60 if est_mode else 30
+        if z < hold_z - z_abort or z > hold_z + z_abort:
             reason = "ABORT altitude"
             break
 
