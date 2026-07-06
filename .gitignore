@@ -11,3 +11,8 @@ __pycache__/
 
 # Recorded vision runs
 runs/
+
+# Estimator flight logs + replay plots (regenerate per flight)
+rl/data/est_log_*.jsonl
+rl/data/est_replay_*.png
+rl/data/shadow_*.csv

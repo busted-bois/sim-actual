@@ -30,7 +30,11 @@ from simulator.transforms import quat_to_yaw
 from simulator.vision_nav import VisionGuidance, VisualServo
 
 HOVER_T = 0.27
-KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
+# Thrust is sensitive (accel ~36/unit). KD tuned by camera evidence
+# 2026-07-05: at 0.030 the drone crossed gate 1 centred but ballooned
+# +1.4 m after it and hit the structure above; at 0.055 it flew low and
+# clipped the bottom bar on entry. 0.040 splits the corridor.
+KP_Z, KD_Z = 0.025, 0.040
 K_ATT = 0.6  # attitude-angle P -> rate command
 K_YAW = 0.4
 # Measured command-sign conventions vs ODOMETRY attitude (pitch normal;
@@ -92,7 +96,13 @@ def main():
         "--est",
         action="store_true",
         help="fly on the IMU+vision state estimator even if odometry is present "
-        "(VQ2 dress rehearsal; odometry then only feeds the shadow CSV)",
+        "(VQ2 dress rehearsal; odometry then only feeds the shadow report)",
+    )
+    ap.add_argument(
+        "--no-record",
+        dest="record",
+        action="store_false",
+        help="disable the replayable flight event log (rl/data/est_log_*.jsonl)",
     )
     args = ap.parse_args()
 
@@ -103,7 +113,15 @@ def main():
         gate_map = json.load(open(GATE_MAP_PATH))["gates"]
         n = len(gate_map)
     guide = None  # constructed after est_mode is known (speed differs)
-    sim = SimInterface(use_estimator=args.est)
+    # Vision flights always record (a Training-mode flight is a truth-labeled
+    # log -- gold for offline replay); other modes record iff estimator-driven.
+    if not args.record:
+        record = False
+    elif args.mode == "vision":
+        record = True
+    else:
+        record = None  # auto: record iff the estimator drives flight
+    sim = SimInterface(use_estimator=args.est, record=record)
     if not sim.wait_for_telemetry():
         print("[f2] no telemetry", flush=True)
         os._exit(1)
@@ -172,13 +190,22 @@ def main():
         z, vz = p[2], v[2]
 
         vstatus = ""
+        takeoff_boost = False
         if args.mode == "hover":
             tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
-        elif args.mode == "vision" and time.time() - t0 < 1.2:
-            # TAKEOFF: the drone spawns nose-down on a ramp -- level out and
-            # climb clear of it before chasing gates (guidance during the
-            # ramp scrape pollutes the map and flips the drone).
-            tgt_roll, tgt_pitch, yaw_err, tgt_z = 0.0, 0.0, 0.0, hold_z - 2.0
+        elif args.mode == "vision" and time.time() - t0 < 2.2:
+            # TAKEOFF: the drone spawns nose-down on a ramp and coasts to
+            # gate 1 (~5 m) by ~2.5 s NO MATTER WHAT (measured across 10
+            # flights 2026-07-05) -- the only free variable is its state on
+            # arrival. Counter-hold kills the ramp slide (works: 0.1 m/s at
+            # the gate) and a thrust BOOST completes the ~2.5 m climb in
+            # time (the plain z-PD only managed 1.3 m -> parked on the
+            # gate's bottom panel). Then settle so the crossing carries no
+            # vertical momentum (climb-throughs exited the top of the 1.5 m
+            # opening and clipped the frame at z~-3.6 every flight).
+            tt = time.time() - t0
+            tgt_roll, tgt_pitch, yaw_err, tgt_z = 0.0, 0.10, 0.0, hold_z - 2.6
+            takeoff_boost = tt < 1.4
             vstatus = "TAKEOFF"
         elif args.mode == "vision":
             # YOLO runs at 3-10 Hz; the 150 Hz loop must only ingest each
@@ -196,7 +223,16 @@ def main():
             if est_mode and fresh:
                 R_wb = spec.quat_to_R(snap.quat)
                 for map_p, gate_body in guide.last_matches:
-                    sim.estimator.update_landmark(map_p - R_wb @ gate_body)
+                    # raw provenance lets replay re-derive p_meas from a
+                    # REPLAYED attitude (est_replay --rederive-landmarks).
+                    sim.estimator.update_landmark(
+                        map_p - R_wb @ gate_body,
+                        raw={
+                            "map_p": map_p,
+                            "gate_body": gate_body,
+                            "quat_used": snap.quat,
+                        },
+                    )
             tgt_roll, tgt_pitch, yaw_err, tgt_z = (
                 cmd.tgt_roll,
                 cmd.tgt_pitch,
@@ -215,6 +251,17 @@ def main():
                     if est_mode:
                         sim.estimator.notify_collision()
                     print(f"[f2] [{time.time() - t0:4.1f}s] COLLISION", flush=True)
+            # Sim race status survives VQ2 -- active_gate_index is the
+            # AUTHORITATIVE pass count; log it so flight logs grade the
+            # servo's own pass detection (guide.n_passed) against truth.
+            active = int(sim.data.get("active_gate_index", 0) or 0)
+            if active != last_active:
+                print(
+                    f"[f2] [{time.time() - t0:4.1f}s] SIM GATE -> {active} "
+                    f"(vision counted {guide.n_passed})",
+                    flush=True,
+                )
+                last_active = active
             # Track how long we've been scanning with no confirmed gate.
             if cmd.status.startswith("SCAN"):
                 if scan_since is None:
@@ -268,7 +315,12 @@ def main():
         if args.mode == "vision":
             z_err = float(np.clip(z - tgt_z, -3.0, 3.0))
             vz_c = float(np.clip(vz, -4.0, 4.0))
-            thrust = float(np.clip(HOVER_T + KP_Z * z_err + KD_Z * vz_c, 0.20, 0.36))
+            # Floor 0.17 (was 0.20): the gate opening is a 1.5 m band and
+            # crossings carry ~1.2 m/s climb -- the brake needs enough
+            # down-authority to arrest it inside the band (2026-07-05).
+            thrust = float(np.clip(HOVER_T + KP_Z * z_err + KD_Z * vz_c, 0.17, 0.36))
+            if takeoff_boost:
+                thrust = max(thrust, 0.32)  # complete the takeoff climb in time
         else:
             thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
         # Lost (scanning >1.5s with no confirmed gate): the z estimate can't
@@ -309,6 +361,15 @@ def main():
         f"[f2] === DONE {reason} final={np.round(sim.snapshot().pos_ned, 1)} "
         f"active={sim.data.get('active_gate_index')} ===",
         flush=True,
+    )
+    # Drain the flight log + print the shadow accuracy report BEFORE
+    # os._exit, which skips atexit/finally (abort paths land here too).
+    sim.finish_flight(
+        extra={
+            "gates_passed_vision": getattr(guide, "n_passed", None),
+            "active_gate_index_sim": sim.data.get("active_gate_index"),
+            "reason": reason,
+        }
     )
     sys.stdout.flush()
     os._exit(0)

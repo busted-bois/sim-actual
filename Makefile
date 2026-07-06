@@ -1,4 +1,4 @@
-.PHONY: i install check sim view probe est-selftest capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check sim view probe est-selftest est-replay capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -23,6 +23,12 @@ probe:
 # Offline selftest for the VQ2 state estimator (ESKF + tilt/mag/baro/landmarks).
 est-selftest:
 	uv run -m simulator.state_estimator --selftest
+	uv run -m simulator.est_replay --selftest
+
+# Replay a recorded flight log offline: metrics + PASS/FAIL + plot PNG.
+#   make est-replay LOG=rl/data/est_log_YYYYmmdd_HHMMSS.jsonl
+est-replay:
+	uv run -m simulator.est_replay $(LOG) --plot
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
@@ -77,6 +83,7 @@ fly-policy:
 # Offline self-tests for every module (no live sim needed).
 rl-test:
 	uv run -m simulator.state_estimator --selftest
+	uv run -m simulator.est_replay --selftest
 	uv run -m rl.dataset --selftest
 	uv run -m rl.gatenet --selftest
 	uv run -m rl.pnp --selftest

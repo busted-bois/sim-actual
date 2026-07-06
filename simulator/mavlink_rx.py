@@ -10,10 +10,12 @@ ENCAPSULATED_TRACK_INFO_MSG_ID = 2
 
 
 class MAVLinkRX:
-    def __init__(self, mavlink_connection, data, estimator=None):
+    def __init__(self, mavlink_connection, data, estimator=None, recorder=None):
         self.mavlink_conn = mavlink_connection
         self.data = data
         self.estimator = estimator
+        self.recorder = recorder  # flight event log (truth stream tap)
+        self._next_truth_us = 0
         self.thread = None
         self.is_running = False
 
@@ -21,8 +23,8 @@ class MAVLinkRX:
         self.expected_num_track_chunks = {}
 
     @classmethod
-    def create_mavlink_rx(cls, mavlink_connection, data, estimator=None):
-        rx = cls(mavlink_connection, data, estimator=estimator)
+    def create_mavlink_rx(cls, mavlink_connection, data, estimator=None, recorder=None):
+        rx = cls(mavlink_connection, data, estimator=estimator, recorder=recorder)
         rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=False)
         rx.is_running = True
         rx.thread.start()
@@ -164,6 +166,29 @@ class MAVLinkRX:
             "pitch_speed": msg.pitchspeed,
             "yaw_speed": msg.yawspeed,
         }
+        # Truth tap for the flight log (Training mode only -- VQ2 blocks
+        # ODOMETRY). Same thread as the IMU tap, so event order is natural.
+        # Decimated to ~20 Hz; never fed to the estimator.
+        if self.recorder is not None:
+            t_us = int(getattr(msg, "time_usec", 0))
+            if t_us >= self._next_truth_us:
+                self._next_truth_us = t_us + 50_000
+                self.recorder.log(
+                    "truth",
+                    {
+                        "time_us": t_us,
+                        "x": msg.x,
+                        "y": msg.y,
+                        "z": msg.z,
+                        "vx": msg.vx,
+                        "vy": msg.vy,
+                        "vz": msg.vz,
+                        "qw": qw,
+                        "qx": qx,
+                        "qy": qy,
+                        "qz": qz,
+                    },
+                )
 
     def on_highres_imu(self, msg):
         # Full HIGHRES_IMU: accel (m/s^2) + gyro (rad/s) body FRD, mag (gauss),

@@ -191,6 +191,19 @@ def _selftest():
         f"[selftest] n={len(errs)} pos_err mean={errs.mean():.3f}m max={errs.max():.3f}m"
     )
     assert errs.mean() < 0.1, "PnP should recover camera-frame gate position"
+
+    # Camera 20deg up-tilt compensation (R_BODY_CAM): a gate that sits 20deg
+    # BELOW the camera boresight is physically LEVEL with the drone -- its
+    # body-frame z must come out ~0. A sign error here biases every gate
+    # aim point vertically, growing with range.
+    z = 6.0
+    t_level = np.array([0.0, z * np.tan(np.radians(CAM_TILT_DEG)), z])
+    proj, _ = cv2.projectPoints(_GATE_PTS_3D, np.zeros(3), t_level, _K, _DIST)
+    est = estimate_gate_pose(proj.reshape(-1, 2), np.ones(8))
+    assert est is not None
+    bz = float(est["gate_pos_body"][2])
+    print(f"[selftest] level gate via 20deg tilt: body_z={bz:+.3f} m (expect ~0)")
+    assert abs(bz) < 0.15, "camera up-tilt must be compensated in body frame"
     print("[selftest] OK -- PnP recovers gate pose in body frame")
 
 

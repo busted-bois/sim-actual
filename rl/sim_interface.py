@@ -23,8 +23,9 @@ import numpy as np
 from pymavlink import mavutil
 
 from simulator.controller import _send_attitude_rates
+from simulator.est_recorder import EstRecorder
 from simulator.mavlink_rx import MAVLinkRX
-from simulator.state_estimator import StateEstimator, quat_mult
+from simulator.state_estimator import StateEstimator
 from simulator.timesync import TimeSync
 from simulator.transforms import quat_to_yaw
 from simulator.vision_rx import VisionRX
@@ -62,22 +63,33 @@ class SimInterface:
         ip: str = DEFAULT_IP,
         mav_port: int = DEFAULT_MAV_PORT,
         use_estimator: bool = False,
+        record: bool | None = None,
     ):
         self.data: dict = {}
         self.system_boot_ms = int(time.time() * 1000)
+        # Flight event log (JSONL): the EXACT stream the estimator consumes,
+        # plus odometry truth -- replayable offline via simulator.est_replay.
+        # record=None means auto: record whenever the estimator drives flight.
+        if record is None:
+            record = use_estimator
+        self.recorder = None
+        if record:
+            path = os.path.join(
+                DATA_DIR, f"est_log_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+            )
+            self.recorder = EstRecorder(path)
+            print(f"[est] recording -> {path}", flush=True)
         # ESKF on HIGHRES_IMU: the state source under the VQ2 telemetry block.
         # use_estimator forces it even when odometry is present (dress rehearsal);
         # otherwise it's the automatic fallback when odometry is blocked.
-        self.estimator = StateEstimator()
+        self.estimator = StateEstimator(recorder=self.recorder)
         self.use_estimator = use_estimator
-        self._shadow = None  # lazy CSV: estimator-vs-odometry error log
-        self._shadow_next_t = 0.0
         print(f"[sim] connecting MAVLink udpin:{ip}:{mav_port} ...", flush=True)
         self.conn = mavutil.mavlink_connection(f"udpin:{ip}:{mav_port}")
         self.conn.wait_heartbeat()
         print(f"[sim] heartbeat from system {self.conn.target_system}", flush=True)
         self.mavlink_rx = MAVLinkRX.create_mavlink_rx(
-            self.conn, self.data, estimator=self.estimator
+            self.conn, self.data, estimator=self.estimator, recorder=self.recorder
         )
         self.timesync = TimeSync(self.conn, self.data)
         self.timesync.thread = None  # TimeSync.create starts a thread; start manually
@@ -122,8 +134,6 @@ class SimInterface:
         elif att is not None:
             ang = (att["roll_speed"], att["pitch_speed"], att["yaw_speed"])
         est_pose = self.estimator.pose() if self.estimator.ready else None
-        if est_pose is not None and odo is not None:
-            self._shadow_log(odo, est_pose)
         if est_pose is not None and (odo is None or self.use_estimator):
             p_e, v_e, q_e = est_pose
             pos, vel, quat = tuple(p_e), tuple(v_e), tuple(q_e)
@@ -144,54 +154,23 @@ class SimInterface:
             gates=self.gate_list(),
         )
 
-    def _shadow_log(self, odo: dict, est_pose, hz: float = 5.0):
-        """Estimator-vs-odometry error CSV (Training-mode validation).
+    def finish_flight(self, extra: dict | None = None):
+        """Close the flight recorder and print the shadow accuracy report
+        (estimator vs recorded odometry truth, replayed offline).
 
-        The estimator frame is boot-anchored (p=0, yaw=0 at init) while
-        odometry has its own origin/heading -- the two differ by a FIXED yaw
-        rotation + translation, captured from the first sample.
+        MUST be called explicitly before os._exit(), which skips atexit.
+        extra: informational lines for the report (e.g. gate-pass counts).
         """
-        now = time.monotonic()
-        if now < self._shadow_next_t:
+        if self.recorder is None:
             return
-        self._shadow_next_t = now + 1.0 / hz
-        p_e, v_e, q_e = est_pose
-        p_o = np.array([odo["x"], odo["y"], odo["z"]])
-        v_o = np.array([odo["vx"], odo["vy"], odo["vz"]])
-        q_o = np.array([odo["qw"], odo["qx"], odo["qy"], odo["qz"]])
-        if self._shadow is None:
-            dyaw = quat_to_yaw(*q_o) - quat_to_yaw(*q_e)
-            c, s = np.cos(dyaw), np.sin(dyaw)
-            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
-            os.makedirs(DATA_DIR, exist_ok=True)
-            path = os.path.join(
-                DATA_DIR, f"shadow_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-            )
-            f = open(path, "w")
-            f.write("t,pos_err,vel_err,att_err_deg,z_err,ex,ey,ez,ox,oy,oz\n")
-            q_align = np.array([np.cos(dyaw / 2), 0, 0, np.sin(dyaw / 2)])
-            self._shadow = {
-                "f": f,
-                "t0": now,
-                "Rz": Rz,
-                "off": p_o - Rz @ p_e,
-                "q_align": q_align,
-            }
-            print(f"[sim] shadow log -> {path}", flush=True)
-        sh = self._shadow
-        p_ea = sh["Rz"] @ p_e + sh["off"]  # estimator pose in the odometry frame
-        v_ea = sh["Rz"] @ v_e
-        q_ea = quat_mult(sh["q_align"], q_e)
-        dq = quat_mult(np.array([q_o[0], -q_o[1], -q_o[2], -q_o[3]]), q_ea)
-        att_err = np.degrees(2 * np.arccos(min(1.0, abs(float(dq[0])))))
-        sh["f"].write(
-            f"{now - sh['t0']:.2f},{np.linalg.norm(p_ea - p_o):.3f},"
-            f"{np.linalg.norm(v_ea - v_o):.3f},{att_err:.2f},"
-            f"{abs(p_ea[2] - p_o[2]):.3f},"
-            f"{p_ea[0]:.2f},{p_ea[1]:.2f},{p_ea[2]:.2f},"
-            f"{p_o[0]:.2f},{p_o[1]:.2f},{p_o[2]:.2f}\n"
-        )
-        sh["f"].flush()
+        self.recorder.close()
+        print(f"[est] flight log -> {self.recorder.path}", flush=True)
+        from simulator.est_replay import report_from_log
+
+        try:
+            report_from_log(self.recorder.path, extra=extra)
+        except Exception as e:
+            print(f"[est] shadow report failed: {e!r}", flush=True)
 
     def gate_list(self) -> list:
         gates = self.data.get("gates") or []

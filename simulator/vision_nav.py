@@ -17,6 +17,7 @@ All world<->body conversions use the SAME matrix R_wb and its transpose -- never
 a scalar yaw (this sim's reported yaw sign disagrees with the quaternion).
 """
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -71,7 +72,11 @@ class VisualServo:
         kd_lat=0.25,
         roll_dir=-1.0,
         max_tilt=0.30,
-        zoff=0.3,  # aim below the detected centre (measured high bias)
+        zoff=0.15,  # aim slightly LOW in the 1.5 m opening (camera evidence
+        # 2026-07-05: approaches carry ~1.2 m/s residual climb through the
+        # gate, so a centre entry EXITS through the top of the opening ~0.3 s
+        # later; the crossing must be aimed where the climb-through ends up
+        # centred. +0.3 was too low (bottom-bar scrapes), 0.0 too high.)
         box_conf=0.5,
         pass_range=2.8,  # target this close + lost/behind -> passed
         lost_t=1.2,  # forget a target unseen this long (s)
@@ -83,8 +88,13 @@ class VisualServo:
         rate_ema=0.4,
         vel_dt=0.05,
         min_fwd=0.3,  # ignore detections closer than this ahead
-        acq_max=18.0,  # only ACQUIRE a new target within this range (m)
-        match_dist=3.0,  # a detection within this of the held target updates it
+        acq_max=16.0,  # only ACQUIRE a new target within this range (m).
+        # Gate 2 sits ~13.8 m from the gate-1 exit (12 locked the servo out
+        # of it entirely -- flight log 2026-07-05); nearest-acquire below
+        # keeps 15 m background gates from stealing the lock
+        match_dist=3.0,  # a detection within this of the held target updates
+        # it; scaled up with range in update() (PnP depth noise alone exceeds
+        # 3 m at 15 m range -- fixed matches thrash far targets)
     ):
         self.p = dict(
             max_speed=max_speed,
@@ -115,7 +125,14 @@ class VisualServo:
         self.dash_until = 0.0
         self.brake_until = 0.0
         self.scan_dir = 1.0
-        self.last_matches = []  # API compat (no map -> no landmark pairs)
+        # (anchor_world, gate_body) pairs for the estimator's landmark update.
+        # The anchor is the target's world position FROZEN at acquisition:
+        # re-observing the same gate then pins the estimate to the acquisition
+        # frame, so drift accumulates per-approach instead of per-flight.
+        # (Without this the VQ2 estimator dead-reckons the whole flight --
+        # measured 2026-07-05: z drifted +12 m and no fix ever arrived.)
+        self.last_matches = []
+        self._anchor_w = None
         self._prev_R = None
         self._prev_pos = None
         self._prev_fwd = None
@@ -139,6 +156,18 @@ class VisualServo:
             self._prev_fwd, self._prev_lat, self._prev_t = fwd, lat, now
         return self._closing, self._lat_rate
 
+    def _brake_lean(self, R, vel):
+        """Roll/pitch leaning AGAINST the estimated velocity -- used by every
+        non-translating state (BRAKE, SCAN, AIM). Yaw-only states that let
+        residual drift ride carried the drone into walls mid-turn (measured
+        2026-07-05: collisions at 3.2 s and 7.8 s, both while rotating)."""
+        v_b = R.T @ np.asarray(vel, float)
+        bp = float(np.clip(self.p["k_brake"] * v_b[0], -0.06, 0.18))
+        br = float(
+            np.clip(-self.p["roll_dir"] * self.p["k_brake"] * v_b[1], -0.15, 0.15)
+        )
+        return br, bp
+
     def update(self, gates, pos, vel, quat, yaw, now):
         p = self.p
         pos = np.asarray(pos, float)
@@ -157,6 +186,7 @@ class VisualServo:
         # confident each frame thrashes between near and 80 m background
         # gates -- measured). Acquire fresh targets only within acq_max.
         dets = []
+        self.last_matches = []
         for g in gates or []:
             if g.get("conf", 0.0) < p["box_conf"] or g.get("pose") is None:
                 continue
@@ -166,19 +196,46 @@ class VisualServo:
             dets.append((float(g["conf"]), gb))
         if dets and now >= self.dash_until:
             if self.t_b is not None:
-                match, md = None, 1e9
+                # Sticky match in BEARING space: the same gate re-observed
+                # keeps its direction even when PnP depth is noisy, while a
+                # 3D radius either drops far matches (fixed 3 m) or lets a
+                # background gate steal the lock (range-scaled -- measured
+                # d 15.5 -> 24.1 m theft, flight log 2026-07-05).
+                tn = float(np.linalg.norm(self.t_b))
+                match, best_ang = None, 1e9
                 for _, gb in dets:
-                    d = float(np.linalg.norm(gb - self.t_b))
-                    if d < md:
-                        md, match = d, gb
-                if match is not None and md < p["match_dist"]:
+                    gn = float(np.linalg.norm(gb))
+                    if gn < 1e-6 or tn < 1e-6:
+                        continue
+                    ratio = gn / tn
+                    if not (0.6 < ratio < 1.5):
+                        continue  # wildly different range = different gate
+                    cosang = float(np.dot(gb, self.t_b)) / (gn * tn)
+                    ang = math.acos(max(-1.0, min(1.0, cosang)))
+                    if ang < best_ang:
+                        best_ang, match = ang, gb
+                near_ok = tn < p["match_dist"]  # close in: fall back to 3D
+                if match is not None and (
+                    best_ang < math.radians(12.0)
+                    or (
+                        near_ok
+                        and float(np.linalg.norm(match - self.t_b)) < p["match_dist"]
+                    )
+                ):
                     self.t_b = match
                     self.last_seen = now
+                    if self._anchor_w is not None:
+                        # Same gate re-observed: landmark fix vs its frozen
+                        # acquisition-frame position.
+                        self.last_matches = [(self._anchor_w.copy(), match)]
             else:
                 near = [(c, gb) for c, gb in dets if np.linalg.norm(gb) < p["acq_max"]]
                 if near:
-                    self.t_b = max(near, key=lambda x: x[0])[1]
+                    # NEAREST, not max-conf: a far centre-frame gate often
+                    # out-scores the near one and steals the acquisition.
+                    self.t_b = min(near, key=lambda x: float(np.linalg.norm(x[1])))[1]
                     self.last_seen = now
+                    self._anchor_w = pos + R @ self.t_b  # freeze the anchor
 
         # --- dash straight through after a pass, then BRAKE ------------------
         if now < self.dash_until:
@@ -192,22 +249,23 @@ class VisualServo:
                 # gate in time (measured). Velocity here is the thrust-model
                 # estimate: exactly the motion we commanded, so it is the
                 # right thing to cancel.
-                v_b = R.T @ np.asarray(vel, float)
-                bp = float(np.clip(self.p["k_brake"] * v_b[0], -0.06, 0.18))
-                br = float(
-                    np.clip(
-                        -self.p["roll_dir"] * self.p["k_brake"] * v_b[1], -0.15, 0.15
-                    )
-                )
+                br, bp = self._brake_lean(R, vel)
                 return Cmd(br, bp, 0.0, pos[2], f"BRAKE passed={self.n_passed}")
 
-        # --- pass detection: target was close, now behind or lost ------------
+        # --- pass detection: the PROPAGATED target must actually be crossed --
+        # (measured 2026-07-05: the old "close + lost" trigger counted a pass
+        # at fwd=+2.2 m when YOLO lost the gate near the FOV edge -- the dash
+        # then flew INTO the gate frame. Losing sight is normal at close
+        # range; the propagated t_b keeps tracking through it, so require the
+        # plane crossing, or lost with the target nearly crossed.)
         if self.t_b is not None:
             dist = float(np.linalg.norm(self.t_b))
             lost = self.last_seen is not None and (now - self.last_seen) > 0.3
-            if dist < p["pass_range"] and (self.t_b[0] < 0.0 or lost):
+            crossed = self.t_b[0] < 0.0 or (lost and self.t_b[0] < 0.5)
+            if dist < p["pass_range"] and crossed:
                 self.n_passed += 1
                 self.t_b = None
+                self._anchor_w = None
                 self.dash_until = now + p["dash_t"]
                 self.brake_until = now + p["dash_t"] + p["brake_t"]
                 return Cmd(0.0, -0.06, 0.0, pos[2], f"PASSED g{self.n_passed}")
@@ -215,11 +273,13 @@ class VisualServo:
         # --- stale target -> forget it and scan ------------------------------
         if self.t_b is not None and (now - self.last_seen) > p["lost_t"]:
             self.t_b = None
+            self._anchor_w = None
         if self.t_b is None:
             self._prev_t = None
+            br, bp = self._brake_lean(R, vel)
             return Cmd(
-                0.0,
-                0.02,
+                br,
+                bp,
                 self.scan_dir * p["scan_yaw"],
                 pos[2],
                 f"SCAN passed={self.n_passed}",
@@ -228,6 +288,21 @@ class VisualServo:
         # --- servo on the body-frame target ----------------------------------
         fwd, lat = float(self.t_b[0]), float(self.t_b[1])
         dist = float(np.hypot(fwd, lat))
+        # AIM: far target well off the nose -> yaw in place FIRST. Translating
+        # while 30-40 deg off-bearing orbits the gate and drifts into walls
+        # (measured: every far approach circled, closing speed ~0, then hit a
+        # wall). Translate only once the gate is roughly ahead.
+        bearing = math.atan2(lat, max(fwd, 0.3))
+        if dist > 4.0 and abs(bearing) > 0.35:
+            self._prev_t = None  # rates stale after a pure-yaw phase
+            br, bp = self._brake_lean(R, vel)
+            return Cmd(
+                br,
+                bp,
+                bearing,
+                pos[2],
+                f"AIM b={math.degrees(bearing):+.0f} d={dist:.1f}",
+            )
         closing, lat_rate = self._rates(fwd, lat, now)
         v_des = float(np.clip(dist, p["thru_speed"], p["max_speed"]))
         lean = float(
