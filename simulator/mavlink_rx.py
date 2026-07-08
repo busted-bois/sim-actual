@@ -38,7 +38,9 @@ class MAVLinkRX:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                print("WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.")
+                print(
+                    "WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port."
+                )
                 return
 
             if msg is None:
@@ -113,39 +115,52 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        self.data["armed"] = bool(
+            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        )
 
     def on_timesync(self, msg):
         request_time = msg.ts1
         response_time = msg.tc1
 
     def on_attitude(self, msg):
-        roll = msg.roll
-        pitch = msg.pitch
-        yaw = msg.yaw
-        roll_speed = msg.rollspeed
-        pitch_speed = msg.pitchspeed
-        yaw_speed = msg.yawspeed
-        time_boot_ms = msg.time_boot_ms
+        self.data["attitude"] = {
+            "roll": msg.roll,
+            "pitch": msg.pitch,
+            "yaw": msg.yaw,
+            "rollspeed": msg.rollspeed,
+            "pitchspeed": msg.pitchspeed,
+            "yawspeed": msg.yawspeed,
+            "time_boot_ms": msg.time_boot_ms,
+        }
 
     def on_local_position_ned(self, msg):
-        pos_x = msg.x
-        pos_y = msg.y
-        pos_z = msg.z
-        vel_x = msg.vx
-        vel_y = msg.vy
-        vel_z = msg.vz
-        time_boot_ms = msg.time_boot_ms
+        self.data["local_position_ned"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+            "time_boot_ms": msg.time_boot_ms,
+        }
 
     def on_odometry(self, msg):
-        pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
-        qx, qy, qz, qw = msg.q[1], msg.q[2], msg.q[3], msg.q[0]
-        vel_x, vel_y, vel_z = msg.vx, msg.vy, msg.vz
-        roll_speed = msg.rollspeed
-        pitch_speed = msg.pitchspeed
-        yaw_speed = msg.yawspeed
-        time_boot_us = msg.time_usec
-        reset_count = msg.reset_counter
+        self.data["odometry"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            # quaternion in (w, x, y, z) order
+            "q": (msg.q[0], msg.q[1], msg.q[2], msg.q[3]),
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+            "rollspeed": msg.rollspeed,
+            "pitchspeed": msg.pitchspeed,
+            "yawspeed": msg.yawspeed,
+            "time_usec": msg.time_usec,
+            "reset_counter": msg.reset_counter,
+        }
 
     def on_highres_imu(self, msg):
         acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
@@ -189,7 +204,10 @@ class MAVLinkRX:
             return
         raw_payload = raw_payload[3:]
         self.track_chunks[transfer_id][msg.seqnr] = raw_payload
-        if len(self.track_chunks[transfer_id]) == self.expected_num_track_chunks[transfer_id]:
+        if (
+            len(self.track_chunks[transfer_id])
+            == self.expected_num_track_chunks[transfer_id]
+        ):
             full_payload = bytes()
             for i in range(len(self.track_chunks[transfer_id])):
                 full_payload = full_payload + self.track_chunks[transfer_id][i]
@@ -237,4 +255,6 @@ class MAVLinkRX:
         collision_id = msg.id
 
         threat_level = msg.threat_level  # 1-2 with 2 being higher impact collision
-        impact = msg.horizontal_minimum_delta  # this is not a delta - it is the impulse magnitude in kg m/s
+        impact = (
+            msg.horizontal_minimum_delta
+        )  # this is not a delta - it is the impulse magnitude in kg m/s

@@ -1,9 +1,98 @@
+import threading
+import time
+
 from pymavlink import mavutil
 
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
+
+HEARTBEAT_TIMEOUT_S = 60
+GCS_HEARTBEAT_INTERVAL_S = 1.0
+
+
+def _send_gcs_heartbeat(sim_conn):
+    """Announce ourselves to the sim as a GCS.
+
+    The sim only streams telemetry (ODOMETRY/ATTITUDE/...) and accepts offboard
+    setpoints once it sees a ground-station heartbeat, so this must be sent during
+    connect and kept up continuously.
+    """
+    sim_conn.mav.heartbeat_send(
+        mavutil.mavlink.MAV_TYPE_GCS,
+        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        mavutil.mavlink.MAV_STATE_ACTIVE,
+    )
+
+
+def _wait_for_sim_heartbeat(sim_conn, timeout_s=HEARTBEAT_TIMEOUT_S):
+    """Send GCS heartbeats and wait for the sim's heartbeat. Returns it or None."""
+    deadline = time.monotonic() + timeout_s
+    next_tx = 0.0
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_tx:
+            _send_gcs_heartbeat(sim_conn)
+            next_tx = now + GCS_HEARTBEAT_INTERVAL_S
+        msg = sim_conn.recv_match(type="HEARTBEAT", blocking=False)
+        if msg is not None:
+            return msg
+        time.sleep(0.02)
+    return None
+
+
+def _start_gcs_heartbeat_thread(sim_conn):
+    """Keep sending GCS heartbeats so the sim keeps streaming and accepting control."""
+
+    def loop():
+        while True:
+            _send_gcs_heartbeat(sim_conn)
+            time.sleep(GCS_HEARTBEAT_INTERVAL_S)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return thread
+
+
+# MAVLink message IDs (numeric so this works under both MAVLink 1 and 2 dialects;
+# ODOMETRY = 331 is MAVLink-2-only and absent from the v1 dialect's constants).
+_MSG_ID_ATTITUDE = 30
+_MSG_ID_LOCAL_POSITION_NED = 32
+_MSG_ID_HIGHRES_IMU = 105
+_MSG_ID_ODOMETRY = 331
+_MAV_CMD_SET_MESSAGE_INTERVAL = 511
+
+
+def _request_data_streams(sim_conn, rate_hz=50):
+    """Explicitly ask the sim to stream the pose messages we need.
+
+    Belt-and-suspenders: the GCS heartbeat alone should trigger streaming, but some
+    sim builds only stream on request. Harmless if already streaming (we keep the
+    latest of each). Uses SET_MESSAGE_INTERVAL (interval in microseconds).
+    """
+    interval_us = int(1_000_000 / rate_hz)
+    for msg_id in (
+        _MSG_ID_ATTITUDE,
+        _MSG_ID_LOCAL_POSITION_NED,
+        _MSG_ID_ODOMETRY,
+        _MSG_ID_HIGHRES_IMU,
+    ):
+        sim_conn.mav.command_long_send(
+            sim_conn.target_system,
+            sim_conn.target_component,
+            _MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,  # confirmation
+            msg_id,
+            interval_us,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
@@ -18,9 +107,18 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
             server_udp_port,
         )
     )
-    print("Waiting for heartbeat...", flush=True)
-    sim_conn.wait_heartbeat()
+    print("Waiting for heartbeat (sending GCS heartbeat)...", flush=True)
+    if _wait_for_sim_heartbeat(sim_conn) is None:
+        raise TimeoutError(
+            f"No MAVLink heartbeat within {HEARTBEAT_TIMEOUT_S}s — is the sim running "
+            f"with an active flight session on udp {server_ip}:{server_udp_port}?"
+        )
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
+
+    # Keep announcing ourselves so the sim keeps streaming telemetry and accepting
+    # our setpoints (without this: no telemetry, and the drone ignores our commands).
+    _start_gcs_heartbeat_thread(sim_conn)
+    _request_data_streams(sim_conn)
 
     # -------------------------------
     # Setup Mavlink msg receiver
@@ -32,7 +130,7 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # Timesync request Loop
     # -------------------------------
     print("Setting up Timesync loop...", flush=True)
-    ts_loop = TimeSync(sim_conn, shared_data)
+    ts_loop = TimeSync.create_timesync(sim_conn, shared_data)
 
     # -------------------------------
     # Connect Vision receiver

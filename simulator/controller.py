@@ -146,6 +146,25 @@ class Controller:
 
         time.sleep(1.0 / CONTROL_HZ)
 
+    def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        """Command body angular rates + collective thrust (used by manual flight).
+
+        Same wire path as update_attitude_flight_control (attitude ignored, rates
+        used), but parameterized so an external pilot can drive it each tick.
+        """
+        now_ms = int(time.time() * 1000)
+        self.sim_conn.mav.set_attitude_target_send(
+            now_ms - self.system_boot_ms,
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            RATES_ATTITUDE_MASK,
+            [1, 0, 0, 0],  # dummy quaternion (ignored)
+            float(roll_rate),
+            float(pitch_rate),
+            float(yaw_rate),
+            float(thrust),
+        )
+
     # -------------------------------
     # Arm the drone
     # -------------------------------
