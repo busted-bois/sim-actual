@@ -61,6 +61,16 @@ HOVER_TRIM_LIMIT = 0.35  # max +/- trim around hover
 K_ATT = 0.6  # body-rate per radian of attitude error (fly2_course)
 RATE_CLIP = 0.30  # max commanded body rate (rad/s)
 
+# The one-shot arm at client start can be lost (sent before the sim registers
+# us) or undone (sim disarms after a crash), so tick() re-sends ARM until the
+# sim's HEARTBEAT reports armed (measured live 2026-07-08: ARM is ACKed and
+# sticks when repeated).
+ARM_RETRY_S = 1.0
+
+# Pose telemetry counts as "blocked" (event/qualification session) when
+# HIGHRES_IMU arrived this recently while ODOMETRY/ATTITUDE stay absent.
+IMU_FRESH_S = 2.0
+
 # Command-rate signs vs the ODOMETRY attitude convention, measured live by
 # fly2_course: pitch normal; roll and yaw inverted. Valid because _attitude()
 # prefers the sim's odometry quaternion. Flip one if an axis flies backwards.
@@ -125,6 +135,8 @@ class ManualControl:
         self.last_cmd = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "thrust": 0.0}
         self._edge = dict.fromkeys(("r", "f", "minus", "equal"), False)
         self._z_target = None  # latched altitude setpoint (NED z, down-positive)
+        self._next_arm_t = 0.0  # monotonic time of the next allowed arm retry
+        self._arm_announced = False
         self._last_status_log = 0.0
         self._start_t = time.monotonic()
         self._input_seen = False  # have we ever read a keypress?
@@ -187,8 +199,33 @@ class ManualControl:
             self.hover_trim = max(self.hover_trim - HOVER_TRIM_STEP, -HOVER_TRIM_LIMIT)
             print(f"[manual] hover trim = {self.hover_trim:+.2f}", flush=True)
 
+    def _ensure_armed(self):
+        """Re-send ARM (throttled) until the sim's HEARTBEAT reports armed."""
+        if self.data.get("armed") is True:
+            return
+        now = time.monotonic()
+        if now < self._next_arm_t:
+            return
+        self._next_arm_t = now + ARM_RETRY_S
+        if not self._arm_announced:
+            self._arm_announced = True
+            print(
+                f"[manual] arming — retrying every {ARM_RETRY_S:.0f}s until the "
+                "sim reports armed",
+                flush=True,
+            )
+        self.controller.arm()
+
+    def _pose_blocked(self, att, z):
+        """True when IMU streams but pose doesn't: event session blocks it."""
+        if att is not None or z is not None:
+            return False
+        imu_mono = self.data.get("highres_imu_mono")
+        return imu_mono is not None and time.monotonic() - imu_mono < IMU_FRESH_S
+
     # --- control law -------------------------------------------------------
     def tick(self):
+        self._ensure_armed()
         keys = {k: bool(self._is_pressed(k)) for k in _ALL_KEYS}
         if any(keys.values()):
             self._input_seen = True
@@ -287,6 +324,7 @@ class ManualControl:
             "input_seen": self._input_seen,
             "armed": self.data.get("armed"),
             "have_telemetry": att is not None or z is not None,
+            "pose_blocked": self._pose_blocked(att, z),
             "cmd": dict(self.last_cmd),
             "roll_deg": math.degrees(att[0]) if att is not None else None,
             "pitch_deg": math.degrees(att[1]) if att is not None else None,

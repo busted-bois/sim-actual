@@ -15,6 +15,9 @@ import sys
 import time
 from collections import Counter
 
+# Run as a script (make probe): the repo root isn't on sys.path, only scripts/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pymavlink import mavutil
 
 from simulator.setup import HEARTBEAT_TIMEOUT_S, _send_gcs_heartbeat
@@ -64,6 +67,13 @@ def main() -> int:
             if has_pose:
                 print(
                     "  -> POSE TELEMETRY PRESENT (ODOMETRY/ATTITUDE) — closed-loop OK.",
+                    flush=True,
+                )
+            elif counts.get("HIGHRES_IMU"):
+                print(
+                    "  -> IMU streams but NO pose telemetry: this is an event/"
+                    "qualification session (pose blocked by design). Start a "
+                    "TRAINING session for manual flight.",
                     flush=True,
                 )
 

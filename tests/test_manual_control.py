@@ -14,10 +14,11 @@ from simulator.manual_control import (
 
 
 class FakeController:
-    """Captures the last send_attitude_rates(...) call."""
+    """Captures the last send_attitude_rates(...) call and counts arm() calls."""
 
     def __init__(self):
         self.last = None
+        self.arm_calls = 0
 
     def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
         self.last = {
@@ -26,6 +27,9 @@ class FakeController:
             "yaw": yaw_rate,
             "thrust": thrust,
         }
+
+    def arm(self):
+        self.arm_calls += 1
 
 
 def pressed(*keys):
@@ -121,6 +125,47 @@ class TestManualControl(unittest.TestCase):
         _, down = self._mc(["f"])
         down.tick()
         self.assertAlmostEqual(down.speed_kmh, DEFAULT_SPEED_KMH - SPEED_STEP_KMH, 6)
+
+    def test_rearms_while_disarmed(self):
+        # A one-shot ARM at client start gets lost (sent before the sim
+        # registers us) or undone (sim disarms after a crash) — measured live
+        # 2026-07-08: HUD stuck at armed=no forever. tick() must re-arm.
+        ctl, mc = self._mc([], data=dict(level_data(), armed=False))
+        mc.tick()
+        self.assertEqual(ctl.arm_calls, 1)
+        mc.tick()  # immediately after: throttled, no spam
+        self.assertEqual(ctl.arm_calls, 1)
+        mc._next_arm_t = 0.0  # retry window elapsed
+        mc.tick()
+        self.assertEqual(ctl.arm_calls, 2)
+
+    def test_rearms_when_armed_state_unknown(self):
+        # No HEARTBEAT processed yet (armed key absent) — keep trying.
+        ctl, mc = self._mc([])
+        mc.tick()
+        self.assertEqual(ctl.arm_calls, 1)
+
+    def test_does_not_arm_when_armed(self):
+        ctl, mc = self._mc([], data=dict(level_data(), armed=True))
+        mc.tick()
+        mc._next_arm_t = 0.0
+        mc.tick()
+        self.assertEqual(ctl.arm_calls, 0)
+
+    def test_status_flags_pose_blocked_when_imu_only(self):
+        # Event/qualification sessions stream HIGHRES_IMU but block
+        # ODOMETRY/ATTITUDE/LOCAL_POSITION_NED (measured via make probe
+        # 2026-07-08). The HUD needs to distinguish that from "sim silent".
+        import time as _time
+
+        _, mc = self._mc([], data={"highres_imu_mono": _time.monotonic()})
+        s = mc.status()
+        self.assertFalse(s["have_telemetry"])
+        self.assertTrue(s["pose_blocked"])
+
+    def test_status_pose_blocked_false_with_odometry(self):
+        _, mc = self._mc([])
+        self.assertFalse(mc.status()["pose_blocked"])
 
     def test_command_rate_within_sim_budget(self):
         # Sim spec §4.4 (fly2's VADR-TS-003): MAVLink command rate must stay

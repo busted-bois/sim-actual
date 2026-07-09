@@ -97,13 +97,33 @@ def run_manual_ui(controller, data):
     )
     hud.pack(anchor="w", padx=12)
 
+    warned_blocked = [False]
+
     def refresh():
         if stop.is_set():
             return
         s = pilot.status()
         cmd = s["cmd"]
         held_str = " ".join(k.upper() for k in _ALL_KEYS if held.get(k)) or "-"
-        tel = "yes" if s["have_telemetry"] else "NO  <-- no data from sim!"
+        if s["have_telemetry"]:
+            tel = "yes"
+        elif s["pose_blocked"]:
+            tel = "IMU only (pose BLOCKED)"
+            if not warned_blocked[0]:
+                warned_blocked[0] = True
+                print(
+                    "[manual] sim streams IMU but no pose telemetry — this is an "
+                    "event/qualification session, which blocks ODOMETRY/ATTITUDE. "
+                    "Start a TRAINING session for manual flight.",
+                    flush=True,
+                )
+        else:
+            tel = "NO  <-- no data from sim!"
+        hint = (
+            "\n!! event session blocks pose — start a TRAINING session"
+            if s["pose_blocked"]
+            else ""
+        )
         armed = {True: "yes", False: "no", None: "?"}[s["armed"]]
         hud.config(
             text=(
@@ -116,6 +136,7 @@ def run_manual_ui(controller, data):
                 f"pitch {_fmt(s['pitch_deg'], '', 0)}  yaw {_fmt(s['yaw_deg'], '', 0)}\n"
                 f"cmd sent   : roll {cmd['roll']:+.2f}  pitch {cmd['pitch']:+.2f}  "
                 f"yaw {cmd['yaw']:+.2f}  thr {cmd['thrust']:.2f}"
+                f"{hint}"
             )
         )
         root.after(60, refresh)
