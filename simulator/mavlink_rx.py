@@ -38,7 +38,9 @@ class MAVLinkRX:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                print("WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.")
+                print(
+                    "WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port."
+                )
                 return
 
             if msg is None:
@@ -148,9 +150,11 @@ class MAVLinkRX:
         reset_count = msg.reset_counter
 
     def on_highres_imu(self, msg):
-        acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
-        gyro_x, gyro_y, gyro_z = msg.xgyro, msg.ygyro, msg.zgyro
-        time_boot_us = msg.time_usec
+        self.data["imu"] = {
+            "accel": (msg.xacc, msg.yacc, msg.zacc),  # m/s^2 body frame
+            "gyro": (msg.xgyro, msg.ygyro, msg.zgyro),  # rad/s
+            "time_boot_us": msg.time_usec,
+        }
 
     def on_encapsulated_data(self, msg):
         if msg:
@@ -179,6 +183,20 @@ class MAVLinkRX:
             last_gate_race_time,
         ) = struct.unpack_from("<BQqqIq", raw_payload)
 
+        prev = self.data.get("race")
+        gate_passed_event = self.data.get("race_gate_passed_event", False)
+        if prev is not None and active_gate_index != prev["active_gate_index"]:
+            gate_passed_event = True  # consumed (cleared) by the controller
+
+        self.data["race"] = {
+            "sim_boot_time_ms": sim_boot_time_ms,
+            "race_start_boot_time_ms": race_start_boot_time_ms,
+            "race_finish_time_ns": race_finish_time_ns,
+            "active_gate_index": active_gate_index,
+            "last_gate_race_time": last_gate_race_time,
+        }
+        self.data["race_gate_passed_event"] = gate_passed_event
+
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
         # header:
@@ -189,7 +207,10 @@ class MAVLinkRX:
             return
         raw_payload = raw_payload[3:]
         self.track_chunks[transfer_id][msg.seqnr] = raw_payload
-        if len(self.track_chunks[transfer_id]) == self.expected_num_track_chunks[transfer_id]:
+        if (
+            len(self.track_chunks[transfer_id])
+            == self.expected_num_track_chunks[transfer_id]
+        ):
             full_payload = bytes()
             for i in range(len(self.track_chunks[transfer_id])):
                 full_payload = full_payload + self.track_chunks[transfer_id][i]
@@ -202,6 +223,7 @@ class MAVLinkRX:
         #   num_gates - track gate count
         (num_gates,) = struct.unpack_from("<H", payload)
         payload = payload[2:]
+        gates = []
         for i in range(num_gates):
             # Gate Info
             #   gate_id - range is 0 - num_gates
@@ -222,6 +244,22 @@ class MAVLinkRX:
                 height,
             ) = struct.unpack_from("<Hfffffffff", payload)
             payload = payload[38:]
+            gates.append(
+                {
+                    "gate_id": gate_id,
+                    "position_ned": (position_ned_x, position_ned_y, position_ned_z),
+                    "orientation_ned": (
+                        orientation_ned_w,
+                        orientation_ned_x,
+                        orientation_ned_y,
+                        orientation_ned_z,
+                    ),
+                    "width": width,
+                    "height": height,
+                }
+            )
+        self.data["track"] = {"gates": gates, "num_gates": num_gates}
+        print(f"Track data received: {num_gates} gates", flush=True)
 
     def on_actuator_output_status(self, msg):
         time_boot_us = msg.time_usec
@@ -237,4 +275,6 @@ class MAVLinkRX:
         collision_id = msg.id
 
         threat_level = msg.threat_level  # 1-2 with 2 being higher impact collision
-        impact = msg.horizontal_minimum_delta  # this is not a delta - it is the impulse magnitude in kg m/s
+        impact = (
+            msg.horizontal_minimum_delta
+        )  # this is not a delta - it is the impulse magnitude in kg m/s
