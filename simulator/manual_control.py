@@ -4,7 +4,7 @@ Controls (see CONTROLS_HINT):
   W / S : fly forward / backward
   A / D : strafe left / right
   Q / E : yaw left / right       (turn in place)
-  T     : climb
+  SPACE : climb
   X     : descend
   R / F : increase / decrease flight speed (tap to step)
   - / = : trim hover thrust down / up (find the takeoff/hover point)
@@ -37,44 +37,44 @@ SPEED_MIN_KMH = 1.0
 SPEED_MAX_KMH = 30.0
 
 K_VEL = 0.15  # target lean (rad) per m/s of speed error
-MAX_LEAN = math.radians(20.0)  # cap on the lean the velocity loop may command
+MAX_LEAN = 0.15  # rad, cap on the lean the velocity loop may command
 
-YAW_RATE = 1.5  # rad/s while Q/E held
+YAW_RATE = 0.5  # rad/s while Q/E held (fly2_course's YAW_CLIP)
 
-# Altitude hold — PID on NED z toward a latched target (ported from the working
-# branch's Pilot._altitude_thrust; these values fly this sim).
-HOVER_THRUST = 0.5  # fallback thrust when no telemetry (open-loop)
-ALTITUDE_TRIM = 0.55  # PID feedforward: thrust that holds hover at zero error
-KP_Z = 0.25  # thrust per metre of altitude error
-KI_Z = 0.035  # integral gain
-KD_Z = 0.12  # thrust per m/s of vertical speed (damping)
-Z_INT_CLAMP = 6.0  # anti-windup clamp on the integral term
-CLIMB_RATE_MPS = 2.0  # how fast T raises the altitude setpoint
+# Altitude hold — PD on NED z toward a latched target. Constants are the
+# flight-proven values from rl/fly2_course.py (Flight-Automation branch); hover
+# thrust for this sim was measured there at 0.27 (thrust-accel ~36 m/s^2).
+HOVER_T = 0.27  # thrust that holds hover at zero error (and no-telemetry fallback)
+KP_Z = 0.025  # thrust per metre of altitude error
+KD_Z = 0.030  # thrust per m/s of vertical-speed error (damping)
+THRUST_MIN = 0.18
+THRUST_MAX = 0.5
+CLIMB_RATE_MPS = 2.0  # how fast SPACE raises the altitude setpoint
 DESCEND_RATE_MPS = 2.0  # how fast X lowers the altitude setpoint
-CONTROL_DT_S = 1.0 / 250.0  # nominal control period for the integrator
+CONTROL_DT_S = 1.0 / 250.0  # nominal control period for setpoint slewing
 
 HOVER_TRIM_STEP = 0.02  # thrust change per -/= tap
 HOVER_TRIM_LIMIT = 0.35  # max +/- trim around hover
 
-K_ATT = 4.0  # body-rate per radian of attitude error
-RATE_CLIP = 2.0  # max commanded body rate (rad/s)
+K_ATT = 0.6  # body-rate per radian of attitude error (fly2_course)
+RATE_CLIP = 0.30  # max commanded body rate (rad/s)
 
-# Map the "truth" attitude convention (pitch negative = nose down = forward,
-# roll positive = right wing down = right) onto the sim's command-rate signs.
-# Flip these if a key drives the drone the wrong way in-sim.
-SIGN_ROLL = 1.0
-SIGN_PITCH = 1.0
-SIGN_YAW = 1.0
+# Command-rate signs vs the ODOMETRY attitude convention, measured live by
+# fly2_course: pitch normal; roll and yaw inverted. Valid because _attitude()
+# prefers the sim's odometry quaternion. Flip one if an axis flies backwards.
+SIGN_ROLL = -1.0
+SIGN_PITCH = +1.0
+SIGN_YAW = -1.0
 
 STATUS_LOG_INTERVAL_S = 1.0
 
 CONTROLS_HINT = (
     "Manual flight: [W/S] fwd/back  [A/D] left/right  [Q/E] turn  "
-    "[T] up  [X] down  [R/F] speed +/-  [-/=] hover trim"
+    "[SPACE] up  [X] down  [R/F] speed +/-  [-/=] hover trim"
 )
 
 # every key the pilot reads; the Tk input window maintains these as held/not-held
-_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "t", "x", "r", "f", "minus", "equal")
+_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "space", "x", "r", "f", "minus", "equal")
 
 
 def _default_is_pressed():
@@ -123,7 +123,6 @@ class ManualControl:
         self.last_cmd = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "thrust": 0.0}
         self._edge = dict.fromkeys(("r", "f", "minus", "equal"), False)
         self._z_target = None  # latched altitude setpoint (NED z, down-positive)
-        self._z_integral = 0.0  # altitude PID integrator
         self._last_status_log = 0.0
         self._start_t = time.monotonic()
         self._input_seen = False  # have we ever read a keypress?
@@ -242,34 +241,36 @@ class ManualControl:
     def _thrust_command(self, keys):
         z, vz = self._altitude()
 
-        # T/X move the altitude setpoint up/down; otherwise it stays latched (hold).
-        # NED z is down-positive, so climbing means a more-negative target.
+        # SPACE/X move the altitude setpoint up/down; otherwise it stays latched
+        # (hold). NED z is down-positive, so climbing means a more-negative target.
         if z is not None and self._z_target is None:
             self._z_target = z
-        if keys["t"] and self._z_target is not None:
+        vz_des = 0.0
+        if keys["space"] and self._z_target is not None:
             self._z_target -= CLIMB_RATE_MPS * CONTROL_DT_S
+            vz_des = -CLIMB_RATE_MPS
         if keys["x"] and self._z_target is not None:
             self._z_target += DESCEND_RATE_MPS * CONTROL_DT_S
+            vz_des = DESCEND_RATE_MPS
 
-        return self._altitude_thrust(z, vz)
+        return self._altitude_thrust(z, vz, vz_des)
 
-    def _altitude_thrust(self, z, vz):
-        """PID on NED z toward the latched setpoint; open-loop fallback if blind."""
+    def _altitude_thrust(self, z, vz, vz_des):
+        """PD on NED z toward the latched setpoint; open-loop fallback if blind.
+
+        vz_des is the wanted vertical rate while SPACE/X are held, so the damping
+        term pulls toward the commanded climb/descent instead of fighting it.
+        """
         if z is None or self._z_target is None:
-            return _clip(HOVER_THRUST + self.hover_trim, 0.0, 1.0)
-        ex_z = z - self._z_target  # >0 means below target -> need more thrust
-        self._z_integral = _clip(
-            self._z_integral + ex_z * CONTROL_DT_S, -Z_INT_CLAMP, Z_INT_CLAMP
-        )
+            return _clip(HOVER_T + self.hover_trim, THRUST_MIN, THRUST_MAX)
         vz = vz if vz is not None else 0.0
         thrust = (
-            ALTITUDE_TRIM
+            HOVER_T
             + self.hover_trim
-            + KP_Z * ex_z
-            + KI_Z * self._z_integral
-            + KD_Z * vz
+            + KP_Z * (z - self._z_target)
+            + KD_Z * (vz - vz_des)
         )
-        return _clip(thrust, 0.0, 1.0)
+        return _clip(thrust, THRUST_MIN, THRUST_MAX)
 
     # --- HUD / logging -----------------------------------------------------
     def status(self):
@@ -305,10 +306,10 @@ class ManualControl:
             "d": "D",
             "q": "Q",
             "e": "E",
-            "t": "T",
+            "space": "SPC",
             "x": "X",
         }
-        held = "".join(v for k, v in labels.items() if keys[k]) or "-"
+        held = " ".join(v for k, v in labels.items() if keys[k]) or "-"
         z, _ = self._altitude()
         z_str = f"{z:.1f}" if z is not None else "n/a"
         print(

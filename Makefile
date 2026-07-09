@@ -10,7 +10,7 @@ check:
 sim:
 	uv run main.py
 
-# Manual keyboard flight — WASD move, Q/E turn, T up, X down, R/F speed. Close window to exit.
+# Manual keyboard flight — WASD move, Q/E turn, SPACE up, X down, R/F speed. Close window to exit.
 manual:
 	uv run manual.py
 

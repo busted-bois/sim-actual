@@ -20,7 +20,7 @@ from simulator.manual_control import _ALL_KEYS, ManualControl
 
 _LEGEND = (
     "W/S fwd/back    A/D left/right    Q/E turn\n"
-    "T climb    X descend    R/F speed +/-    - / = hover trim\n"
+    "SPACE climb    X descend    R/F speed +/-    - / = hover trim\n"
     "Keep THIS window focused.   Esc or close to quit."
 )
 

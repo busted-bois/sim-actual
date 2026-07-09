@@ -4,8 +4,8 @@ import math
 import unittest
 
 from simulator.manual_control import (
-    ALTITUDE_TRIM,
     DEFAULT_SPEED_KMH,
+    HOVER_T,
     SPEED_STEP_KMH,
     ManualControl,
 )
@@ -53,8 +53,8 @@ class TestManualControl(unittest.TestCase):
         self.assertAlmostEqual(out["roll"], 0.0, places=6)
         self.assertAlmostEqual(out["pitch"], 0.0, places=6)
         self.assertAlmostEqual(out["yaw"], 0.0, places=6)
-        # at zero altitude error the PID outputs its feedforward (hover) thrust
-        self.assertAlmostEqual(out["thrust"], ALTITUDE_TRIM, places=6)
+        # at zero altitude error the PD outputs its feedforward (hover) thrust
+        self.assertAlmostEqual(out["thrust"], HOVER_T, places=6)
 
     def test_w_pitches_forward(self):
         # W wants forward speed -> nose-down (negative) pitch-rate command.
@@ -66,16 +66,18 @@ class TestManualControl(unittest.TestCase):
         self.assertGreater(out["pitch"], 0.0)
 
     def test_a_d_roll_opposite_signs(self):
+        # Wire roll command is inverted vs odometry attitude (SIGN_ROLL = -1,
+        # measured by fly2_course): A (roll left) sends +, D (roll right) sends -.
         left = self._tick(["a"])["roll"]
         right = self._tick(["d"])["roll"]
-        self.assertLess(left, 0.0)
-        self.assertGreater(right, 0.0)
+        self.assertGreater(left, 0.0)
+        self.assertLess(right, 0.0)
         self.assertAlmostEqual(left, -right, places=6)
 
-    def test_t_climbs_x_descends(self):
-        # T raises the altitude setpoint -> more thrust than hover; X the opposite.
-        self.assertGreater(self._tick(["t"])["thrust"], ALTITUDE_TRIM)
-        self.assertLess(self._tick(["x"])["thrust"], ALTITUDE_TRIM)
+    def test_space_climbs_x_descends(self):
+        # SPACE raises the altitude setpoint -> more thrust than hover; X the opposite.
+        self.assertGreater(self._tick(["space"])["thrust"], HOVER_T)
+        self.assertLess(self._tick(["x"])["thrust"], HOVER_T)
 
     def test_hover_trim_shifts_neutral_thrust(self):
         # '=' trims hover up, '-' trims it down; neutral thrust follows.
@@ -84,14 +86,18 @@ class TestManualControl(unittest.TestCase):
         self.assertLess(self._tick(["minus"])["thrust"], base)
 
     def test_q_e_yaw_opposite_signs(self):
-        self.assertLess(self._tick(["q"])["yaw"], 0.0)
-        self.assertGreater(self._tick(["e"])["yaw"], 0.0)
+        # Wire yaw command is inverted vs odometry attitude (SIGN_YAW = -1,
+        # measured by fly2_course): Q (turn left) sends +, E (turn right) sends -.
+        self.assertGreater(self._tick(["q"])["yaw"], 0.0)
+        self.assertLess(self._tick(["e"])["yaw"], 0.0)
 
     def test_leveling_corrects_tilt(self):
-        # Drone rolled right (+) with no key held -> command should roll back (-).
+        # Drone rolled right (+ in odometry) with no key held: under the measured
+        # inverted-roll wire convention the corrective command is POSITIVE. This
+        # locks in SIGN_ROLL = -1 — the +1 version made leveling positive feedback.
         data = {"odometry": {"q": _roll_quat(math.radians(5.0)), "z": 0.0, "vz": 0.0}}
         out = self._tick([], data=data)
-        self.assertLess(out["roll"], 0.0)
+        self.assertGreater(out["roll"], 0.0)
 
     def test_altitude_hold_adds_thrust_when_low(self):
         # Below the latched hold altitude (NED z larger = lower) -> more thrust.
@@ -99,7 +105,7 @@ class TestManualControl(unittest.TestCase):
         mc.tick()  # latches z_target = 0.0
         mc.data["odometry"]["z"] = 1.0  # drifted down 1 m
         mc.tick()
-        self.assertGreater(ctl.last["thrust"], ALTITUDE_TRIM)
+        self.assertGreater(ctl.last["thrust"], HOVER_T)
 
     def test_default_speed_is_5_kmh(self):
         _, mc = self._mc([])
