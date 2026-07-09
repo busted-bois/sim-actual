@@ -1,4 +1,4 @@
-"""Pilot — attitude-mode gate racer with altitude PID.
+﻿"""Pilot — attitude-mode gate racer with altitude PID.
 
 Called at ~250 Hz by controller.update(). Uses ATTITUDE mode with pitch_rate
 for forward motion and an altitude PID for thrust control. Reads shared_data
@@ -83,6 +83,35 @@ class Pilot:
         controller.set_control_mode("attitude")
         controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
         print("[pilot] init done, waiting for armed + vision/telemetry", flush=True)
+
+    @property
+    def gates_passed(self) -> int:
+        return self._gates_passed
+
+    def on_attempt_start(self) -> None:
+        """Hook for make auto — main pilot needs no extra setup at GO."""
+        pass
+
+    def reset_for_attempt(self) -> None:
+        """Clear flight state after sim reset between auto-flight retries."""
+        self._z_integral = 0.0
+        self._last_z_target = None
+        self._collision_time = None
+        self._stabilize_start = None
+        self._advancing = False
+        self._peak_r_frac = 0.0
+        self._post_gate_time = None
+        self._last_gate_id = None
+        self._completed_gates = set()
+        self._vision_suppress_until = 0.0
+        self._passed_gate_positions = []
+        self._gates_passed = 0
+        self._searching = False
+        self._search_yaw_dir = 1.0
+        self._search_start_time = None
+        self._mode_str = "???"
+        self.controller.set_control_mode("attitude")
+        self.controller.set_attitude_rates(0, 0, 0, HOVER_THRUST)
 
     # ------------------------------------------------------------------
     # Gate selection

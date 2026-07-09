@@ -1,0 +1,90 @@
+name: Update main documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "simulator/**"
+      - "rl/**"
+      - "main.py"
+      - "auto.py"
+      - "Makefile"
+      - "tests/**"
+      - "pyproject.toml"
+      - "SPEC.md"
+      - "scripts/sim-ab.ps1"
+
+permissions:
+  contents: write
+
+env:
+  DOC_BRANCH: main-documentation
+
+jobs:
+  update-doc:
+    if: ${{ !startsWith(github.event.head_commit.message, '[docs]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load doc from documentation branch
+        run: |
+          git fetch origin "${DOC_BRANCH}" || true
+          if git show "origin/${DOC_BRANCH}:docs/main-documentation.md" > docs/main-documentation.md 2>/dev/null; then
+            echo "Seeded doc from origin/${DOC_BRANCH}"
+          elif [[ ! -f docs/main-documentation.md ]]; then
+            echo "No docs/main-documentation.md seed found" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install doc agent deps
+        run: npm ci
+        working-directory: scripts
+
+      - name: Gather doc context
+        run: |
+          chmod +x scripts/doc-context.sh scripts/doc-validate.sh
+          make doc-context
+          echo "MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "MAIN_SUBJECT=$(git log -1 --format='%s')" >> "$GITHUB_ENV"
+          echo "MAIN_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Run Cursor doc agent
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: node scripts/update-main-documentation.mjs
+
+      - name: Validate documentation
+        run: make doc-validate MAIN_SHA="${MAIN_SHA}"
+
+      - name: Commit and push to documentation branch
+        run: |
+          cp docs/main-documentation.md /tmp/main-documentation.updated.md
+          git fetch origin "${DOC_BRANCH}" || true
+          if git rev-parse --verify "origin/${DOC_BRANCH}" >/dev/null 2>&1; then
+            git checkout "${DOC_BRANCH}"
+            git reset --hard "origin/${DOC_BRANCH}"
+          else
+            git checkout -b "${DOC_BRANCH}"
+          fi
+          cp /tmp/main-documentation.updated.md docs/main-documentation.md
+          if git diff --quiet docs/main-documentation.md; then
+            echo "No documentation changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/main-documentation.md
+          git commit -m "[docs] sync for ${MAIN_SHORT} — ${MAIN_SUBJECT}"
+          git push origin "${DOC_BRANCH}"
+
+      # Phase 5 follow-up: set DOC_BRANCH=main and commit doc on main directly once
+      # main-documentation has been merged into main.

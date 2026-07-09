@@ -30,7 +30,9 @@ skills-lock.json        # Agent skills lockfile
 
 ## More Info
 
-See [Instructions.md](Instructions.md) for full setup details, system requirements, competition timeline, and technical specifications.
+See [docs/main-documentation.md](docs/main-documentation.md) for a living overview of what is on **`main`** (updated when features merge).
+
+See [docs/Instructions.md](docs/Instructions.md) for full setup details, system requirements, competition timeline, and technical specifications.
 
 # Team Members
 - Ryan Yang, Ram Rao, Samyak Kakatur, Kunal Shrivastav, Trung Ngyuen, David Vayntrub, Yat Chun Wong, Sameer Faisal

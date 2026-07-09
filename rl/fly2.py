@@ -15,6 +15,7 @@ Modes:
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -24,38 +25,20 @@ import time
 import numpy as np
 
 from rl import spec
+from rl.fly2_course import (
+    EST_SIGNS,
+    HOVER_T,
+    Fly2Config,
+    compute_course_rates,
+    rates_from_attitude_targets,
+    rpy,
+    wrap,
+)
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
-from simulator.transforms import quat_to_yaw
 from simulator.vision_nav import VisionGuidance, VisualServo
 
-HOVER_T = 0.27
-KP_Z, KD_Z = 0.025, 0.030  # thrust is sensitive (accel ~36/unit)
-K_ATT = 0.6  # attitude-angle P -> rate command
-K_YAW = 0.4
-# Measured command-sign conventions vs ODOMETRY attitude (pitch normal;
-# roll + yaw inverted). Tuned in Training mode.
-SIGN_ROLL = -1.0
-SIGN_PITCH = +1.0
-SIGN_YAW = -1.0
-# Vs the GYRO-integrated estimator attitude the plant is inverted on ALL
-# axes (measured live 2026-07-01: cmd +0.2 -> gyro ~-0.48 on each axis).
-EST_SIGNS = (-1.0, -1.0, -1.0)
-RATE_CLIP = 0.30
-YAW_CLIP = 0.5
 HZ = 90.0  # spec VADR-TS-003 4.4: command rate must stay < 100 Hz
-
-
-def rpy(q):
-    w, x, y, z = q
-    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
-    pitch = math.asin(max(-1, min(1, 2 * (w * y - z * x))))
-    yaw = quat_to_yaw(*q)
-    return roll, pitch, yaw
-
-
-def wrap(a):
-    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 def main():
@@ -96,6 +79,13 @@ def main():
     )
     args = ap.parse_args()
 
+    cfg = Fly2Config(
+        speed=args.speed,
+        lean=args.lean,
+        klat=args.klat,
+        zoff=args.zoff,
+        flipz=args.flipz,
+    )
     # Vision mode flies purely from detected gates -- no hardcoded map.
     gate_map = []
     n = 0
@@ -126,12 +116,8 @@ def main():
     hold_yaw = rpy(s0.quat)[2]
     # Estimator-driven flight needs the gyro-frame command signs.
     est_mode = args.est or sim.data.get("odometry") is None
-    s_roll, s_pitch, s_yaw = (
-        EST_SIGNS if est_mode else (SIGN_ROLL, SIGN_PITCH, SIGN_YAW)
-    )
+    att_signs = EST_SIGNS if est_mode else None
     if args.mode == "vision":
-        # Estimator pose is coarser than odometry: approach slower so the
-        # aim tolerance at the opening is larger.
         # Estimator regime: body-frame visual servoing -- world-position
         # drift cannot create phantom targets (measured failure of the
         # map-based guidance without odometry). Training/odometry keeps the
@@ -142,6 +128,20 @@ def main():
         f" est_mode={est_mode}",
         flush=True,
     )
+
+    # Per-run nav telemetry: guidance phase + axis-frame errors at 10 Hz.
+    nav_log, nav_wr, last_nav_t, min_gate_d = None, None, 0.0, None
+    if args.mode == "vision":
+        os.makedirs(os.path.join("rl", "data"), exist_ok=True)
+        nav_path = os.path.join(
+            "rl", "data", time.strftime("nav_log_%Y%m%d_%H%M%S.csv")
+        )
+        nav_log = open(nav_path, "w", newline="")
+        nav_wr = csv.writer(nav_log)
+        nav_wr.writerow(
+            "t phase s lat vert dist pn pe pd vn ve vd status n_passed".split()
+        )
+        print(f"[f2] nav log -> {nav_path}", flush=True)
 
     display.start()  # live vision window (what the drone's camera sees)
 
@@ -155,8 +155,7 @@ def main():
     scan_since = None
     reason = "timeout"
     while time.time() - t0 < args.seconds:
-        # Pump the vision window whenever a new (detected) frame is ready, so it
-        # stays responsive without throttling the 150 Hz control loop below.
+        # Pump the vision window whenever a new (detected) frame is ready.
         img, tag = display.pick(sim.data)
         if tag is not None and tag != last_shown_tag:
             last_shown_tag = tag
@@ -173,40 +172,54 @@ def main():
 
         vstatus = ""
         if args.mode == "hover":
-            tgt_pitch, tgt_roll, yaw_err, tgt_z = 0.0, 0.0, wrap(hold_yaw - yaw), hold_z
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
+                roll,
+                pitch,
+                z,
+                vz,
+                0.0,
+                0.0,
+                wrap(hold_yaw - yaw),
+                hold_z,
+                signs=att_signs,
+            )
         elif args.mode == "vision" and time.time() - t0 < 1.2:
-            # TAKEOFF: the drone spawns nose-down on a ramp -- level out and
-            # climb clear of it before chasing gates (guidance during the
-            # ramp scrape pollutes the map and flips the drone).
-            tgt_roll, tgt_pitch, yaw_err, tgt_z = 0.0, 0.0, 0.0, hold_z - 2.0
+            # TAKEOFF: level out and climb clear of the spawn ramp.
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
+                roll, pitch, z, vz, 0.0, 0.0, 0.0, hold_z - 2.0, signs=att_signs
+            )
             vstatus = "TAKEOFF"
         elif args.mode == "vision":
-            # YOLO runs at 3-10 Hz; the 150 Hz loop must only ingest each
-            # pose frame ONCE -- re-feeding a stale detection against the
-            # moving estimate corrupts both the map and the landmark fixes.
             pose_data = sim.data.get("pose")
             fresh = pose_data is not None and pose_data["frame_id"] != last_pose_fid
             if fresh:
                 last_pose_fid = pose_data["frame_id"]
             gates = pose_data["gates"] if fresh else []
             cmd = guide.update(gates, p, v, snap.quat, yaw, time.time())
-            # Re-observed confirmed gates are landmarks: p = map - R_wb @ body.
-            # Only when the estimator drives the pose -- else the map lives in
-            # the odometry frame and would corrupt the boot-anchored filter.
             if est_mode and fresh:
                 R_wb = spec.quat_to_R(snap.quat)
                 for map_p, gate_body in guide.last_matches:
                     sim.estimator.update_landmark(map_p - R_wb @ gate_body)
-            tgt_roll, tgt_pitch, yaw_err, tgt_z = (
-                cmd.tgt_roll,
-                cmd.tgt_pitch,
-                cmd.yaw_err,
-                cmd.tgt_z,
-            )
             vstatus = cmd.status
-            # A collision kicks the real state; let the estimator re-anchor.
-            # Scrapes emit collisions at 60 Hz -- treat them as ONE episode
-            # (repeated covariance inflation would blow the filter open).
+            if nav_wr is not None and time.time() - last_nav_t >= 0.1:
+                last_nav_t = time.time()
+                dbg = getattr(guide, "debug", None) or {}
+                d = dbg.get("dist")
+                if d is not None:
+                    min_gate_d = d if min_gate_d is None else min(min_gate_d, d)
+                nav_wr.writerow(
+                    [
+                        round(time.time() - t0, 2),
+                        dbg.get("phase", ""),
+                        *(
+                            None if x is None else round(float(x), 2)
+                            for x in (dbg.get("s"), dbg.get("lat"), dbg.get("vert"), d)
+                        ),
+                        *(round(float(x), 2) for x in (*p, *v)),
+                        cmd.status,
+                        guide.n_passed,
+                    ]
+                )
             col = sim.data.get("last_collision")
             if col is not None and col != last_col:
                 last_col = col
@@ -215,7 +228,6 @@ def main():
                     if est_mode:
                         sim.estimator.notify_collision()
                     print(f"[f2] [{time.time() - t0:4.1f}s] COLLISION", flush=True)
-            # Track how long we've been scanning with no confirmed gate.
             if cmd.status.startswith("SCAN"):
                 if scan_since is None:
                     scan_since = time.time()
@@ -224,6 +236,25 @@ def main():
             if guide.n_passed >= args.gates:
                 reason = "COURSE COMPLETE (vision)"
                 break
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
+                roll,
+                pitch,
+                z,
+                vz,
+                cmd.tgt_roll,
+                cmd.tgt_pitch,
+                cmd.yaw_err,
+                cmd.tgt_z,
+                signs=att_signs,
+            )
+            # Vision mode: bound vertical authority hard.
+            z_err = float(np.clip(z - cmd.tgt_z, -3.0, 3.0))
+            vz_c = float(np.clip(vz, -4.0, 4.0))
+            thrust = float(
+                np.clip(HOVER_T + 0.025 * z_err + 0.030 * vz_c, 0.20, 0.36)
+            )
+            if scan_since is not None and time.time() - scan_since > 1.5:
+                thrust = HOVER_T - 0.012
         else:
             active = int(sim.data.get("active_gate_index", 0) or 0)
             if active != last_active:
@@ -235,57 +266,16 @@ def main():
             if active >= n:
                 reason = "COURSE COMPLETE"
                 break
-            g = np.asarray(gate_map[active]["pos"], float)
-            dx, dy = g[0] - p[0], g[1] - p[1]
-            dist = math.hypot(dx, dy)
-            bearing = math.atan2(dy, dx)
-            yaw_err = wrap(bearing - yaw)
-            speed = float(np.linalg.norm(v[:2]))
-            align = max(0.0, 1.0 - abs(yaw_err) / 0.4)
-            v_des = args.speed * align * min(1.0, 0.3 + dist / 10.0)
-            # forward (toward gate) = NEGATIVE pitch (measured); brake = positive.
-            lean = float(np.clip(0.05 * (v_des - speed), -0.05, args.lean))
-            tgt_pitch = -lean
-            # Cross-track roll control: bank toward the gate line (body-right error).
-            e_cross = dx * math.sin(yaw) - dy * math.cos(yaw)
-            tgt_roll = float(np.clip(args.klat * e_cross, -0.12, 0.12))
-            # Track-data gate z appears sign-flipped vs odometry NED (course climbs).
-            # zoff lifts the aim point so we clear the bottom border of the opening.
-            tgt_z = (-g[2] if args.flipz else g[2]) + args.zoff
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = compute_course_rates(
+                p, v, snap.quat, active, gate_map, hold_z, cfg
+            )
 
-        # Attitude-angle P -> rate commands, with measured sign conventions.
-        roll_cmd = float(
-            np.clip(s_roll * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
-        )
-        pitch_cmd = float(
-            np.clip(s_pitch * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
-        )
-        yaw_cmd = float(np.clip(s_yaw * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
-        # Vision mode: bound vertical authority hard. A collision-opened
-        # covariance lets one landmark yank z metres from target; unclamped
-        # PD then saturates thrust (0.5 = ~18 m/s^2, measured: rockets to the
-        # ceiling). Clamp the error AND the thrust range (~+/-3 m/s^2 max).
-        if args.mode == "vision":
-            z_err = float(np.clip(z - tgt_z, -3.0, 3.0))
-            vz_c = float(np.clip(vz, -4.0, 4.0))
-            thrust = float(np.clip(HOVER_T + KP_Z * z_err + KD_Z * vz_c, 0.20, 0.36))
-        else:
-            thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
-        # Lost (scanning >1.5s with no confirmed gate): the z estimate can't
-        # be trusted, so bleed REAL altitude gently -- gates live near the
-        # floor; this brings a ceiling-wanderer back into vision range.
-        if args.mode == "vision" and scan_since is not None:
-            if time.time() - scan_since > 1.5:
-                thrust = HOVER_T - 0.012
         sim.send_attitude_rates(roll_cmd, pitch_cmd, yaw_cmd, thrust)
 
-        # Safety.
         gb_z = (spec.quat_to_R(snap.quat).T @ np.array([0.0, 0, 1.0]))[2]
         if gb_z < 0.0:
             reason = "ABORT flipped"
             break
-        # In est mode z is an ESTIMATE with no baro backup -- a tight bound
-        # aborts recoverable runs on estimator drift alone.
         z_abort = 60 if est_mode else 30
         if z < hold_z - z_abort or z > hold_z + z_abort:
             reason = "ABORT altitude"
@@ -305,6 +295,13 @@ def main():
 
     sim.send_attitude_rates(0, 0, 0, HOVER_T)
     display.close()
+    if nav_log is not None:
+        nav_log.close()
+        print(
+            f"[f2] nav summary: passed={guide.n_passed if guide else 0} "
+            f"closest_gate={min_gate_d if min_gate_d is not None else 'n/a'}",
+            flush=True,
+        )
     print(
         f"[f2] === DONE {reason} final={np.round(sim.snapshot().pos_ned, 1)} "
         f"active={sim.data.get('active_gate_index')} ===",
