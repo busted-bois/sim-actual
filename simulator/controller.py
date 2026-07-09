@@ -2,8 +2,6 @@ import time
 
 from pymavlink import mavutil
 
-from simulator.pilot import Pilot
-
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 # --------------------------------------------------------------------------------------
@@ -117,7 +115,9 @@ def _send_velocity_ned(
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
-CONTROL_HZ = 250
+# Spec VADR-TS-003 4.4: command rate MUST stay below 100 Hz (was 250 --
+# out-of-spec commands may be dropped or applied erratically by the sim).
+CONTROL_HZ = 90
 
 
 class Controller:
@@ -133,7 +133,29 @@ class Controller:
         self._vx = 0.0
         self._vy = 0.0
         self._vz = 0.0
-        self.pilot = Pilot(self, data)
+        self.pilot = self._make_pilot()
+        self._disarm_ticks = 0
+
+    def _make_pilot(self):
+        import os
+
+        from simulator.auto_flight import auto_flight_enabled
+
+        if auto_flight_enabled():
+            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
+            # pixel servo (needs no position estimate; smoothest live flight
+            # so far). AUTO_PILOT=vnav selects the world-map vision navigator
+            # (NaN-proofed EKF pose).
+            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
+                from simulator.vision_nav_pilot import VisionNavPilot
+
+                return VisionNavPilot(self, self.data)
+            from simulator.ibvs_pilot import IBVSPilot
+
+            return IBVSPilot(self, self.data)
+        from simulator.pilot import Pilot
+
+        return Pilot(self, self.data)
 
     def set_control_mode(self, mode):
         self.control_mode = mode
@@ -155,6 +177,13 @@ class Controller:
 
     def update(self):
         self.pilot.tick()
+
+        if not self.data.get("armed", False):
+            self._disarm_ticks += 1
+            if self._disarm_ticks % 50 == 1:
+                self.arm()
+        else:
+            self._disarm_ticks = 0
 
         if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)

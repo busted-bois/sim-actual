@@ -24,6 +24,53 @@ _HUE_MAX_UPPER = np.array([[[179, 255, 255]]])
 _HUE_MIN_LOWER = np.array([[[0, 0, 0]]])
 
 
+def _color_mask(hsv: np.ndarray) -> np.ndarray:
+    if _HSV_LOWER[0][0] > _HSV_UPPER[0][0]:
+        mask1 = cv2.inRange(hsv, _HSV_LOWER, _HUE_MAX_UPPER)
+        mask2 = cv2.inRange(hsv, _HUE_MIN_LOWER, _HSV_UPPER)
+        return cv2.bitwise_or(mask1, mask2)
+    return cv2.inRange(hsv, _HSV_LOWER, _HSV_UPPER)
+
+
+def _desaturated_orange_mask(hsv: np.ndarray) -> np.ndarray:
+    """VQ2 R2 scanned gates are often less saturated than VQ1."""
+    h_lo = max(0, int(_HSV_LOWER[0][0]) - 12)
+    h_hi = min(179, int(_HSV_UPPER[0][0]) + 12)
+    return cv2.inRange(
+        hsv,
+        np.array([[[h_lo, 25, 35]]], dtype=np.uint8),
+        np.array([[[h_hi, 140, 255]]], dtype=np.uint8),
+    )
+
+
+def _best_gate_contour(mask: np.ndarray) -> np.ndarray | None:
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _KERNEL, iterations=MORPH_ITERS)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL, iterations=MORPH_ITERS)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_h, img_w = mask.shape[:2]
+    half_w, half_h = img_w / 2.0, img_h / 2.0
+    best_contour = None
+    best_score = -1.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < MIN_CONTOUR_AREA_PX:
+            continue
+        _, _, w, h = cv2.boundingRect(c)
+        aspect = w / max(h, 1)
+        if aspect > MAX_ASPECT_RATIO or aspect < MIN_ASPECT_RATIO:
+            continue
+        moments = cv2.moments(c)
+        m00 = max(moments["m00"], 1e-6)
+        cx = moments["m10"] / m00
+        cy = moments["m01"] / m00
+        dist = abs(cx - half_w) + abs(cy - half_h)
+        score = area / (1.0 + dist)
+        if score > best_score:
+            best_score = score
+            best_contour = c
+    return best_contour
+
+
 def detect_gate(
     img: np.ndarray, frame_id: int, sim_time_ns: int
 ) -> GateDetection | None:
@@ -47,53 +94,13 @@ def detect_gate(
     # 1. Convert to HSV colorspace.
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # 2. Build color mask, handling hue wraparound across the 0/179 boundary.
-    if _HSV_LOWER[0][0] > _HSV_UPPER[0][0]:
-        mask1 = cv2.inRange(hsv, _HSV_LOWER, _HUE_MAX_UPPER)
-        mask2 = cv2.inRange(hsv, _HUE_MIN_LOWER, _HSV_UPPER)
-        mask = cv2.bitwise_or(mask1, mask2)
-    else:
-        mask = cv2.inRange(hsv, _HSV_LOWER, _HSV_UPPER)
+    best_contour = _best_gate_contour(_color_mask(hsv))
+    if best_contour is None:
+        best_contour = _best_gate_contour(_desaturated_orange_mask(hsv))
 
-    # 3. Morphological cleanup: OPEN removes speckle noise, CLOSE fills gaps.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _KERNEL, iterations=MORPH_ITERS)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _KERNEL, iterations=MORPH_ITERS)
-
-    # 4. Extract external contours.
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # 5. Filter by area and aspect ratio; score by area / distance-to-center.
-    best_contour = None
-    best_score = -1.0
-    img_h, img_w = mask.shape[:2]
-    half_w, half_h = img_w / 2.0, img_h / 2.0
-    contours_area_pass = 0
-    contours_aspect_pass = 0
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < MIN_CONTOUR_AREA_PX:
-            continue
-        contours_area_pass += 1
-        _, _, w, h = cv2.boundingRect(c)
-        aspect = w / max(h, 1)
-        if aspect > MAX_ASPECT_RATIO or aspect < MIN_ASPECT_RATIO:
-            continue
-        contours_aspect_pass += 1
-        moments = cv2.moments(c)
-        m00 = max(moments["m00"], 1e-6)
-        cx = moments["m10"] / m00
-        cy = moments["m01"] / m00
-        dist = abs(cx - half_w) + abs(cy - half_h)
-        score = area / (1.0 + dist)
-        if score > best_score:
-            best_score = score
-            best_contour = c
-
-    # 6. Nothing passed the filters.
     if best_contour is None:
         return None
 
-    # 7. Centroid via image moments (guarded against m00 == 0).
     moments = cv2.moments(best_contour)
     m00 = max(moments["m00"], 1e-6)
     cx = moments["m10"] / m00

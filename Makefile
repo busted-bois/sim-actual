@@ -1,4 +1,4 @@
-.PHONY: i install check sim view probe est-selftest capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -7,13 +7,39 @@ check:
 	uv run ruff check --fix .
 	uv run ruff format .
 
+# --- Documentation (auto-sync on push to main; local: CURSOR_API_KEY required) ----
+doc-context:
+	bash scripts/doc-context.sh > .doc-context.txt
+
+doc-validate:
+	bash scripts/doc-validate.sh docs/main-documentation.md $(MAIN_SHA)
+
+doc-update: doc-context
+	cd scripts && npm ci && cd ..
+	node scripts/update-main-documentation.mjs
+
+test:
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
+
 sim:
 	uv run main.py
+
+# Auto flight — continuous overnight retry; Ctrl+C stops
+auto:
+	uv run auto.py
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
 view:
 	uv run -m simulator.vision_view
+
+# Kill a stale make auto/make sim client still holding UDP 14550
+free-port:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-mavlink-port.ps1
+else
+	bash scripts/free-mavlink-port.sh
+endif
 
 # Passive MAVLink probe: per-message rates + IMU conventions. Run in Training
 # AND in VQ2 to see exactly what the event block removes.

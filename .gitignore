@@ -9,5 +9,15 @@ __pycache__/
 *.pyc
 .venv/
 
+# Runtime logs
+logs/
+rl/data/auto_laps.jsonl
+rl/data/best_lap.txt
+
+# Doc automation artifacts
+.doc-context.txt
+scripts/node_modules/
 # Recorded vision runs
 runs/
+# Per-run nav telemetry CSVs
+rl/data/nav_log*.csv

@@ -11,6 +11,8 @@ camera->body rotation so simulator/ doesn't depend on rl/.
 estimate_gate_pose(keypoints, confs) -> dict | None:
     gate_pos_cam   (3,)  gate centre in camera optical frame (m)
     gate_pos_body  (3,)  gate centre in body FRD frame (x fwd, y right, z down)
+    normal_body    (3,)  gate-plane unit normal in body FRD, pointing back at
+                         the drone (fly-through direction is -normal_body)
     range_m        float straight-line distance to gate centre
     yaw_bearing    float angle to gate in body XY plane (rad, +right)
     pitch_bearing  float elevation angle to gate (rad, +up)
@@ -146,10 +148,19 @@ def estimate_gate_pose(keypoints, confs, box=None):
     y_cam = (ctr[1] - _K[1, 2]) / _K[1, 1] * depth
     gate_pos_cam = np.array([x_cam, y_cam, depth])
     gate_pos_body = R_BODY_CAM @ gate_pos_cam
+    # Gate-plane normal: the corners live on the gate-local z=0 plane, so the
+    # rotated local +z is the plane normal. Sign-fix it to point back at the
+    # camera; the fly-through axis the guidance needs is then -normal.
+    R_cg, _ = cv2.Rodrigues(pose["rvec"])
+    n_cam = R_cg[:, 2]
+    if float(np.dot(n_cam, gate_pos_cam)) > 0:
+        n_cam = -n_cam
+    normal_body = R_BODY_CAM @ n_cam
     horiz = float(np.hypot(gate_pos_body[0], gate_pos_body[1]))
     return {
         "gate_pos_cam": gate_pos_cam,
         "gate_pos_body": gate_pos_body,
+        "normal_body": normal_body,
         "range_m": float(np.linalg.norm(gate_pos_cam)),
         "yaw_bearing": float(np.arctan2(gate_pos_body[1], gate_pos_body[0])),
         "pitch_bearing": float(np.arctan2(-gate_pos_body[2], horiz)),
@@ -162,7 +173,7 @@ def estimate_gate_pose(keypoints, confs, box=None):
 def _selftest():
     # Project the gate from a known pose, recover it, check error.
     rng = np.random.default_rng(0)
-    errs, yaws = [], []
+    errs, yaws, nrm_degs = [], [], []
     for _ in range(200):
         # gate ahead in camera frame: z (fwd) 3-9m, small x/y offset
         t_true = np.array(
@@ -186,11 +197,21 @@ def _selftest():
         errs.append(np.linalg.norm(est["gate_pos_cam"] - t_true))
         # body forward should dominate (gate ahead), yaw bearing small
         yaws.append(abs(est["yaw_bearing"]))
-    errs = np.array(errs)
+        # normal: compare against the true plane normal, sign-fixed toward cam
+        R_true, _ = cv2.Rodrigues(r_true)
+        n_true = R_true[:, 2]
+        if float(np.dot(n_true, t_true)) > 0:
+            n_true = -n_true
+        n_est = R_BODY_CAM.T @ est["normal_body"]  # back to camera frame
+        cosang = float(np.clip(np.dot(n_est, n_true), -1.0, 1.0))
+        nrm_degs.append(np.degrees(np.arccos(cosang)))
+    errs, nrm_degs = np.array(errs), np.array(nrm_degs)
     print(
         f"[selftest] n={len(errs)} pos_err mean={errs.mean():.3f}m max={errs.max():.3f}m"
+        f" normal_err mean={nrm_degs.mean():.1f}deg max={nrm_degs.max():.1f}deg"
     )
     assert errs.mean() < 0.1, "PnP should recover camera-frame gate position"
+    assert nrm_degs.mean() < 5.0, "PnP should recover the gate-plane normal"
     print("[selftest] OK -- PnP recovers gate pose in body frame")
 
 
