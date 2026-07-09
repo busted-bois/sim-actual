@@ -46,6 +46,7 @@ def run_manual_ui(controller, data):
 
     def control_loop():
         dt = 1.0 / CONTROL_HZ
+        print(f"[manual] control loop running at {CONTROL_HZ} Hz", flush=True)
         while not stop.is_set():
             try:
                 pilot.tick()

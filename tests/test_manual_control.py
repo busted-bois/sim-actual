@@ -3,7 +3,9 @@
 import math
 import unittest
 
+from simulator.controller import CONTROL_HZ
 from simulator.manual_control import (
+    CONTROL_DT_S,
     DEFAULT_SPEED_KMH,
     HOVER_T,
     SPEED_STEP_KMH,
@@ -119,6 +121,17 @@ class TestManualControl(unittest.TestCase):
         _, down = self._mc(["f"])
         down.tick()
         self.assertAlmostEqual(down.speed_kmh, DEFAULT_SPEED_KMH - SPEED_STEP_KMH, 6)
+
+    def test_command_rate_within_sim_budget(self):
+        # Sim spec §4.4 (fly2's VADR-TS-003): MAVLink command rate must stay
+        # <= 100 Hz. Streaming faster made the sim ignore the whole setpoint
+        # stream — armed drone, healthy HUD, zero motion.
+        self.assertLessEqual(CONTROL_HZ, 100)
+
+    def test_setpoint_slew_matches_control_rate(self):
+        # SPACE/X slew the altitude target by CLIMB_RATE * CONTROL_DT_S per
+        # tick; the climb rate is only honest if DT matches the actual loop.
+        self.assertAlmostEqual(CONTROL_DT_S, 1.0 / CONTROL_HZ, places=9)
 
     def test_speed_step_is_edge_triggered(self):
         # Holding R across many ticks steps the speed only once.

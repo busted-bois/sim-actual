@@ -26,6 +26,8 @@ from __future__ import annotations
 import math
 import time
 
+from simulator.controller import CONTROL_HZ
+
 # --------------------------------------------------------------------------------------
 # Tunables (start conservative; refine in-sim with the HUD)
 # --------------------------------------------------------------------------------------
@@ -51,7 +53,7 @@ THRUST_MIN = 0.18
 THRUST_MAX = 0.5
 CLIMB_RATE_MPS = 2.0  # how fast SPACE raises the altitude setpoint
 DESCEND_RATE_MPS = 2.0  # how fast X lowers the altitude setpoint
-CONTROL_DT_S = 1.0 / 250.0  # nominal control period for setpoint slewing
+CONTROL_DT_S = 1.0 / CONTROL_HZ  # control period for setpoint slewing
 
 HOVER_TRIM_STEP = 0.02  # thrust change per -/= tap
 HOVER_TRIM_LIMIT = 0.35  # max +/- trim around hover

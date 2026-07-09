@@ -128,7 +128,10 @@ def update_position_flight_control(mavlink_conn, system_boot_ms):
 # Control Loop
 # --------------------------------------------------------------------------------------
 
-CONTROL_HZ = 250
+# Sim spec §4.4: client MAVLink command rate must stay under 100 Hz — faster
+# streams are ignored wholesale (the drone arms but never moves). 90 Hz is the
+# proven rate from main / rl.fly2.
+CONTROL_HZ = 90
 
 
 class Controller:
