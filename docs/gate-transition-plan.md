@@ -192,10 +192,10 @@ Unit tests: `GateTransitionTracker` timing (no sim).
 
 ## Implementation checklist
 
-- [ ] Phase 1: Publish race, track gates (width/height), IMU to shared_data
-- [ ] Phase 2: Add gate_transition.py — t_min only, no t_max
-- [ ] Phase 3: Add gate_perception.py — lateral d scaled by track gate width
-- [ ] Phase 4: Add velocity_estimate.py — IMU accel integration
-- [ ] Phase 5: Add dead_reckon.py — forward until next gate visible
-- [ ] Phase 6: Wire tracker + dead reckon into controller.update()
-- [ ] Phase 7: Validate in VQ1 sim; unit test tracker timing
+- [x] Phase 1: Publish race, track gates (width/height), IMU to shared_data
+- [x] Phase 2: Add gate_transition.py — t_min only, no t_max
+- [x] Phase 3: Add gate_perception.py — lateral d scaled by track gate width
+- [x] Phase 4: Add velocity_estimate.py — IMU accel integration
+- [x] Phase 5: Add dead_reckon.py — forward until next gate visible
+- [x] Phase 6: Wire tracker + dead reckon into controller.update()
+- [x] Phase 7: Unit test tracker timing (14 tests, `make test`) — VQ1 sim validation pending live server

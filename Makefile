@@ -1,4 +1,4 @@
-.PHONY: i install check sim
+.PHONY: i install check sim test
 
 i install:
 	uv sync
@@ -9,3 +9,6 @@ check:
 
 sim:
 	uv run main.py
+
+test:
+	uv run -m unittest discover -s tests -v

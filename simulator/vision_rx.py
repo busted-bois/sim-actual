@@ -11,8 +11,9 @@ SIM_SERVER_UDP_PORT = 5600
 
 
 class VisionRX:
-    def __init__(self, data):
+    def __init__(self, data, perception=None):
         self.data = data
+        self.perception = perception
         self.thread = threading.Thread(target=self._vision_loop, daemon=False)
         self.is_running = True
         self.thread.start()
@@ -42,12 +43,17 @@ class VisionRX:
             # jpeg_size - full size of jpeg data
             # payload_size - size of this packet
             # sim_time_ns - frame's epoch timestamp in ns on the server
-            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = struct.unpack(
-                header_format, header
+            frame_id, chunk_id, total_chunks, jpeg_size, payload_size, sim_time_ns = (
+                struct.unpack(header_format, header)
             )
 
             if frame_id not in frames:
-                frames[frame_id] = {"chunks": {}, "total": total_chunks, "size": jpeg_size, "time": sim_time_ns}
+                frames[frame_id] = {
+                    "chunks": {},
+                    "total": total_chunks,
+                    "size": jpeg_size,
+                    "time": sim_time_ns,
+                }
 
             frames[frame_id]["chunks"][chunk_id] = payload
 
@@ -83,10 +89,7 @@ class VisionRX:
                 del frames[frame_id]
 
     def process_frame(self, frame_id, img):
-        #
-        #
-        # Success!
-        # image is your FPV camera frame in JPEG format
-        #
-        #
-        pass
+        # img is the decoded FPV camera frame (BGR)
+        self.data["camera"] = {"frame_id": frame_id, "frame": img}
+        if self.perception is not None:
+            self.perception.process_frame(img)
