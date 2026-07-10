@@ -186,6 +186,24 @@ class Controller:
             0,
         )
 
+    # -------------------------------
+    # Disarm the drone (used by auto-land on touchdown)
+    # -------------------------------
+    def disarm(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,  # disarm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
     def send_sim_reset_command(self):
         self.sim_conn.mav.command_long_send(
             self.sim_conn.target_system,

@@ -4,17 +4,17 @@ Controls (see CONTROLS_HINT):
   W / S : fly forward / backward
   A / D : strafe left / right
   Q / E : yaw left / right       (turn in place)
-  SPACE : climb
-  X     : descend
-  R / F : increase / decrease flight speed (tap to step)
+  R     : climb
+  F     : descend
+  L     : auto-land (descend and disarm on touchdown; press again to re-arm)
   - / = : trim hover thrust down / up (find the takeoff/hover point)
 
 Input is captured by a focused Tk window (see simulator/manual_ui.py) so the
 simulator window can't steal the keyboard. Horizontal motion is a cascade: the
-outer loop holds a *target speed* (default 5 km/h, R/F) by leaning into the error
-against the measured odometry velocity; the inner loop commands body angular rates
-to reach that lean. The sim commands body rates (attitude ignored on the wire) and
-does not auto-level, so this self-leveling is required.
+outer loop holds a fixed cruise speed (CRUISE_SPEED_KMH, 5 km/h) by leaning into
+the error against the measured odometry velocity; the inner loop commands body
+angular rates to reach that lean. The sim commands body rates (attitude ignored on
+the wire) and does not auto-level, so this self-leveling is required.
 
 Signs, hover thrust and gains are the constants below — tune them live with the
 HUD (see the plan's verification steps). The `- / =` keys trim hover thrust in
@@ -33,10 +33,7 @@ from simulator.controller import CONTROL_HZ
 # --------------------------------------------------------------------------------------
 KMH_PER_MPS = 3.6
 
-DEFAULT_SPEED_KMH = 5.0  # target horizontal speed at startup
-SPEED_STEP_KMH = 1.0  # change per R (up) / F (down) tap
-SPEED_MIN_KMH = 1.0
-SPEED_MAX_KMH = 30.0
+CRUISE_SPEED_KMH = 5.0  # fixed target horizontal speed (W/A/S/D lean toward this)
 
 K_VEL = 0.15  # target lean (rad) per m/s of speed error
 MAX_LEAN = 0.15  # rad, cap on the lean the velocity loop may command
@@ -48,18 +45,39 @@ YAW_RATE = 0.5  # rad/s while Q/E held (fly2_course's YAW_CLIP)
 # thrust for this sim was measured there at 0.27 (thrust-accel ~36 m/s^2).
 HOVER_T = 0.27  # thrust that holds hover at zero error (and no-telemetry fallback)
 KP_Z = 0.025  # thrust per metre of altitude error
-KD_Z = 0.030  # thrust per m/s of vertical-speed error (damping)
-THRUST_MIN = 0.18
-THRUST_MAX = 0.5
-CLIMB_RATE_MPS = 2.0  # how fast SPACE raises the altitude setpoint
-DESCEND_RATE_MPS = 2.0  # how fast X lowers the altitude setpoint
+# Vertical loop. KD_Z is the R/F feedforward (pressing R adds ~KD_Z*CLIMB_RATE of
+# thrust) and the vspeed damping. Bumped hard 2026-07-09 because climb/descend read
+# as unnoticeable in-sim — but the bigger cause was R/F being gated behind pose
+# telemetry (fixed in _thrust_command: they now also work open-loop via
+# VSPEED_OPENLOOP_BIAS). Wide thrust clamps give strong up/down authority.
+KD_Z = 0.10  # thrust per m/s of vertical-speed error (damping + climb feedforward)
+THRUST_MIN = 0.12  # low floor so F (descend) has strong authority
+THRUST_MAX = 0.60  # high ceiling so R (climb) has strong authority
+CLIMB_RATE_MPS = 4.0  # R climb target speed (m/s)
+DESCEND_RATE_MPS = 4.0  # F descend target speed (m/s)
+VSPEED_OPENLOOP_BIAS = 0.12  # thrust bias applied to R/F when pose telemetry is absent
 CONTROL_DT_S = 1.0 / CONTROL_HZ  # control period for setpoint slewing
+
+# Auto-land (L): descend at a gentle fixed rate (decoupled from the brisker manual
+# DESCEND_RATE_MPS so touchdowns stay soft), then disarm once settled on the ground.
+# NED z is down-positive, so a real descent shows up as vz > 0.
+LAND_DESCEND_MPS = 1.5  # auto-land descent speed (gentler than manual X)
+LAND_DESCEND_VZ = 0.30  # m/s downward we must see first (avoids instant touchdown)
+LAND_SETTLE_VZ = 0.10  # m/s; |vz| under this after descending = stopped by ground
+LAND_SETTLE_TICKS = max(1, int(0.4 * CONTROL_HZ))  # settled this long -> touchdown
+LAND_TIMEOUT_S = 6.0  # failsafe / pose-blocked blind descent: disarm after this
 
 HOVER_TRIM_STEP = 0.02  # thrust change per -/= tap
 HOVER_TRIM_LIMIT = 0.35  # max +/- trim around hover
 
-K_ATT = 0.6  # body-rate per radian of attitude error (fly2_course)
-RATE_CLIP = 0.30  # max commanded body rate (rad/s)
+# Attitude (inner) loop. K_ATT was raised from fly2_course's conservative 0.6 to
+# 3.0 (2026-07-09) so W/A/S/D drive into their lean about as fast as Q/E yaw:
+# pressing W now pitches at ~0.45 rad/s instead of ~0.09. RATE_CLIP raised to match
+# YAW_RATE so pitch/roll aren't capped below yaw. Well within the loop's discrete
+# stability limit (dt*K_ATT << 1 at 90 Hz); if the drone ever wobbles when hovering
+# or braking, lower K_ATT toward ~2.0 — it's the single responsiveness knob.
+K_ATT = 3.0  # body-rate (rad/s) per radian of attitude error
+RATE_CLIP = 0.5  # max commanded pitch/roll body rate (rad/s), == YAW_RATE
 
 # The one-shot arm at client start can be lost (sent before the sim registers
 # us) or undone (sim disarms after a crash), so tick() re-sends ARM until the
@@ -72,21 +90,21 @@ ARM_RETRY_S = 1.0
 IMU_FRESH_S = 2.0
 
 # Command-rate signs vs the ODOMETRY attitude convention, measured live by
-# fly2_course: pitch normal; roll and yaw inverted. Valid because _attitude()
-# prefers the sim's odometry quaternion. Flip one if an axis flies backwards.
+# fly2_course: pitch normal; roll inverted. Yaw is flipped so Q/E turn the way the
+# pilot expects (SIGN_YAW = +1). Flip one if an axis flies backwards.
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
-SIGN_YAW = -1.0
+SIGN_YAW = +1.0
 
 STATUS_LOG_INTERVAL_S = 1.0
 
 CONTROLS_HINT = (
     "Manual flight: [W/S] fwd/back  [A/D] left/right  [Q/E] turn  "
-    "[SPACE] up  [X] down  [R/F] speed +/-  [-/=] hover trim"
+    "[R] up  [F] down  [L] auto-land  [-/=] hover trim  (cruise 5 km/h)"
 )
 
 # every key the pilot reads; the Tk input window maintains these as held/not-held
-_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "space", "x", "r", "f", "minus", "equal")
+_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "r", "f", "l", "minus", "equal")
 
 
 def _default_is_pressed():
@@ -130,18 +148,24 @@ class ManualControl:
         self._is_pressed = (
             is_pressed if is_pressed is not None else _default_is_pressed()
         )
-        self.speed_mps = DEFAULT_SPEED_KMH / KMH_PER_MPS  # target horizontal speed
+        self.speed_mps = CRUISE_SPEED_KMH / KMH_PER_MPS  # fixed cruise speed
         self.hover_trim = 0.0  # live thrust trim added to hover
         self.last_cmd = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "thrust": 0.0}
-        self._edge = dict.fromkeys(("r", "f", "minus", "equal"), False)
+        self._edge = dict.fromkeys(("l", "minus", "equal"), False)
         self._z_target = None  # latched altitude setpoint (NED z, down-positive)
         self._next_arm_t = 0.0  # monotonic time of the next allowed arm retry
         self._arm_announced = False
         self._last_status_log = 0.0
         self._start_t = time.monotonic()
         self._input_seen = False  # have we ever read a keypress?
+        # auto-land (L) state machine
+        self._landing = False  # actively descending to touch down
+        self._landed = False  # touched down + disarmed; suppresses re-arm
+        self._land_start_t = 0.0
+        self._land_saw_descent = False
+        self._land_settle_ticks = 0
         print(CONTROLS_HINT, flush=True)
-        print(f"[manual] speed = {self.speed_kmh:.1f} km/h", flush=True)
+        print(f"[manual] cruise speed = {self.speed_kmh:.1f} km/h", flush=True)
 
     @property
     def speed_kmh(self):
@@ -184,14 +208,8 @@ class ManualControl:
         return edge
 
     def _update_discrete(self, keys):
-        step = SPEED_STEP_KMH / KMH_PER_MPS
-        lo, hi = SPEED_MIN_KMH / KMH_PER_MPS, SPEED_MAX_KMH / KMH_PER_MPS
-        if self._rising(keys, "r"):
-            self.speed_mps = min(self.speed_mps + step, hi)
-            print(f"[manual] speed = {self.speed_kmh:.1f} km/h", flush=True)
-        if self._rising(keys, "f"):
-            self.speed_mps = max(self.speed_mps - step, lo)
-            print(f"[manual] speed = {self.speed_kmh:.1f} km/h", flush=True)
+        if self._rising(keys, "l"):
+            self._toggle_land()
         if self._rising(keys, "equal"):
             self.hover_trim = min(self.hover_trim + HOVER_TRIM_STEP, HOVER_TRIM_LIMIT)
             print(f"[manual] hover trim = {self.hover_trim:+.2f}", flush=True)
@@ -199,8 +217,43 @@ class ManualControl:
             self.hover_trim = max(self.hover_trim - HOVER_TRIM_STEP, -HOVER_TRIM_LIMIT)
             print(f"[manual] hover trim = {self.hover_trim:+.2f}", flush=True)
 
+    # --- auto-land (L) -----------------------------------------------------
+    def _toggle_land(self):
+        if self._landing or self._landed:
+            self._cancel_land()
+        else:
+            self._start_land()
+
+    def _start_land(self):
+        self._landing = True
+        self._landed = False
+        self._land_start_t = time.monotonic()
+        self._land_saw_descent = False
+        self._land_settle_ticks = 0
+        print("[manual] auto-land: descending to touchdown…", flush=True)
+
+    def _cancel_land(self):
+        was_landed = self._landed
+        self._landing = False
+        self._landed = False
+        self._land_settle_ticks = 0
+        self._z_target = None  # re-latch the hold altitude on the next tick
+        if was_landed:
+            self._next_arm_t = 0.0  # re-arm promptly
+            print("[manual] auto-land canceled — re-arming.", flush=True)
+        else:
+            print("[manual] auto-land canceled.", flush=True)
+
+    def _touchdown(self):
+        self._landing = False
+        self._landed = True
+        self.controller.disarm()
+        print("[manual] touchdown — disarmed. Press L to re-arm.", flush=True)
+
     def _ensure_armed(self):
         """Re-send ARM (throttled) until the sim's HEARTBEAT reports armed."""
+        if self._landed:
+            return  # deliberately on the ground — don't fight the auto-land disarm
         if self.data.get("armed") is True:
             return
         now = time.monotonic()
@@ -231,10 +284,21 @@ class ManualControl:
             self._input_seen = True
         self._update_discrete(keys)
 
+        # Landed: sit disarmed on the ground, motors off, ignore flight inputs.
+        if self._landed:
+            self.last_cmd = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "thrust": 0.0}
+            self.controller.send_attitude_rates(0.0, 0.0, 0.0, 0.0)
+            self._maybe_log(keys, 0.0, 0.0, 0.0)
+            return
+
         att = self._attitude()
         roll, pitch, yaw = att if att is not None else (0.0, 0.0, 0.0)
 
-        tgt_pitch, tgt_roll = self._target_lean(keys, yaw)
+        # While auto-landing, self-level and ignore horizontal/yaw input.
+        if self._landing:
+            tgt_pitch = tgt_roll = 0.0
+        else:
+            tgt_pitch, tgt_roll = self._target_lean(keys, yaw)
 
         roll_cmd = SIGN_ROLL * _clip(K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
         pitch_cmd = SIGN_PITCH * _clip(
@@ -242,11 +306,12 @@ class ManualControl:
         )
 
         yaw_cmd = 0.0
-        if keys["q"]:
-            yaw_cmd -= YAW_RATE
-        if keys["e"]:
-            yaw_cmd += YAW_RATE
-        yaw_cmd *= SIGN_YAW
+        if not self._landing:
+            if keys["q"]:
+                yaw_cmd -= YAW_RATE
+            if keys["e"]:
+                yaw_cmd += YAW_RATE
+            yaw_cmd *= SIGN_YAW
 
         thrust = self._thrust_command(keys)
 
@@ -280,28 +345,74 @@ class ManualControl:
     def _thrust_command(self, keys):
         z, vz = self._altitude()
 
-        # SPACE/X move the altitude setpoint up/down; otherwise it stays latched
-        # (hold). NED z is down-positive, so climbing means a more-negative target.
+        if self._landing:
+            return self._land_thrust(z, vz)
+
+        # R/F command a vertical speed. Set unconditionally (even with no pose
+        # telemetry) so climb/descend always respond — _altitude_thrust falls back
+        # to an open-loop bias when blind. NED z is down-positive, so climb = -vz_des.
+        vz_des = 0.0
+        if keys["r"]:
+            vz_des -= CLIMB_RATE_MPS
+        if keys["f"]:
+            vz_des += DESCEND_RATE_MPS
+
+        # When we have telemetry, latch a hold altitude and slew it while R/F are
+        # held, so releasing holds the altitude we climbed to.
         if z is not None and self._z_target is None:
             self._z_target = z
-        vz_des = 0.0
-        if keys["space"] and self._z_target is not None:
-            self._z_target -= CLIMB_RATE_MPS * CONTROL_DT_S
-            vz_des = -CLIMB_RATE_MPS
-        if keys["x"] and self._z_target is not None:
-            self._z_target += DESCEND_RATE_MPS * CONTROL_DT_S
-            vz_des = DESCEND_RATE_MPS
+        if self._z_target is not None:
+            self._z_target += vz_des * CONTROL_DT_S
 
         return self._altitude_thrust(z, vz, vz_des)
 
-    def _altitude_thrust(self, z, vz, vz_des):
-        """PD on NED z toward the latched setpoint; open-loop fallback if blind.
+    def _land_thrust(self, z, vz):
+        """Auto-land: slew the setpoint down at the gentle landing rate, then check
+        for touchdown. Returns the commanded thrust."""
+        if z is not None and self._z_target is None:
+            self._z_target = z
+        if self._z_target is not None:
+            self._z_target += LAND_DESCEND_MPS * CONTROL_DT_S
+        self._check_touchdown(vz)
+        return self._altitude_thrust(z, vz, LAND_DESCEND_MPS)
 
-        vz_des is the wanted vertical rate while SPACE/X are held, so the damping
-        term pulls toward the commanded climb/descent instead of fighting it.
+    def _check_touchdown(self, vz):
+        """Disarm once the drone has descended and then stopped moving.
+
+        NED z is down-positive, so a descent shows up as vz > 0. Wait to see a real
+        descent, then a sustained near-zero vz (the ground stopping us). The
+        wall-clock timeout is the failsafe and the pose-blocked (no vz) path.
+        """
+        if time.monotonic() - self._land_start_t >= LAND_TIMEOUT_S:
+            self._touchdown()
+            return
+        if vz is None:
+            return  # no velocity telemetry — rely on the timeout above
+        if vz > LAND_DESCEND_VZ:
+            self._land_saw_descent = True
+        if self._land_saw_descent and abs(vz) < LAND_SETTLE_VZ:
+            self._land_settle_ticks += 1
+            if self._land_settle_ticks >= LAND_SETTLE_TICKS:
+                self._touchdown()
+        else:
+            self._land_settle_ticks = 0
+
+    def _altitude_thrust(self, z, vz, vz_des):
+        """PD on NED z toward the latched setpoint; open-loop climb/descend if blind.
+
+        vz_des is the wanted vertical rate while R/F are held, so the damping term
+        pulls toward the commanded climb/descent instead of fighting it. With no pose
+        telemetry (event session blocks it) the PD can't run, so R/F instead apply a
+        fixed thrust bias in the commanded direction — uncapped (no vspeed feedback
+        to hold a rate) but responsive, so climb/descend still work.
         """
         if z is None or self._z_target is None:
-            return _clip(HOVER_T + self.hover_trim, THRUST_MIN, THRUST_MAX)
+            bias = 0.0
+            if vz_des < 0.0:  # climb
+                bias = VSPEED_OPENLOOP_BIAS
+            elif vz_des > 0.0:  # descend
+                bias = -VSPEED_OPENLOOP_BIAS
+            return _clip(HOVER_T + self.hover_trim + bias, THRUST_MIN, THRUST_MAX)
         vz = vz if vz is not None else 0.0
         thrust = (
             HOVER_T
@@ -321,6 +432,7 @@ class ManualControl:
         return {
             "speed_kmh": self.speed_kmh,
             "hover_trim": self.hover_trim,
+            "mode": "LANDED" if self._landed else "LANDING" if self._landing else "FLY",
             "input_seen": self._input_seen,
             "armed": self.data.get("armed"),
             "have_telemetry": att is not None or z is not None,
@@ -346,8 +458,9 @@ class ManualControl:
             "d": "D",
             "q": "Q",
             "e": "E",
-            "space": "SPC",
-            "x": "X",
+            "r": "R",
+            "f": "F",
+            "l": "L",
         }
         held = " ".join(v for k, v in labels.items() if keys[k]) or "-"
         z, _ = self._altitude()

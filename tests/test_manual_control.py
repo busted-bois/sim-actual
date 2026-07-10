@@ -6,9 +6,9 @@ import unittest
 from simulator.controller import CONTROL_HZ
 from simulator.manual_control import (
     CONTROL_DT_S,
-    DEFAULT_SPEED_KMH,
+    CRUISE_SPEED_KMH,
     HOVER_T,
-    SPEED_STEP_KMH,
+    LAND_SETTLE_TICKS,
     ManualControl,
 )
 
@@ -19,6 +19,7 @@ class FakeController:
     def __init__(self):
         self.last = None
         self.arm_calls = 0
+        self.disarm_calls = 0
 
     def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
         self.last = {
@@ -30,6 +31,9 @@ class FakeController:
 
     def arm(self):
         self.arm_calls += 1
+
+    def disarm(self):
+        self.disarm_calls += 1
 
 
 def pressed(*keys):
@@ -80,10 +84,20 @@ class TestManualControl(unittest.TestCase):
         self.assertLess(right, 0.0)
         self.assertAlmostEqual(left, -right, places=6)
 
-    def test_space_climbs_x_descends(self):
-        # SPACE raises the altitude setpoint -> more thrust than hover; X the opposite.
-        self.assertGreater(self._tick(["space"])["thrust"], HOVER_T)
-        self.assertLess(self._tick(["x"])["thrust"], HOVER_T)
+    def test_r_climbs_f_descends(self):
+        # R raises the altitude setpoint -> more thrust than hover; F the opposite.
+        self.assertGreater(self._tick(["r"])["thrust"], HOVER_T)
+        self.assertLess(self._tick(["f"])["thrust"], HOVER_T)
+
+    def test_r_f_work_without_pose_telemetry(self):
+        # Pose-blocked sessions stream no odometry (z/vz absent). R/F must STILL
+        # command a climb/descend thrust open-loop, not sit at hover — the old code
+        # gated them behind a latched z_target, so they did nothing (unnoticeable
+        # in-sim while W/S kept working open-loop). data has no odometry -> z=None.
+        up = self._tick(["r"], data={"armed": True})
+        down = self._tick(["f"], data={"armed": True})
+        self.assertGreater(up["thrust"], HOVER_T)
+        self.assertLess(down["thrust"], HOVER_T)
 
     def test_hover_trim_shifts_neutral_thrust(self):
         # '=' trims hover up, '-' trims it down; neutral thrust follows.
@@ -92,10 +106,11 @@ class TestManualControl(unittest.TestCase):
         self.assertLess(self._tick(["minus"])["thrust"], base)
 
     def test_q_e_yaw_opposite_signs(self):
-        # Wire yaw command is inverted vs odometry attitude (SIGN_YAW = -1,
-        # measured by fly2_course): Q (turn left) sends +, E (turn right) sends -.
-        self.assertGreater(self._tick(["q"])["yaw"], 0.0)
-        self.assertLess(self._tick(["e"])["yaw"], 0.0)
+        # Q and E yaw in opposite directions. SIGN_YAW = +1 (flipped from the old
+        # -1) so Q now sends negative and E positive — the direction the pilot
+        # expects after the reported Q/E reversal.
+        self.assertLess(self._tick(["q"])["yaw"], 0.0)
+        self.assertGreater(self._tick(["e"])["yaw"], 0.0)
 
     def test_leveling_corrects_tilt(self):
         # Drone rolled right (+ in odometry) with no key held: under the measured
@@ -113,18 +128,10 @@ class TestManualControl(unittest.TestCase):
         mc.tick()
         self.assertGreater(ctl.last["thrust"], HOVER_T)
 
-    def test_default_speed_is_5_kmh(self):
+    def test_cruise_speed_is_5_kmh(self):
         _, mc = self._mc([])
-        self.assertAlmostEqual(mc.speed_kmh, DEFAULT_SPEED_KMH, places=6)
-
-    def test_r_increases_f_decreases_speed(self):
-        _, up = self._mc(["r"])
-        up.tick()
-        self.assertAlmostEqual(up.speed_kmh, DEFAULT_SPEED_KMH + SPEED_STEP_KMH, 6)
-
-        _, down = self._mc(["f"])
-        down.tick()
-        self.assertAlmostEqual(down.speed_kmh, DEFAULT_SPEED_KMH - SPEED_STEP_KMH, 6)
+        self.assertAlmostEqual(mc.speed_kmh, CRUISE_SPEED_KMH, places=6)
+        self.assertAlmostEqual(CRUISE_SPEED_KMH, 5.0, places=6)
 
     def test_rearms_while_disarmed(self):
         # A one-shot ARM at client start gets lost (sent before the sim
@@ -178,12 +185,54 @@ class TestManualControl(unittest.TestCase):
         # tick; the climb rate is only honest if DT matches the actual loop.
         self.assertAlmostEqual(CONTROL_DT_S, 1.0 / CONTROL_HZ, places=9)
 
-    def test_speed_step_is_edge_triggered(self):
-        # Holding R across many ticks steps the speed only once.
-        _, mc = self._mc(["r"])
-        for _ in range(10):
+    def test_land_key_commands_descent(self):
+        # L starts auto-land: the drone self-levels and commands < hover thrust.
+        ctl, mc = self._mc(["l"])
+        mc.tick()
+        self.assertTrue(mc._landing)
+        self.assertFalse(mc._landed)
+        self.assertLess(ctl.last["thrust"], HOVER_T)
+
+    def test_landing_touchdown_disarms(self):
+        # After a real descent (vz > 0 in NED) followed by a sustained near-zero
+        # vz (ground stops us), auto-land disarms and latches _landed.
+        ctl, mc = self._mc(["l"])
+        mc.tick()  # L pressed -> landing starts
+        self.assertTrue(mc._landing)
+        mc.data["odometry"]["vz"] = 1.0  # clearly descending
+        mc.tick()
+        mc.data["odometry"]["vz"] = 0.0  # ground stops the descent
+        for _ in range(LAND_SETTLE_TICKS + 1):
             mc.tick()
-        self.assertAlmostEqual(mc.speed_kmh, DEFAULT_SPEED_KMH + SPEED_STEP_KMH, 6)
+        self.assertTrue(mc._landed)
+        self.assertFalse(mc._landing)
+        self.assertGreaterEqual(ctl.disarm_calls, 1)
+
+    def test_landed_suppresses_rearm(self):
+        # A deliberately-landed (disarmed) drone must not be re-armed by tick().
+        ctl, mc = self._mc([], data=dict(level_data(), armed=False))
+        mc._landed = True
+        mc._next_arm_t = 0.0  # retry window elapsed
+        mc.tick()
+        self.assertEqual(ctl.arm_calls, 0)
+        self.assertEqual(ctl.last["thrust"], 0.0)  # motors off on the ground
+
+    def test_land_toggle_cancels(self):
+        # A second L press cancels landing before touchdown (needs a fresh edge).
+        held = {"l": False}
+        ctl = FakeController()
+        mc = ManualControl(
+            ctl, dict(level_data(), armed=False), is_pressed=lambda k: held.get(k, False)
+        )
+        held["l"] = True
+        mc.tick()  # press -> start landing
+        self.assertTrue(mc._landing)
+        held["l"] = False
+        mc.tick()  # release
+        held["l"] = True
+        mc.tick()  # press again -> cancel
+        self.assertFalse(mc._landing)
+        self.assertFalse(mc._landed)
 
 
 def _roll_quat(roll):

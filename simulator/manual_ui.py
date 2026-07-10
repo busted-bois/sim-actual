@@ -20,8 +20,8 @@ from simulator.manual_control import _ALL_KEYS, ManualControl
 
 _LEGEND = (
     "W/S fwd/back    A/D left/right    Q/E turn\n"
-    "SPACE climb    X descend    R/F speed +/-    - / = hover trim\n"
-    "Keep THIS window focused.   Esc or close to quit."
+    "R climb    F descend    L auto-land    - / = hover trim\n"
+    "Cruise 5 km/h.   Keep THIS window focused.   Esc or close to quit."
 )
 
 
@@ -59,6 +59,11 @@ def run_manual_ui(controller, data):
     root.configure(bg="#101418")
     root.geometry("460x340")
     root.attributes("-topmost", True)
+    # Grab the keyboard on launch so movement keys work without clicking first.
+    # -topmost keeps the window visible but does NOT give it focus; focus_force does.
+    root.lift()
+    root.focus_force()
+    root.after(200, root.focus_force)  # re-grab once the window is actually drawn
 
     def on_press(e):
         n = _norm(e.keysym)
@@ -128,8 +133,8 @@ def run_manual_ui(controller, data):
         hud.config(
             text=(
                 f"input held : {held_str}\n"
-                f"armed      : {armed}     telemetry : {tel}\n"
-                f"speed set  : {s['speed_kmh']:.1f} km/h     hover trim : {s['hover_trim']:+.2f}\n"
+                f"mode       : {s['mode']}     armed : {armed}     telemetry : {tel}\n"
+                f"cruise     : {s['speed_kmh']:.1f} km/h     hover trim : {s['hover_trim']:+.2f}\n"
                 f"altitude   : {_fmt(s['alt_m'], ' m')}     vspeed : {_fmt(s['vz_mps'], ' m/s')}\n"
                 f"hor. speed : {_fmt(s['hspeed_kmh'], ' km/h')}\n"
                 f"attitude   : roll {_fmt(s['roll_deg'], '', 0)}  "
@@ -142,7 +147,11 @@ def run_manual_ui(controller, data):
         root.after(60, refresh)
 
     threading.Thread(target=control_loop, daemon=True).start()
-    print("[manual] control window open — click it to focus, then fly.", flush=True)
+    print(
+        "[manual] control window open and focused — just fly. "
+        "If keys stop responding, click the window to re-focus it.",
+        flush=True,
+    )
     refresh()
     root.mainloop()
     stop.set()
