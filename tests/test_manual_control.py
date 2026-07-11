@@ -58,6 +58,19 @@ class TestManualControl(unittest.TestCase):
         mc.tick()
         return ctl.last
 
+    def _banked_right(self, ticks=10):
+        """Pose-blocked, armed pilot that has held D for `ticks` ticks (banked
+        right per dead-reckoning). Returns (ctl, mc, held) with all keys released."""
+        held = {"d": True}
+        ctl = FakeController()
+        mc = ManualControl(
+            ctl, {"armed": True}, is_pressed=lambda k: held.get(k, False)
+        )
+        for _ in range(ticks):
+            mc.tick()
+        held["d"] = False
+        return ctl, mc, held
+
     def test_no_keys_level_hovers(self):
         out = self._tick([])
         self.assertAlmostEqual(out["roll"], 0.0, places=6)
@@ -76,13 +89,13 @@ class TestManualControl(unittest.TestCase):
         self.assertGreater(out["pitch"], 0.0)
 
     def test_a_d_roll_opposite_signs(self):
-        # Wire roll command is inverted vs odometry attitude (SIGN_ROLL = -1,
-        # measured by fly2_course): A (roll left) sends +, D (roll right) sends -.
-        left = self._tick(["a"])["roll"]
-        right = self._tick(["d"])["roll"]
-        self.assertGreater(left, 0.0)
-        self.assertLess(right, 0.0)
-        self.assertAlmostEqual(left, -right, places=6)
+        # SIGN_ROLL = +1 (corrected from fly2_course's -1, which reversed A/D on the
+        # live sim): A (strafe left) sends negative roll, D (strafe right) positive.
+        a_cmd = self._tick(["a"])["roll"]
+        d_cmd = self._tick(["d"])["roll"]
+        self.assertLess(a_cmd, 0.0)
+        self.assertGreater(d_cmd, 0.0)
+        self.assertAlmostEqual(a_cmd, -d_cmd, places=6)
 
     def test_r_climbs_f_descends(self):
         # R raises the altitude setpoint -> more thrust than hover; F the opposite.
@@ -113,12 +126,71 @@ class TestManualControl(unittest.TestCase):
         self.assertGreater(self._tick(["e"])["yaw"], 0.0)
 
     def test_leveling_corrects_tilt(self):
-        # Drone rolled right (+ in odometry) with no key held: under the measured
-        # inverted-roll wire convention the corrective command is POSITIVE. This
-        # locks in SIGN_ROLL = -1 — the +1 version made leveling positive feedback.
+        # Drone rolled right (+ in odometry), no key held. With SIGN_ROLL = +1
+        # (corrected from -1 via live A/D + C evidence) the corrective command is
+        # NEGATIVE — negative feedback that rolls back toward level.
         data = {"odometry": {"q": _roll_quat(math.radians(5.0)), "z": 0.0, "vz": 0.0}}
         out = self._tick([], data=data)
-        self.assertGreater(out["roll"], 0.0)
+        self.assertLess(out["roll"], 0.0)
+
+    def test_c_levels_and_ignores_movement(self):
+        # C recovers level even while movement keys are held: after banking right
+        # with D, holding C+W unwinds the roll and ignores W (no pitch) and yaw.
+        ctl, mc, held = self._banked_right()
+        held.update({"c": True, "w": True})
+        mc.tick()
+        self.assertLess(ctl.last["roll"], 0.0)  # unwinding the D bank
+        self.assertAlmostEqual(ctl.last["pitch"], 0.0, places=6)  # W ignored under C
+        self.assertAlmostEqual(ctl.last["yaw"], 0.0, places=6)  # not yawing
+
+    def test_attitude_is_none_when_pose_blocked(self):
+        # Guard: _attitude() never invents an estimate — feeding one into the
+        # always-on inner loop spun the drone on spawn. Pose blocked -> None.
+        _, mc = self._mc([], data={"armed": True, "highres_imu_mono": 0.0})
+        mc.tick()
+        self.assertIsNone(mc._attitude())
+        self.assertIsNone(mc._attitude_source())
+
+    def test_deadreckon_tracks_roll_command(self):
+        # The pilot integrates its own roll commands: holding D (positive cmd,
+        # banks right) accumulates positive dead-reckoned roll. The sim never
+        # self-levels, so this integral IS the attitude from the level start.
+        _, mc, _ = self._banked_right()
+        self.assertGreater(mc._cmd_roll, 0.0)
+        self.assertAlmostEqual(mc._cmd_pitch, 0.0, places=6)  # D doesn't pitch
+
+    def test_c_commands_opposite_of_deadreckoned_roll(self):
+        # THE C behavior: send the opposite of the accumulated A/D roll until it
+        # unwinds to level — no sensor estimate, no sign to guess.
+        ctl, mc, held = self._banked_right()
+        banked = mc._cmd_roll
+        held["c"] = True
+        mc.tick()
+        self.assertLess(ctl.last["roll"], 0.0)  # opposite of the D commands
+        self.assertLess(mc._cmd_roll, banked)  # unwinding toward level
+        for _ in range(600):  # keep holding C (~6.7 s)
+            mc.tick()
+        self.assertAlmostEqual(mc._cmd_roll, 0.0, places=2)  # settled level
+        self.assertAlmostEqual(ctl.last["roll"], 0.0, places=1)  # no runaway
+
+    def test_deadreckon_resets_while_disarmed(self):
+        # Disarm (crash/reset/touchdown) -> the drone respawns level with motors
+        # off, so the integral must re-zero or C would unwind a stale tilt.
+        _, mc = self._mc([], data={"armed": False})
+        mc._cmd_roll, mc._cmd_pitch = 0.5, -0.3
+        mc.tick()
+        self.assertAlmostEqual(mc._cmd_roll, 0.0, places=9)
+        self.assertAlmostEqual(mc._cmd_pitch, 0.0, places=9)
+
+    def test_no_leveling_command_without_c_when_pose_blocked(self):
+        # Spawn/coast regression: banked (per dead-reckoning) but NO C -> the
+        # always-on loop stays open-loop (zero attitude command); only C unwinds.
+        # Auto-correcting without C is what spun the drone on every spawn.
+        ctl, mc, _ = self._banked_right()
+        self.assertGreater(mc._cmd_roll, 0.0)  # banked right
+        mc.tick()  # keys released, no C
+        self.assertAlmostEqual(ctl.last["roll"], 0.0, places=6)
+        self.assertAlmostEqual(ctl.last["pitch"], 0.0, places=6)
 
     def test_altitude_hold_adds_thrust_when_low(self):
         # Below the latched hold altitude (NED z larger = lower) -> more thrust.

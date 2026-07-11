@@ -163,11 +163,10 @@ class MAVLinkRX:
         }
 
     def on_highres_imu(self, msg):
-        acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
-        gyro_x, gyro_y, gyro_z = msg.xgyro, msg.ygyro, msg.zgyro
-        time_boot_us = msg.time_usec
         # Arrival marker: event/qualification sessions stream IMU while
         # blocking pose telemetry — lets clients tell "blocked" from "silent".
+        # (The accel/gyro values are unused: manual flight dead-reckons attitude
+        # from its own commands rather than estimating tilt from the accel.)
         self.data["highres_imu_mono"] = time.monotonic()
 
     def on_encapsulated_data(self, msg):

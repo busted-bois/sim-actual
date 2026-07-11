@@ -6,6 +6,7 @@ Controls (see CONTROLS_HINT):
   Q / E : yaw left / right       (turn in place)
   R     : climb
   F     : descend
+  C     : recover — hold to unwind the commanded tilt back to level
   L     : auto-land (descend and disarm on touchdown; press again to re-arm)
   - / = : trim hover thrust down / up (find the takeoff/hover point)
 
@@ -89,22 +90,34 @@ ARM_RETRY_S = 1.0
 # HIGHRES_IMU arrived this recently while ODOMETRY/ATTITUDE stay absent.
 IMU_FRESH_S = 2.0
 
-# Command-rate signs vs the ODOMETRY attitude convention, measured live by
-# fly2_course: pitch normal; roll inverted. Yaw is flipped so Q/E turn the way the
-# pilot expects (SIGN_YAW = +1). Flip one if an axis flies backwards.
-SIGN_ROLL = -1.0
+# Command-rate signs per axis. fly2_course used SIGN_ROLL = -1, but on THIS live sim
+# that reversed A/D strafe AND made C's roll-leveling positive feedback (ran off to
+# one side); flipping to +1 (matching pitch) fixed both — corrected 2026-07-09 from
+# live A/D + C evidence. Yaw flipped so Q/E turn as the pilot expects. Flip one if an
+# axis flies backwards.
+SIGN_ROLL = +1.0
 SIGN_PITCH = +1.0
 SIGN_YAW = +1.0
+
+# C auto-level = command dead-reckoning. The sim has no auto-leveling: it integrates
+# our body-rate commands into attitude and never levels on its own. So from a level
+# spawn, roll/pitch == the time-integral of the rate commands WE sent (_cmd_roll /
+# _cmd_pitch, kept in tick()). While C is held we command the OPPOSITE of that
+# integral, unwinding exactly the tilt A/D/W/S built up — sign-correct by
+# construction because it reuses the confirmed wire convention (D -> + -> banks
+# right), with no sensor sign to guess. (An accelerometer-based estimate was tried
+# first and its sign could never be pinned down live; it's gone.) The integral
+# resets while disarmed — the drone spawns/respawns level with motors off.
 
 STATUS_LOG_INTERVAL_S = 1.0
 
 CONTROLS_HINT = (
     "Manual flight: [W/S] fwd/back  [A/D] left/right  [Q/E] turn  "
-    "[R] up  [F] down  [L] auto-land  [-/=] hover trim  (cruise 5 km/h)"
+    "[R] up  [F] down  [C] level  [L] auto-land  [-/=] hover trim  (cruise 5 km/h)"
 )
 
 # every key the pilot reads; the Tk input window maintains these as held/not-held
-_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "r", "f", "l", "minus", "equal")
+_ALL_KEYS = ("w", "a", "s", "d", "q", "e", "r", "f", "c", "l", "minus", "equal")
 
 
 def _default_is_pressed():
@@ -164,6 +177,11 @@ class ManualControl:
         self._land_start_t = 0.0
         self._land_saw_descent = False
         self._land_settle_ticks = 0
+        self._recovering = False  # C held: leveling out to recover from an awkward tilt
+        # Dead-reckoned attitude: integral of every rate command sent since arming
+        # (== physical roll/pitch, since the sim applies our rates and never levels).
+        self._cmd_roll = 0.0  # rad, wire-command convention (+ = the way D banks)
+        self._cmd_pitch = 0.0  # rad
         print(CONTROLS_HINT, flush=True)
         print(f"[manual] cruise speed = {self.speed_kmh:.1f} km/h", flush=True)
 
@@ -173,13 +191,25 @@ class ManualControl:
 
     # --- telemetry helpers -------------------------------------------------
     def _attitude(self):
-        """(roll, pitch, yaw) rad, preferring odometry; None if unavailable."""
+        """(roll, pitch, yaw) rad from REAL telemetry (odometry, then ATTITUDE); None
+        if pose is blocked. Deliberately no estimated fallback here: feeding an
+        estimate into the always-on inner loop spun the drone on spawn. The C
+        auto-level instead unwinds the dead-reckoned command integral (see tick())."""
         odo = self.data.get("odometry")
         if odo is not None and "q" in odo:
             return _quat_to_euler(odo["q"])
         att = self.data.get("attitude")
         if att is not None:
             return att["roll"], att["pitch"], att["yaw"]
+        return None
+
+    def _attitude_source(self):
+        """Which real telemetry _attitude() is using: 'odom' | 'att' | None."""
+        odo = self.data.get("odometry")
+        if odo is not None and "q" in odo:
+            return "odom"
+        if self.data.get("attitude") is not None:
+            return "att"
         return None
 
     def _altitude(self):
@@ -269,9 +299,16 @@ class ManualControl:
             )
         self.controller.arm()
 
-    def _pose_blocked(self, att, z):
-        """True when IMU streams but pose doesn't: event session blocks it."""
-        if att is not None or z is not None:
+    def _pose_blocked(self):
+        """True when IMU streams but real pose (ODOMETRY/ATTITUDE/LOCAL_POS) doesn't
+        — event/qualification sessions block it. The IMU-derived attitude estimate
+        does NOT count as pose here, so the HUD still flags the block."""
+        has_real_pose = (
+            self.data.get("odometry") is not None
+            or self.data.get("attitude") is not None
+            or self.data.get("local_position_ned") is not None
+        )
+        if has_real_pose:
             return False
         imu_mono = self.data.get("highres_imu_mono")
         return imu_mono is not None and time.monotonic() - imu_mono < IMU_FRESH_S
@@ -284,6 +321,12 @@ class ManualControl:
             self._input_seen = True
         self._update_discrete(keys)
 
+        # Dead-reckoned attitude re-zeroes while disarmed: motors are off, the drone
+        # sits/spawns level, so the command integral must restart from level too.
+        if self.data.get("armed") is not True:
+            self._cmd_roll = 0.0
+            self._cmd_pitch = 0.0
+
         # Landed: sit disarmed on the ground, motors off, ignore flight inputs.
         if self._landed:
             self.last_cmd = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "thrust": 0.0}
@@ -294,19 +337,30 @@ class ManualControl:
         att = self._attitude()
         roll, pitch, yaw = att if att is not None else (0.0, 0.0, 0.0)
 
-        # While auto-landing, self-level and ignore horizontal/yaw input.
-        if self._landing:
-            tgt_pitch = tgt_roll = 0.0
-        else:
-            tgt_pitch, tgt_roll = self._target_lean(keys, yaw)
+        # C = recover: command the OPPOSITE of the dead-reckoned attitude — literally
+        # the negative of the accumulated A/D/W/S roll+pitch commands — until it
+        # unwinds to level, ignoring the movement keys. No sensor and no sign flags:
+        # _cmd_roll is already in wire convention, so "opposite" is just the minus.
+        self._recovering = keys["c"]
 
-        roll_cmd = SIGN_ROLL * _clip(K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
-        pitch_cmd = SIGN_PITCH * _clip(
-            K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP
-        )
+        if self._recovering:
+            roll_cmd = _clip(-K_ATT * self._cmd_roll, -RATE_CLIP, RATE_CLIP)
+            pitch_cmd = _clip(-K_ATT * self._cmd_pitch, -RATE_CLIP, RATE_CLIP)
+        else:
+            # While auto-landing, self-level and ignore horizontal input.
+            if self._landing:
+                tgt_pitch = tgt_roll = 0.0
+            else:
+                tgt_pitch, tgt_roll = self._target_lean(keys, yaw)
+            roll_cmd = SIGN_ROLL * _clip(
+                K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP
+            )
+            pitch_cmd = SIGN_PITCH * _clip(
+                K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP
+            )
 
         yaw_cmd = 0.0
-        if not self._landing:
+        if not self._landing and not self._recovering:
             if keys["q"]:
                 yaw_cmd -= YAW_RATE
             if keys["e"]:
@@ -314,6 +368,12 @@ class ManualControl:
             yaw_cmd *= SIGN_YAW
 
         thrust = self._thrust_command(keys)
+
+        # Dead-reckon: fold the rates we are sending into the attitude integral.
+        # The sim applies exactly these rates and never self-levels, so this stays
+        # equal to the physical roll/pitch (from the level, disarmed start).
+        self._cmd_roll += roll_cmd * CONTROL_DT_S
+        self._cmd_pitch += pitch_cmd * CONTROL_DT_S
 
         self.last_cmd = {
             "roll": roll_cmd,
@@ -426,21 +486,43 @@ class ManualControl:
     def status(self):
         """Snapshot for the HUD: setpoints, last command, and telemetry response."""
         att = self._attitude()
+        # Display attitude: real telemetry if present, else the dead-reckoned command
+        # integral — exactly what the C auto-level unwinds, so the HUD shows what C
+        # will act on (should read ~0 at a level hover, and track A/D/W/S banks).
+        if att is not None:
+            disp_roll, disp_pitch, disp_yaw = att
+            disp_src = self._attitude_source()
+        else:
+            disp_roll, disp_pitch, disp_yaw, disp_src = (
+                self._cmd_roll,
+                self._cmd_pitch,
+                None,  # yaw isn't dead-reckoned (C doesn't touch heading)
+                "cmd",
+            )
         z, vz = self._altitude()
         vel = self._velocity_ned()
         hspeed = math.hypot(*vel) if vel is not None else None
         return {
             "speed_kmh": self.speed_kmh,
             "hover_trim": self.hover_trim,
-            "mode": "LANDED" if self._landed else "LANDING" if self._landing else "FLY",
+            "mode": (
+                "LANDED"
+                if self._landed
+                else "LANDING"
+                if self._landing
+                else "RECOVER"
+                if self._recovering
+                else "FLY"
+            ),
             "input_seen": self._input_seen,
             "armed": self.data.get("armed"),
             "have_telemetry": att is not None or z is not None,
-            "pose_blocked": self._pose_blocked(att, z),
+            "pose_blocked": self._pose_blocked(),
+            "att_source": disp_src,  # 'odom' | 'att' | 'cmd' (dead-reckoned display)
             "cmd": dict(self.last_cmd),
-            "roll_deg": math.degrees(att[0]) if att is not None else None,
-            "pitch_deg": math.degrees(att[1]) if att is not None else None,
-            "yaw_deg": math.degrees(att[2]) if att is not None else None,
+            "roll_deg": math.degrees(disp_roll) if disp_roll is not None else None,
+            "pitch_deg": math.degrees(disp_pitch) if disp_pitch is not None else None,
+            "yaw_deg": math.degrees(disp_yaw) if disp_yaw is not None else None,
             "alt_m": (-z) if z is not None else None,  # up-positive for display
             "vz_mps": vz,
             "hspeed_kmh": hspeed * KMH_PER_MPS if hspeed is not None else None,
@@ -460,6 +542,7 @@ class ManualControl:
             "e": "E",
             "r": "R",
             "f": "F",
+            "c": "C",
             "l": "L",
         }
         held = " ".join(v for k, v in labels.items() if keys[k]) or "-"
