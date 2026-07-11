@@ -1,4 +1,5 @@
 import math
+import os
 import time
 
 from pymavlink import mavutil
@@ -7,12 +8,12 @@ from simulator.gate_transition import GatePhase
 
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
+# --------------------------------------------------------------------------------------
 MAVLINK_CMD_SIM_RESET = 31000
 
 # --------------------------------------------------------------------------------------
 # MOTOR CONTROLS
 # --------------------------------------------------------------------------------------
-
 MOTOR_FRONT_LEFT = 0
 MOTOR_FRONT_RIGHT = 1
 MOTOR_BACK_LEFT = 0
@@ -42,46 +43,33 @@ def update_motor_control(mavlink_conn, system_boot_ms):
 # --------------------------------------------------------------------------------------
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
-PITCH_RATE = -0.3  # rad/s (negative = pitch forward)
-ROLL_RATE = 0.0
-YAW_RATE = 0.0
-THRUST = 0.6  # 0.0 - 1.0
-
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
 
 
-def update_attitude_flight_control(mavlink_conn, system_boot_ms):
+def _send_attitude_rates(
+    mavlink_conn,
+    system_boot_ms,
+    roll_rate=0.0,
+    pitch_rate=0.0,
+    yaw_rate=0.0,
+    thrust=0.6,
+):
     now_ms = int(time.time() * 1000)
-
-    """
-    Sets a desired vehicle attitude. Used by an external controller to
-    command the vehicle (manual controller or other system).
-    
-    time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
-    target_system             : System ID (type:uint8_t)
-    target_component          : Component ID (type:uint8_t)
-    type_mask                 : Bitmap to indicate which dimensions should be ignored by the vehicle. (type:uint8_t, values:ATTITUDE_TARGET_TYPEMASK)
-    q                         : Attitude quaternion (w, x, y, z order, zero-rotation is 1, 0, 0, 0) (type:float)
-    body_roll_rate            : Body roll rate [rad/s] (type:float)
-    body_pitch_rate           : Body pitch rate [rad/s] (type:float)
-    body_yaw_rate             : Body yaw rate [rad/s] (type:float)
-    thrust                    : Collective thrust, normalized to 0 .. 1 (-1 .. 1 for vehicles capable of reverse trust) (type:float)
-    """
     mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         RATES_ATTITUDE_MASK,
         [1, 0, 0, 0],  # dummy quaternion (ignored)
-        ROLL_RATE,
-        PITCH_RATE,
-        YAW_RATE,
-        THRUST,
+        roll_rate,
+        pitch_rate,
+        yaw_rate,
+        thrust,
     )
 
 
 # --------------------------------------------------------------------------------------
-# POSITION CONTROLS
+# POSITION / VELOCITY CONTROLS
 # --------------------------------------------------------------------------------------
 VELOCITY_POSITION_MASK = (
     mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
@@ -91,67 +79,32 @@ VELOCITY_POSITION_MASK = (
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
 
 
-def update_position_flight_control(mavlink_conn, system_boot_ms):
+def _send_velocity_ned(
+    mavlink_conn,
+    system_boot_ms,
+    vx=0.0,
+    vy=0.0,
+    vz=0.0,
+    yaw_rate=0.0,
+):
     now_ms = int(time.time() * 1000)
+    mask = VELOCITY_POSITION_MASK
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
 
-    """
-    Sets a desired vehicle position in a local north-east-down coordinate
-    frame. Used by an external controller to command the vehicle
-    (manual controller or other system).
-
-    time_boot_ms              : Timestamp (time since system boot). [ms] (type:uint32_t)
-    target_system             : System ID (type:uint8_t)
-    target_component          : Component ID (type:uint8_t)
-    coordinate_frame          : Valid options are: MAV_FRAME_LOCAL_NED = 1, MAV_FRAME_LOCAL_OFFSET_NED = 7, MAV_FRAME_BODY_NED = 8, MAV_FRAME_BODY_OFFSET_NED = 9 (type:uint8_t, values:MAV_FRAME)
-    type_mask                 : Bitmap to indicate which dimensions should be ignored by the vehicle. (type:uint16_t, values:POSITION_TARGET_TYPEMASK)
-    x                         : X Position in NED frame [m] (type:float)
-    y                         : Y Position in NED frame [m] (type:float)
-    z                         : Z Position in NED frame (note, altitude is negative in NED) [m] (type:float)
-    vx                        : X velocity in NED frame [m/s] (type:float)
-    vy                        : Y velocity in NED frame [m/s] (type:float)
-    vz                        : Z velocity in NED frame [m/s] (type:float)
-    afx                       : X acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afy                       : Y acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    afz                       : Z acceleration or force (if bit 10 of type_mask is set) in NED frame in meter / s^2 or N [m/s/s] (type:float)
-    yaw                       : yaw setpoint [rad] (type:float)
-    yaw_rate                  : yaw rate setpoint [rad/s] (type:float)
-    """
     mavlink_conn.mav.set_position_target_local_ned_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        VELOCITY_POSITION_MASK,
+        mask,
         0.0,
-        0,
+        0.0,
         0.0,  # ignored position NED
-        2.0,
-        0.0,
-        0.0,  # Vel - 2 m/s forward
-        0.0,
-        0,
-        0.0,  # ignored acceleration
-        0,  # ignored yaw
-        0.0,  # ignored yaw rate
-    )
-
-
-def send_body_velocity(mavlink_conn, system_boot_ms, vx, vy, vz):
-    """Command a body-frame velocity setpoint (x forward, y right, z down)."""
-    now_ms = int(time.time() * 1000)
-    mavlink_conn.mav.set_position_target_local_ned_send(
-        now_ms - system_boot_ms,
-        mavlink_conn.target_system,
-        mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_NED,
-        VELOCITY_POSITION_MASK,
-        0.0,
-        0.0,
-        0.0,  # ignored position
         vx,
         vy,
         vz,
@@ -159,15 +112,43 @@ def send_body_velocity(mavlink_conn, system_boot_ms, vx, vy, vz):
         0.0,
         0.0,  # ignored acceleration
         0.0,  # ignored yaw
-        0.0,  # ignored yaw rate
+        yaw_rate,
+    )
+
+
+def send_body_velocity(mavlink_conn, system_boot_ms, vx, vy, vz):
+    """Command a body-frame velocity setpoint (x forward, y right, z down)."""
+    now_ms = int(time.time() * 1000)
+    mask = VELOCITY_POSITION_MASK
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    mask &= ~mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    mavlink_conn.mav.set_position_target_local_ned_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
+        mask,
+        0.0,
+        0.0,
+        0.0,
+        vx,
+        vy,
+        vz,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
 
 
 # --------------------------------------------------------------------------------------
 # Control Loop
 # --------------------------------------------------------------------------------------
-
-CONTROL_HZ = 250
+# Spec VADR-TS-003 4.4: command rate MUST stay below 100 Hz (was 250 --
+# out-of-spec commands may be dropped or applied erratically by the sim).
+CONTROL_HZ = 90
 
 APPROACH_SPEED_MPS = 1.0  # forward speed while centering on the gate
 LATERAL_GAIN = 1.0  # m/s of correction per metre of lateral offset
@@ -190,36 +171,131 @@ class Controller:
         self.velocity_estimator = velocity_estimator
         self.tracker = tracker
         self.dead_reckoner = dead_reckoner
-        # while dead reckoning: current gate must first leave the frame before a
-        # visible gate counts as the *next* gate
         self._gate_seen_gap = False
         self._last_phase = None
+        self.control_mode = "motor"
+        self._roll_rate = 0.0
+        self._pitch_rate = 0.0
+        self._yaw_rate = 0.0
+        self._thrust = 0.0
+        self._vx = 0.0
+        self._vy = 0.0
+        self._vz = 0.0
+        self.pilot = self._make_pilot()
+        self._disarm_ticks = 0
+
+    def _gate_transition_enabled(self) -> bool:
+        """Use gate-transition brain when modules are wired and not in AUTO_FLIGHT."""
+        if self.tracker is None or self.velocity_estimator is None:
+            return False
+        if self.dead_reckoner is None:
+            return False
+        from simulator.auto_flight import auto_flight_enabled
+
+        if auto_flight_enabled():
+            return False
+        # GATE_TRANSITION=0 disables; default on when modules present
+        return os.environ.get("GATE_TRANSITION", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    def _make_pilot(self):
+        from simulator.auto_flight import auto_flight_enabled
+
+        if auto_flight_enabled():
+            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
+            # pixel servo (needs no position estimate; smoothest live flight
+            # so far). AUTO_PILOT=vnav selects the world-map vision navigator
+            # (NaN-proofed EKF pose).
+            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
+                from simulator.vision_nav_pilot import VisionNavPilot
+
+                return VisionNavPilot(self, self.data)
+            from simulator.ibvs_pilot import IBVSPilot
+
+            return IBVSPilot(self, self.data)
+        from simulator.pilot import Pilot
+
+        return Pilot(self, self.data)
+
+    def set_control_mode(self, mode):
+        self.control_mode = mode
+
+    def set_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        self._roll_rate = roll_rate
+        self._pitch_rate = pitch_rate
+        self._yaw_rate = yaw_rate
+        self._thrust = thrust
+
+    def set_velocity_ned(self, vx, vy, vz, yaw_rate):
+        self._vx = vx
+        self._vy = vy
+        self._vz = vz
+        self._yaw_rate = yaw_rate
+
+    def disarm(self):
+        pass
 
     def update(self):
-        if self.tracker is not None:
+        if self._gate_transition_enabled():
             self._gate_transition_update()
+            if not self.data.get("armed", False):
+                self._disarm_ticks += 1
+                if self._disarm_ticks % 50 == 1:
+                    self.arm()
+            else:
+                self._disarm_ticks = 0
+            time.sleep(1.0 / CONTROL_HZ)
+            return
+
+        self.pilot.tick()
+
+        if not self.data.get("armed", False):
+            self._disarm_ticks += 1
+            if self._disarm_ticks % 50 == 1:
+                self.arm()
         else:
+            self._disarm_ticks = 0
+
+        if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)
+        elif self.control_mode == "attitude":
+            _send_attitude_rates(
+                self.sim_conn,
+                self.system_boot_ms,
+                roll_rate=self._roll_rate,
+                pitch_rate=self._pitch_rate,
+                yaw_rate=self._yaw_rate,
+                thrust=self._thrust,
+            )
+        elif self.control_mode == "position":
+            _send_velocity_ned(
+                self.sim_conn,
+                self.system_boot_ms,
+                vx=self._vx,
+                vy=self._vy,
+                vz=self._vz,
+                yaw_rate=self._yaw_rate,
+            )
 
         time.sleep(1.0 / CONTROL_HZ)
 
     def _gate_transition_update(self):
         now = time.monotonic()
 
-        # 1. velocity estimate from IMU
         self.velocity_estimator.tick()
         state = self.data.get("state", {})
         speed = state.get("speed_mps", 0.0)
 
-        # 2. perception lateral offset (signed; inf when gate not visible)
         perception = self.data.get("perception", {})
         d_signed = perception.get("gate_lateral_m", math.inf)
         gate_visible = perception.get("gate_visible", False)
 
-        # 3. advance state machine on |d|
         phase = self.tracker.update(abs(d_signed), speed, now)
 
-        # 4. server-side gate pass - reset everything for the new gate
         if self.data.get("race_gate_passed_event"):
             self.data["race_gate_passed_event"] = False
             self.tracker.on_gate_passed()
@@ -228,7 +304,6 @@ class Controller:
             self._gate_seen_gap = False
             phase = self.tracker.phase
 
-        # 5. act on phase
         if phase == GatePhase.APPROACH:
             self.dead_reckoner.stop()
             if gate_visible:
@@ -239,7 +314,6 @@ class Controller:
                     self.sim_conn, self.system_boot_ms, APPROACH_SPEED_MPS, vy, 0.0
                 )
             else:
-                # no gate in sight - hold position rather than fly blind
                 send_body_velocity(self.sim_conn, self.system_boot_ms, 0.0, 0.0, 0.0)
 
         elif phase == GatePhase.HOVERING:
@@ -260,7 +334,6 @@ class Controller:
             if not gate_visible:
                 self._gate_seen_gap = True
             elif self._gate_seen_gap:
-                # gate left the frame and a gate is visible again -> next gate
                 self.tracker.on_next_gate_visible()
                 self.dead_reckoner.stop()
                 self._gate_seen_gap = False
@@ -274,12 +347,12 @@ class Controller:
 
         if phase != self._last_phase:
             print(
-                f"[gate] phase={phase.value} thover={self.tracker.thover:.2f}s d={self.tracker.d:.2f}m",
+                f"[gate] phase={phase.value} thover={self.tracker.thover:.2f}s "
+                f"d={self.tracker.d:.2f}m",
                 flush=True,
             )
             self._last_phase = phase
 
-        # 6. publish for observability
         self.data["gate"] = {
             "phase": phase.value,
             "thover": self.tracker.thover,
