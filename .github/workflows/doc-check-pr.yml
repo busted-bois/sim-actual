@@ -1,0 +1,68 @@
+name: Doc check PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "simulator/**"
+      - "rl/**"
+      - "main.py"
+      - "auto.py"
+      - "Makefile"
+      - "tests/**"
+      - "pyproject.toml"
+      - "SPEC.md"
+      - "scripts/sim-ab.ps1"
+
+permissions:
+  pull-requests: write
+
+jobs:
+  doc-warn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warn if doc not updated on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request.number;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr,
+              per_page: 100,
+            });
+            const watchedPrefixes = [
+              "simulator/",
+              "rl/",
+              "main.py",
+              "auto.py",
+              "Makefile",
+              "tests/",
+              "pyproject.toml",
+              "SPEC.md",
+              "scripts/sim-ab.ps1",
+            ];
+            const touchesWatched = files.some((f) =>
+              watchedPrefixes.some(
+                (p) => f.filename === p || f.filename.startsWith(p),
+              ),
+            );
+            const touchesDoc = files.some(
+              (f) => f.filename === "docs/main-documentation.md",
+            );
+            if (!touchesWatched || touchesDoc) {
+              core.info("No doc warning needed");
+              return;
+            }
+            const body = [
+              "### Documentation auto-sync",
+              "",
+              "This PR changes flight/RL code but not `docs/main-documentation.md`.",
+              "",
+              "After merge to `main`, the [Update main documentation](.github/workflows/update-main-documentation.yml) workflow will rewrite the doc on branch `main-documentation` via Cursor SDK.",
+              "",
+              "Optional: preview doc changes locally with `make doc-update` (requires `CURSOR_API_KEY`).",
+            ].join("\n");
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr, body });

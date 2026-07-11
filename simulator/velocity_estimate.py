@@ -31,7 +31,19 @@ class VelocityEstimator:
         if not imu:
             return
 
-        t_us = imu["time_boot_us"]
+        # main imu: ax/ay/az + time_us; legacy gate-transition: accel + time_boot_us
+        t_us = imu.get("time_us", imu.get("time_boot_us"))
+        if t_us is None:
+            return
+        if "accel" in imu:
+            ax, ay, az = imu["accel"]
+        else:
+            ax = imu.get("ax")
+            ay = imu.get("ay")
+            az = imu.get("az")
+            if ax is None or ay is None or az is None:
+                return
+
         if self._last_imu_time_us is None:
             self._last_imu_time_us = t_us
             return
@@ -40,7 +52,6 @@ class VelocityEstimator:
         dt = (t_us - self._last_imu_time_us) * 1e-6
         self._last_imu_time_us = t_us
 
-        ax, ay, az = imu["accel"]
         # remove gravity assuming level flight (attitude compensation later)
         az += GRAVITY_MPS2
 

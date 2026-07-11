@@ -66,15 +66,18 @@ class GatePerception:
         }
 
     def _active_gate_width(self):
-        track = self.data.get("track")
-        race = self.data.get("race")
-        if not track or not track.get("gates"):
+        # Prefer main's track_gates; fall back to branch-local track.gates
+        gates = self.data.get("track_gates")
+        if not gates:
+            track = self.data.get("track") or {}
+            gates = track.get("gates")
+        if not gates:
             return None
-        gates = track["gates"]
-        index = race["active_gate_index"] if race else 0
-        if index < 0 or index >= len(gates):
+        race = self.data.get("race") or self.data.get("race_status") or {}
+        index = race.get("active_gate_index", self.data.get("active_gate_index", 0))
+        if index is None or index < 0 or index >= len(gates):
             return None
-        width = gates[index]["width"]
+        width = gates[index].get("width")
         if not width or width <= 0 or math.isnan(width):
             return None
         return width

@@ -5,15 +5,43 @@ from simulator.dead_reckon import DeadReckoner
 from simulator.gate_perception import GatePerception
 from simulator.gate_transition import GateTransitionConfig, GateTransitionTracker
 from simulator.mavlink_rx import MAVLinkRX
+from simulator.preflight import udp_port_in_use
 from simulator.timesync import TimeSync
 from simulator.velocity_estimate import VelocityEstimator
 from simulator.vision_rx import VisionRX
+
+# HIGHRES_IMU is the "primary sensor" for VQ2 (ODOMETRY/ATTITUDE disabled
+# there); request it explicitly since nothing streams it by default.
+IMU_MESSAGE_INTERVAL_US = 10000  # 100 Hz
+
+
+def _request_message_interval(sim_conn, message_id: int, interval_us: int) -> None:
+    """Best-effort MAVLink request to stream `message_id` at a fixed rate."""
+    sim_conn.mav.command_long_send(
+        sim_conn.target_system,
+        sim_conn.target_component,
+        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        0,  # confirmation
+        message_id,
+        interval_us,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
 
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
+    if udp_port_in_use(server_ip, server_udp_port):
+        raise TimeoutError(
+            f"UDP {server_udp_port} already in use by another process "
+            "(likely a stale `make auto`/`make sim`). Free it with `make free-port`, "
+            "then retry."
+        )
     # Start a connection listening on a UDP port
     sim_conn = mavutil.mavlink_connection(
         "udpin:%s:%s"
@@ -23,8 +51,14 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
         )
     )
     print("Waiting for heartbeat...", flush=True)
-    sim_conn.wait_heartbeat()
+    if not sim_conn.wait_heartbeat(timeout=30):
+        raise TimeoutError(
+            "No MAVLink heartbeat on UDP 14550 — open FlightSim and enter a flight session first"
+        )
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
+    _request_message_interval(
+        sim_conn, mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU, IMU_MESSAGE_INTERVAL_US
+    )
 
     # -------------------------------
     # Setup Mavlink msg receiver
@@ -39,7 +73,7 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     ts_loop = TimeSync(sim_conn, shared_data)
 
     # -------------------------------
-    # Gate transition modules
+    # Gate transition modules (Sameer plan)
     # -------------------------------
     perception = GatePerception(shared_data)
     velocity_estimator = VelocityEstimator(shared_data)
