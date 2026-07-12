@@ -5,19 +5,30 @@ from pymavlink import mavutil
 
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
+from simulator.preflight import udp_port_in_use
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
 
 HEARTBEAT_TIMEOUT_S = 60
 GCS_HEARTBEAT_INTERVAL_S = 1.0
 
+# HIGHRES_IMU is the "primary sensor" for VQ2 (ODOMETRY/ATTITUDE disabled there);
+# request it explicitly since nothing streams it by default.
+IMU_MESSAGE_INTERVAL_US = 10000  # 100 Hz
+
+# MAVLink message IDs (numeric so this works under both MAVLink 1 and 2 dialects;
+# ODOMETRY = 331 is MAVLink-2-only and absent from the v1 dialect's constants).
+_MSG_ID_ATTITUDE = 30
+_MSG_ID_LOCAL_POSITION_NED = 32
+_MSG_ID_ODOMETRY = 331
+_MAV_CMD_SET_MESSAGE_INTERVAL = 511
+
 
 def _send_gcs_heartbeat(sim_conn):
     """Announce ourselves to the sim as a GCS.
 
-    The sim only streams telemetry (ODOMETRY/ATTITUDE/...) and accepts offboard
-    setpoints once it sees a ground-station heartbeat, so this must be sent during
-    connect and kept up continuously.
+    The sim streams telemetry and accepts offboard setpoints once it sees a
+    ground-station heartbeat, so this is sent during connect and kept up.
     """
     sim_conn.mav.heartbeat_send(
         mavutil.mavlink.MAV_TYPE_GCS,
@@ -57,48 +68,41 @@ def _start_gcs_heartbeat_thread(sim_conn):
     return thread
 
 
-# MAVLink message IDs (numeric so this works under both MAVLink 1 and 2 dialects;
-# ODOMETRY = 331 is MAVLink-2-only and absent from the v1 dialect's constants).
-_MSG_ID_ATTITUDE = 30
-_MSG_ID_LOCAL_POSITION_NED = 32
-_MSG_ID_HIGHRES_IMU = 105
-_MSG_ID_ODOMETRY = 331
-_MAV_CMD_SET_MESSAGE_INTERVAL = 511
+def _request_message_interval(sim_conn, message_id, interval_us):
+    """Best-effort MAVLink request to stream `message_id` at a fixed rate."""
+    sim_conn.mav.command_long_send(
+        sim_conn.target_system,
+        sim_conn.target_component,
+        _MAV_CMD_SET_MESSAGE_INTERVAL,
+        0,  # confirmation
+        message_id,
+        interval_us,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
 
 
 def _request_data_streams(sim_conn, rate_hz=50):
-    """Explicitly ask the sim to stream the pose messages we need.
-
-    Belt-and-suspenders: the GCS heartbeat alone should trigger streaming, but some
-    sim builds only stream on request. Harmless if already streaming (we keep the
-    latest of each). Uses SET_MESSAGE_INTERVAL (interval in microseconds).
-    """
+    """Request the pose streams manual flight uses (HIGHRES_IMU is requested
+    separately at 100 Hz). Harmless if already streaming — we keep the latest."""
     interval_us = int(1_000_000 / rate_hz)
-    for msg_id in (
-        _MSG_ID_ATTITUDE,
-        _MSG_ID_LOCAL_POSITION_NED,
-        _MSG_ID_ODOMETRY,
-        _MSG_ID_HIGHRES_IMU,
-    ):
-        sim_conn.mav.command_long_send(
-            sim_conn.target_system,
-            sim_conn.target_component,
-            _MAV_CMD_SET_MESSAGE_INTERVAL,
-            0,  # confirmation
-            msg_id,
-            interval_us,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
+    for msg_id in (_MSG_ID_ATTITUDE, _MSG_ID_LOCAL_POSITION_NED, _MSG_ID_ODOMETRY):
+        _request_message_interval(sim_conn, msg_id, interval_us)
 
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
+    if udp_port_in_use(server_ip, server_udp_port):
+        raise TimeoutError(
+            f"UDP {server_udp_port} already in use by another process "
+            "(likely a stale `make auto`/`make sim`). Free it with `make free-port`, "
+            "then retry."
+        )
     # Start a connection listening on a UDP port
     sim_conn = mavutil.mavlink_connection(
         "udpin:%s:%s"
@@ -116,8 +120,11 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
 
     # Keep announcing ourselves so the sim keeps streaming telemetry and accepting
-    # our setpoints (without this: no telemetry, and the drone ignores our commands).
+    # our setpoints, and request the streams we consume.
     _start_gcs_heartbeat_thread(sim_conn)
+    _request_message_interval(
+        sim_conn, mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU, IMU_MESSAGE_INTERVAL_US
+    )
     _request_data_streams(sim_conn)
 
     # -------------------------------

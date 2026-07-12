@@ -1,27 +1,48 @@
+import os
 import struct
 import time
 import threading
 
-from pymavlink import mavutil
+from simulator.config import TrackGate
+from simulator.transforms import quat_to_yaw
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 ENCAPSULATED_TRACK_INFO_MSG_ID = 2
 
+# VQ2 competitive: gate poses in track burst may be nulled (all zeros).
+VQ2_DEFAULT_GATE_COUNT = 6
+
+_AUTO_FLIGHT_DEBUG_VALUES = frozenset({"1", "true", "yes"})
+
+
+def _gate_pose_valid(x, y, z, width, height) -> bool:
+    return abs(x) + abs(y) + abs(z) > 0.01 or width > 0.01 or height > 0.01
+
+
+def _auto_flight_debug() -> bool:
+    return (
+        os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower()
+        in _AUTO_FLIGHT_DEBUG_VALUES
+    )
+
 
 class MAVLinkRX:
-    def __init__(self, mavlink_connection, data):
+    def __init__(self, mavlink_connection, data, estimator=None):
         self.mavlink_conn = mavlink_connection
         self.data = data
+        self.estimator = estimator
         self.thread = None
         self.is_running = False
 
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
+        self._debug_last_race_log = 0.0
+        self._debug_logged_track = False
 
     @classmethod
-    def create_mavlink_rx(cls, mavlink_connection, data):
-        rx = cls(mavlink_connection, data)
-        rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=False)
+    def create_mavlink_rx(cls, mavlink_connection, data, estimator=None):
+        rx = cls(mavlink_connection, data, estimator=estimator)
+        rx.thread = threading.Thread(target=rx.mavlink_receive_loop, daemon=True)
         rx.is_running = True
         rx.thread.start()
         return rx
@@ -65,19 +86,19 @@ class MAVLinkRX:
                 self.on_timesync(msg)
 
             # --------------------------------------------------------------------------------------
-            # ATTITUDE
+            # ATTITUDE — disabled in VQ2 competitive sim (handler kept for training builds)
             # --------------------------------------------------------------------------------------
             elif msg_type == "ATTITUDE":
                 self.on_attitude(msg)
 
             # --------------------------------------------------------------------------------------
-            # LOCAL_POSITION_NED
+            # LOCAL_POSITION_NED — disabled in VQ2 competitive sim
             # --------------------------------------------------------------------------------------
             elif msg_type == "LOCAL_POSITION_NED":
                 self.on_local_position_ned(msg)
 
             # --------------------------------------------------------------------------------------
-            # ODOMETRY
+            # ODOMETRY — disabled in VQ2 competitive sim
             # --------------------------------------------------------------------------------------
             elif msg_type == "ODOMETRY":
                 self.on_odometry(msg)
@@ -115,26 +136,30 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        self.data["armed"] = bool(
-            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-        )
+        self.data["armed"] = bool(msg.base_mode & 0b10000000)
 
     def on_timesync(self, msg):
-        request_time = msg.ts1
-        response_time = msg.tc1
+        pass
 
     def on_attitude(self, msg):
+        self.data["yaw_rad"] = msg.yaw
+        self.data["yaw_rate"] = msg.yawspeed
+        self.data["att_time_ms"] = msg.time_boot_ms
         self.data["attitude"] = {
             "roll": msg.roll,
             "pitch": msg.pitch,
             "yaw": msg.yaw,
-            "rollspeed": msg.rollspeed,
-            "pitchspeed": msg.pitchspeed,
-            "yawspeed": msg.yawspeed,
-            "time_boot_ms": msg.time_boot_ms,
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
         }
 
     def on_local_position_ned(self, msg):
+        self.data["pos_ned"] = (msg.x, msg.y, msg.z)
+        self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
+        self.data["pos_time_ms"] = msg.time_boot_ms
+        self.data["has_position"] = True
+        # manual-flight fallback source (simulator/manual_control.py)
         self.data["local_position_ned"] = {
             "x": msg.x,
             "y": msg.y,
@@ -142,32 +167,60 @@ class MAVLinkRX:
             "vx": msg.vx,
             "vy": msg.vy,
             "vz": msg.vz,
-            "time_boot_ms": msg.time_boot_ms,
         }
 
     def on_odometry(self, msg):
+        self.data["pos_ned"] = (msg.x, msg.y, msg.z)
+        self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
+        qw, qx, qy, qz = msg.q[0], msg.q[1], msg.q[2], msg.q[3]
+        yaw = quat_to_yaw(qw, qx, qy, qz)
+        self.data["yaw_rad"] = yaw
+        self.data["yaw_rate"] = msg.yawspeed
+        self.data["has_position"] = True
         self.data["odometry"] = {
             "x": msg.x,
             "y": msg.y,
             "z": msg.z,
-            # quaternion in (w, x, y, z) order
-            "q": (msg.q[0], msg.q[1], msg.q[2], msg.q[3]),
             "vx": msg.vx,
             "vy": msg.vy,
             "vz": msg.vz,
-            "rollspeed": msg.rollspeed,
-            "pitchspeed": msg.pitchspeed,
-            "yawspeed": msg.yawspeed,
-            "time_usec": msg.time_usec,
-            "reset_counter": msg.reset_counter,
+            "qx": qx,
+            "qy": qy,
+            "qz": qz,
+            "qw": qw,
+            # (w, x, y, z) tuple for manual flight's _quat_to_euler
+            "q": (qw, qx, qy, qz),
+            "roll_speed": msg.rollspeed,
+            "pitch_speed": msg.pitchspeed,
+            "yaw_speed": msg.yawspeed,
         }
 
     def on_highres_imu(self, msg):
-        # Arrival marker: event/qualification sessions stream IMU while
-        # blocking pose telemetry — lets clients tell "blocked" from "silent".
-        # (The accel/gyro values are unused: manual flight dead-reckons attitude
-        # from its own commands rather than estimating tilt from the accel.)
+        # Full HIGHRES_IMU: accel (m/s^2) + gyro (rad/s) body FRD, mag (gauss),
+        # baro. Under the VQ2 telemetry block this is the ONLY self-state source,
+        # so keep every field and feed the state estimator inline (same thread,
+        # constant sensor-rate dt).
+        imu = {
+            "ax": msg.xacc,
+            "ay": msg.yacc,
+            "az": msg.zacc,
+            "gx": msg.xgyro,
+            "gy": msg.ygyro,
+            "gz": msg.zgyro,
+            "mx": msg.xmag,
+            "my": msg.ymag,
+            "mz": msg.zmag,
+            "abs_pressure": msg.abs_pressure,
+            "pressure_alt": msg.pressure_alt,
+            "temperature": msg.temperature,
+            "time_us": msg.time_usec,
+        }
+        self.data["imu"] = imu
+        # Arrival marker for manual flight: event/qualification sessions stream
+        # IMU while blocking pose telemetry — lets it tell "blocked" from "silent".
         self.data["highres_imu_mono"] = time.monotonic()
+        if self.estimator is not None:
+            self.estimator.on_imu(imu)
 
     def on_encapsulated_data(self, msg):
         if msg:
@@ -181,12 +234,9 @@ class MAVLinkRX:
 
     def on_race_status(self, msg):
         raw_payload = bytes(msg.data)
-        # data_type - ID of this message
-        # sim_boot_time_ms - elapsed ms on server since sim boot
-        # race_start_boot_time_ms - elapsed ms on server since sim boot when race started. None or < 0 if race has not started
-        # race_finish_time_ns - elapsed ns on server since sim boot when race finished. None or < 0 if race is ongoing
-        # active_gate_index - current index of target race gate
-        # last_gate_race_time - race time in seconds when last gate was passed
+        # sim_boot_time_ms — elapsed ms since sim boot
+        # race_start_boot_time_ms — GO instant (first run) or countdown start (restart)
+        # race_finish_time_ns — < 0 while racing; >= 0 when finished
         (
             data_type,
             sim_boot_time_ms,
@@ -195,6 +245,27 @@ class MAVLinkRX:
             active_gate_index,
             last_gate_race_time,
         ) = struct.unpack_from("<BQqqIq", raw_payload)
+        self.data["active_gate_index"] = active_gate_index
+        self.data["race_started"] = race_start_boot_time_ms >= 0
+        self.data["race_finish_time_ns"] = race_finish_time_ns
+        self.data["race_status"] = {
+            "sim_boot_time_ms": sim_boot_time_ms,
+            "race_start_boot_time_ms": race_start_boot_time_ms,
+            "race_finish_time_ns": race_finish_time_ns,
+            "active_gate_index": active_gate_index,
+            "last_gate_race_time": last_gate_race_time,
+        }
+        if _auto_flight_debug():
+            now = time.monotonic()
+            if now - self._debug_last_race_log >= 2.0:
+                print(
+                    "[AUTO_FLIGHT_DEBUG] race_status "
+                    f"sim_boot={sim_boot_time_ms} "
+                    f"race_start={race_start_boot_time_ms} "
+                    f"active_gate_index={active_gate_index}",
+                    flush=True,
+                )
+                self._debug_last_race_log = now
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
@@ -218,17 +289,12 @@ class MAVLinkRX:
             self.on_track_data(full_payload)
 
     def on_track_data(self, payload):
-        # header:
-        #   num_gates - track gate count
+        # VQ2: burst may still arrive but gate poses are nulled — keep gate_count.
         (num_gates,) = struct.unpack_from("<H", payload)
         payload = payload[2:]
+        gates = []
+        positions_valid = False
         for i in range(num_gates):
-            # Gate Info
-            #   gate_id - range is 0 - num_gates
-            #   position_ned_x, position_ned_y, position_ned_z - Position of gate in NED coordinates
-            #   orientation_ned_w, orientation_ned_x, orientation_ned_y, orientation_ned_z - Orientation of gate in NED coordinates
-            #   width - gate width in metres
-            #   height - gate height in metres
             (
                 gate_id,
                 position_ned_x,
@@ -241,22 +307,62 @@ class MAVLinkRX:
                 width,
                 height,
             ) = struct.unpack_from("<Hfffffffff", payload)
+            if _gate_pose_valid(
+                position_ned_x,
+                position_ned_y,
+                position_ned_z,
+                width,
+                height,
+            ):
+                positions_valid = True
+            gates.append(
+                TrackGate(
+                    gate_id=gate_id,
+                    pos_ned=(position_ned_x, position_ned_y, position_ned_z),
+                    orient_quat=(
+                        orientation_ned_w,
+                        orientation_ned_x,
+                        orientation_ned_y,
+                        orientation_ned_z,
+                    ),
+                    width_m=width,
+                    height_m=height,
+                )
+            )
             payload = payload[38:]
+        gate_count = num_gates if num_gates > 0 else VQ2_DEFAULT_GATE_COUNT
+        self.data["gate_count"] = gate_count
+        self.data["track_positions_valid"] = positions_valid
+        self.data["gates"] = gates
+        self.data["track_gates"] = [
+            {
+                "gate_id": g.gate_id,
+                "position_ned": g.pos_ned,
+                "orientation_ned": g.orient_quat,
+                "width": g.width_m,
+                "height": g.height_m,
+            }
+            for g in gates
+        ]
+        if _auto_flight_debug() and not self._debug_logged_track:
+            print(
+                f"[AUTO_FLIGHT_DEBUG] track burst received num_gates={gate_count} "
+                f"positions_valid={positions_valid}",
+                flush=True,
+            )
+            self._debug_logged_track = True
 
     def on_actuator_output_status(self, msg):
-        time_boot_us = msg.time_usec
-        motor_front_left = msg.actuator[0]
-        motor_front_right = msg.actuator[1]
-        motor_back_left = msg.actuator[2]
-        motor_back_right = msg.actuator[3]
+        pass
 
     def on_collision(self, msg):
-        # Collision IDs
-        # 1001 - Gate
-        # 1002 - Environment
-        collision_id = msg.id
-
-        threat_level = msg.threat_level  # 1-2 with 2 being higher impact collision
-        impact = (
-            msg.horizontal_minimum_delta
-        )  # this is not a delta - it is the impulse magnitude in kg m/s
+        self.data["last_collision"] = (
+            msg.id,
+            msg.threat_level,
+            msg.horizontal_minimum_delta,
+        )
+        self.data["collision"] = {
+            "id": msg.id,
+            "threat_level": msg.threat_level,
+            "delta": msg.horizontal_minimum_delta,
+        }
