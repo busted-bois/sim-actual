@@ -124,6 +124,89 @@ class Bus:
         )
         return False
 
+    def wait_for_race_go(
+        self, timeout_s: float = 45.0, is_restart: bool = True
+    ) -> bool:
+        """Drain MAVLink until on-screen countdown hits 0 (sim GO!)."""
+        from simulator.preflight import RaceGoLatch, poll_race_go
+
+        print("[bus] waiting for race GO (countdown -> 0)...", flush=True)
+        latch = RaceGoLatch()
+        race = self.tracker.data.get("race_status") or {}
+        armed_boot = race.get("sim_boot_time_ms")
+        latch.reset_for_arm(armed_boot, is_restart=is_restart)
+        t0 = time.monotonic()
+        last_log = 0.0
+        while time.monotonic() - t0 < timeout_s:
+            self.drain()
+            allowed, go_boot_ms = poll_race_go(self.tracker.data, latch)
+            if allowed:
+                race = self.tracker.data.get("race_status") or {}
+                print(
+                    "[bus] Race go! "
+                    f"sim_boot={race.get('sim_boot_time_ms')}ms "
+                    f"race_start={race.get('race_start_boot_time_ms')}ms "
+                    f"go_boot={go_boot_ms}ms branch={latch.branch}",
+                    flush=True,
+                )
+                return True
+            now = time.monotonic()
+            if now - last_log >= 1.0:
+                race = self.tracker.data.get("race_status") or {}
+                print(
+                    "[bus] countdown... "
+                    f"sim_boot={race.get('sim_boot_time_ms', -1)} "
+                    f"race_start={race.get('race_start_boot_time_ms', -1)} "
+                    f"latch={latch.go_boot_ms}",
+                    flush=True,
+                )
+                last_log = now
+            time.sleep(0.02)
+        print("[bus] race GO timeout", flush=True)
+        return False
+
+    def wait_for_fresh_race_start(self, timeout_s: float = 30.0) -> bool:
+        """After sim reset, wait for a new race_start before arming."""
+        print("[bus] waiting for fresh race_start after reset...", flush=True)
+        before = None
+        race0 = self.tracker.data.get("race_status")
+        if race0:
+            before = race0.get("race_start_boot_time_ms", -1)
+            self.tracker.data["_preflight_race_start_baseline"] = before
+        t0 = time.monotonic()
+        last_log = 0.0
+        while time.monotonic() - t0 < timeout_s:
+            self.drain()
+            race = self.tracker.data.get("race_status") or {}
+            race_start = race.get("race_start_boot_time_ms", -1)
+            sim_boot = race.get("sim_boot_time_ms", 0)
+            if race_start >= 0:
+                # Fresh if differs from baseline, or scheduled in the future,
+                # or sim_boot reset small after teleport.
+                baseline = self.tracker.data.get("_preflight_race_start_baseline")
+                scheduled = race_start - sim_boot > 1500
+                changed = baseline is None or race_start != baseline
+                rebooted = sim_boot < 10000
+                if scheduled or changed or rebooted:
+                    print(
+                        f"[bus] fresh race_start={race_start} sim_boot={sim_boot}",
+                        flush=True,
+                    )
+                    return True
+            now = time.monotonic()
+            if now - last_log >= 2.0:
+                print(
+                    f"[bus] waiting race_start... start={race_start} boot={sim_boot}",
+                    flush=True,
+                )
+                last_log = now
+            time.sleep(0.05)
+        print(
+            "[bus] race_start timeout — click Restart Race if countdown never starts",
+            flush=True,
+        )
+        return False
+
     def send(
         self, roll_rate: float, pitch_rate: float, yaw_rate: float, thrust: float
     ) -> None:

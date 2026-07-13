@@ -175,6 +175,13 @@ def _takeoff_to(
 
 def _prep(bus: Bus, ctrl: Controller, safety: SafetyMonitor) -> bool:
     safety.reset()
+    # Snapshot race_start so we can detect a fresh countdown after reset.
+    bus.drain()
+    race = bus.tracker.data.get("race_status") or {}
+    if race.get("race_start_boot_time_ms", -1) >= 0:
+        bus.tracker.data["_preflight_race_start_baseline"] = race[
+            "race_start_boot_time_ms"
+        ]
     bus.reset()
     time.sleep(2.0)
     # Re-boot ESKF after teleport (VQ2 has no odometry).
@@ -187,7 +194,14 @@ def _prep(bus: Bus, ctrl: Controller, safety: SafetyMonitor) -> bool:
     else:
         print("[prep] no pose after reset", flush=True)
         return False
-    # Hold level + hover thrust briefly so estimator sees thrust_cmd before climb.
+    # Do NOT arm/climb during 3-2-1 — wait until on-screen GO.
+    if not bus.wait_for_fresh_race_start(timeout_s=30.0):
+        print("[prep] no fresh race_start after reset", flush=True)
+        return False
+    if not bus.wait_for_race_go(timeout_s=45.0, is_restart=True):
+        print("[prep] race GO timeout — stay on countdown until 0", flush=True)
+        return False
+    # Hold level + hover briefly so estimator sees thrust_cmd before climb.
     for _ in range(int(0.5 * CONTROL_HZ)):
         bus.drain()
         bus.send(0.0, 0.0, 0.0, HOVER_THRUST)

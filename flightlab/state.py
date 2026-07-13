@@ -7,10 +7,13 @@ included) those are absent — fall back to StateEstimator on HIGHRES_IMU.
 from __future__ import annotations
 
 import math
+import struct
 import time
 from dataclasses import dataclass
 
 from simulator.state_estimator import StateEstimator
+
+ENCAPSULATED_RACE_STATUS_MSG_ID = 1
 
 
 @dataclass
@@ -55,6 +58,9 @@ class StateTracker:
         self._seen_imu = False
         self.estimator = StateEstimator()
         self.pose_source = "none"
+        self.race_status: dict | None = None
+        # Dict shaped for simulator.preflight race-GO helpers.
+        self.data: dict = {"race_status": None}
 
     @property
     def has_pose_telemetry(self) -> bool:
@@ -142,6 +148,31 @@ class StateTracker:
                     )
                     self._last_pose_t = now
                     self.pose_source = "estimator"
+
+        elif msg_type == "ENCAPSULATED_DATA":
+            raw = bytes(msg.data)
+            if not raw:
+                return
+            if int(raw[0]) != ENCAPSULATED_RACE_STATUS_MSG_ID:
+                return
+            (
+                _data_type,
+                sim_boot_time_ms,
+                race_start_boot_time_ms,
+                race_finish_time_ns,
+                active_gate_index,
+                last_gate_race_time,
+            ) = struct.unpack_from("<BQqqIq", raw)
+            self.race_status = {
+                "sim_boot_time_ms": sim_boot_time_ms,
+                "race_start_boot_time_ms": race_start_boot_time_ms,
+                "race_finish_time_ns": race_finish_time_ns,
+                "active_gate_index": active_gate_index,
+                "last_gate_race_time": last_gate_race_time,
+            }
+            self.data["race_status"] = self.race_status
+            self.data["active_gate_index"] = active_gate_index
+            self.data["race_started"] = race_start_boot_time_ms >= 0
 
     def snapshot(self) -> State:
         now = time.monotonic()
