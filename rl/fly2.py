@@ -30,15 +30,29 @@ from rl.fly2_course import (
     HOVER_T,
     Fly2Config,
     compute_course_rates,
+    detect_climb_course,
     rates_from_attitude_targets,
     rpy,
     wrap,
 )
 from rl.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
+from simulator.preflight import wait_for_race_go
 from simulator.vision_nav import VisionGuidance, VisualServo
 
 HZ = 90.0  # spec VADR-TS-003 4.4: command rate must stay < 100 Hz
+TAKEOFF_S = 3.0
+HOVER_Z_NED = -3.0
+
+
+def _alt_src(sim: SimInterface, est_mode: bool) -> str:
+    if sim.data.get("odometry") is not None:
+        return "odo"
+    if sim.data.get("attitude") is not None and sim.data.get("has_position"):
+        return "att+pos"
+    if est_mode:
+        return "ekf"
+    return "?"
 
 
 def main():
@@ -93,6 +107,9 @@ def main():
     if args.mode == "course":
         gate_map = json.load(open(GATE_MAP_PATH))["gates"]
         n = len(gate_map)
+        if not args.flipz and detect_climb_course(gate_map):
+            cfg.flipz = True
+            print("[f2] climb course detected — flipz=True", flush=True)
     guide = None  # constructed after est_mode is known (speed differs)
     sim = SimInterface(use_estimator=args.est)
     if not sim.wait_for_telemetry():
@@ -106,18 +123,34 @@ def main():
         time.sleep(1.5)
     # Sync launch to the countdown: wait for the user to hit ENTER at "go".
     if args.wait and args.mode in ("course", "vision"):
+        print(
+            "[f2] waiting for ENTER at countdown=0 (vision logs below are normal)...",
+            flush=True,
+        )
         try:
             input("[f2] READY -- press ENTER the moment the countdown hits 0...")
         except EOFError:
             pass
+    print("[f2] waiting for race GO ...", flush=True)
+    if not wait_for_race_go(sim.data, timeout_s=45.0):
+        print("[f2] race GO timeout — start Race in FlightSim", flush=True)
+        os._exit(1)
     sim.arm()
-    time.sleep(0.2)
+    if not sim.ensure_armed(timeout_s=8.0):
+        print(
+            "[f2] armed heartbeat not seen — continuing (sending arm+setpoints anyway)",
+            flush=True,
+        )
     s0 = sim.snapshot()
+    if not s0.has_pose():
+        print("[f2] no pose after arm", flush=True)
+        os._exit(1)
     hold_z = s0.pos_ned[2]
     hold_yaw = rpy(s0.quat)[2]
-    # Estimator-driven flight needs the gyro-frame command signs.
+    takeoff_z = min(hold_z, HOVER_Z_NED)
+    # EKF attitude uses odometry sign convention; EST_SIGNS only for --est experiments.
     est_mode = args.est or sim.data.get("odometry") is None
-    att_signs = EST_SIGNS if est_mode else None
+    att_signs = EST_SIGNS if args.est else None
     if args.mode == "vision":
         # Estimator regime: body-frame visual servoing -- world-position
         # drift cannot create phantom targets (measured failure of the
@@ -125,8 +158,8 @@ def main():
         # original world-map guidance.
         guide = VisualServo() if est_mode else VisionGuidance()
     print(
-        f"[f2] mode={args.mode} hold_z={hold_z:.1f} hover_t={HOVER_T}"
-        f" est_mode={est_mode}",
+        f"[f2] mode={args.mode} hold_z={hold_z:.1f} takeoff_z={takeoff_z:.1f}"
+        f" hover_t={HOVER_T} est_mode={est_mode} armed={s0.armed}",
         flush=True,
     )
 
@@ -154,8 +187,12 @@ def main():
     last_col = sim.data.get("last_collision")  # ignore stale pre-run hits
     last_col_t = -1e9
     scan_since = None
+    last_arm_t = 0.0
     reason = "timeout"
     while time.time() - t0 < args.seconds:
+        if not sim.data.get("armed") and time.time() - last_arm_t >= 1.0:
+            sim.arm()
+            last_arm_t = time.time()
         # Pump the vision window whenever a new (detected) frame is ready.
         img, tag = display.pick(sim.data)
         if tag is not None and tag != last_shown_tag:
@@ -189,6 +226,13 @@ def main():
             roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
                 roll, pitch, z, vz, 0.0, 0.0, 0.0, hold_z - 2.0, signs=att_signs
             )
+            vstatus = "TAKEOFF"
+        elif args.mode == "course" and time.time() - t0 < TAKEOFF_S:
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
+                roll, pitch, z, vz, 0.0, 0.0, 0.0, takeoff_z, signs=att_signs
+            )
+            if est_mode and z > takeoff_z + 0.5:
+                thrust = max(thrust, HOVER_T + 0.08)
             vstatus = "TAKEOFF"
         elif args.mode == "vision":
             pose_data = sim.data.get("pose")
@@ -283,7 +327,8 @@ def main():
         now = time.time() - t0
         if now - last_log >= 0.5:
             print(
-                f"[f2] [{now:4.1f}s] rpy=({math.degrees(roll):+4.0f},"
+                f"[f2] [{now:4.1f}s] armed={snap.armed} alt={_alt_src(sim, est_mode)} "
+                f"rpy=({math.degrees(roll):+4.0f},"
                 f"{math.degrees(pitch):+4.0f},{math.degrees(yaw):+4.0f}) "
                 f"z={z:+5.1f} v=({v[0]:+4.1f},{v[1]:+4.1f},{v[2]:+4.1f}) thr={thrust:.2f}"
                 f"{('  ' + vstatus) if vstatus else ''}",

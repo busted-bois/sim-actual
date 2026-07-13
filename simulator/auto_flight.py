@@ -49,7 +49,9 @@ def _sleep_s(cancel: CancelListener, seconds: float) -> bool:
     return False
 
 
-def _run_attempt_preflight(controller, shared_data, pilot, attempt: int, cancel) -> bool:
+def _run_attempt_preflight(
+    controller, shared_data, pilot, attempt: int, cancel
+) -> bool:
     if attempt == 1:
         print(f"[RACE] attempt={attempt} waiting for VQ2 session...", flush=True)
         if not wait_for_session_ready(shared_data, cancel=cancel):
@@ -141,9 +143,7 @@ def _retry_after_outcome(
     """Reset sim after fail/success. Returns True if user cancelled."""
     active = int(shared_data.get("active_gate_index", 0) or 0)
     if outcome == "success":
-        best_str = (
-            f" best={best_lap_s:.1f}s" if best_lap_s is not None else ""
-        )
+        best_str = f" best={best_lap_s:.1f}s" if best_lap_s is not None else ""
         lap_str = f" lap={lap_elapsed_s:.1f}s" if lap_elapsed_s is not None else ""
         print(
             f"[RACE] OUTCOME=success attempt={attempt}{lap_str}{best_str} — restarting",
@@ -288,9 +288,7 @@ def _run_auto_flight_loop(controller, pilot, shared_data, cancel) -> tuple[str, 
                     print(f"[RACE] GATE_ADVANCE active={active}", flush=True)
                 else:
                     elapsed_advance = time.monotonic() - t_last_advance
-                    if gate_progress_stall(
-                        shared_data, last_active, elapsed_advance
-                    ):
+                    if gate_progress_stall(shared_data, last_active, elapsed_advance):
                         if _retry_after_outcome(
                             "gate_stall",
                             controller,

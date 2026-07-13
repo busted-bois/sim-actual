@@ -110,7 +110,11 @@ class RunContext:
 
 def _hover_thrust(s: State, z_tgt: float) -> float:
     z, vz = s.pos_ned[2], s.vel_ned[2]
-    return float(max(0.18, min(0.5, HOVER_THRUST + 0.025 * (z - z_tgt) + 0.03 * vz)))
+    t = float(max(0.18, min(0.5, HOVER_THRUST + 0.025 * (z - z_tgt) + 0.03 * vz)))
+    # EKF z lags on takeoff — keep climb thrust until well below target.
+    if s.pose_source == "ekf" and z > z_tgt - 0.5:
+        t = max(t, HOVER_THRUST + 0.08)
+    return t
 
 
 def _run_phases(
@@ -195,8 +199,10 @@ def _recover_blowup(ctx: RunContext, reason: str) -> None:
 
 
 def _prep_hover(
-    ctx: RunContext, settle_s: float = 5.0, open_loop: bool = False
-) -> bool:
+    ctx: RunContext,
+    settle_s: float = 5.0,
+    open_loop: bool = False,
+) -> tuple[bool, str]:
     """Reset, wait for race GO, arm, climb to hover altitude using ODOMETRY.
 
     open_loop=True flies the prep with zero rate commands + alt-hold thrust
@@ -204,24 +210,29 @@ def _prep_hover(
     command signs, a closed-loop prep can be positive feedback on every axis
     (the old {-1,-1,-1} defaults nosed the drone into the gate base).
     """
-    print("[harness] sim reset + wait for race GO ...", flush=True)
+    print(
+        "[harness] sim reset — click Restart Race in FlightSim when prompted ...",
+        flush=True,
+    )
     ctx.bus.reset_sim()
     time.sleep(1.5)
     ctx.bus.arm()
 
     if not wait_for_race_go(ctx.bus.data, timeout_s=45.0):
         print("[harness] race GO timeout after reset", flush=True)
-        return False
+        return False, "race_go_timeout"
 
-    if not ctx.bus.ensure_armed():
-        print("[harness] arm failed", flush=True)
-        return False
+    if not ctx.bus.ensure_armed(timeout_s=8.0):
+        print(
+            "[harness] armed heartbeat not seen — continuing prep anyway",
+            flush=True,
+        )
 
     s = ctx.bus.snapshot()
     if s is None or not ctx.bus.pose_usable(s):
         src = s.pose_source if s else "none"
         print(f"[harness] need usable pose, got {src}", flush=True)
-        return False
+        return False, "no_pose"
 
     if not s.alt_trusted and not ctx.vq2_mode:
         # Without a trusted altitude the thrust law silently freezes at hover
@@ -231,7 +242,7 @@ def _prep_hover(
             "— is the sim in a TRAINING session?",
             flush=True,
         )
-        return False
+        return False, "no_alt"
 
     # NED: z more negative = higher. Climb toward 3 m unless already above.
     ctx.hover_z = min(s.pos_ned[2], HOVER_Z_NED)
@@ -253,15 +264,18 @@ def _prep_hover(
     # the grace expire before the first tick, tripping alt<0.2m at spawn).
     ctx.safety.reset()
     ok, reason = _run_phases(ctx, "prep", phases)
-    return ok and not reason
+    if not ok:
+        return False, reason or "prep_hover_failed"
+    return True, ""
 
 
 def test_b0(ctx: RunContext) -> TestResult:
     print("[B0] sign auto-ID ...", flush=True)
     # Open-loop prep: signs are unmeasured until B0's own pulses run, so any
     # closed-loop attitude feedback here could be positive feedback.
-    if not _prep_hover(ctx, open_loop=True):
-        return TestResult("B0", False, fail_reason="prep_failed")
+    prep_ok, prep_reason = _prep_hover(ctx, open_loop=True)
+    if not prep_ok:
+        return TestResult("B0", False, fail_reason=prep_reason or "prep_failed")
 
     # The sign pulses themselves are open-loop (open_loop_rates on each pulse
     # phase); the settle phases between them use the controller, so detach it
@@ -297,8 +311,9 @@ def test_b0(ctx: RunContext) -> TestResult:
 
 def test_b1(ctx: RunContext) -> TestResult:
     print("[B1] rate tracking + latency ...", flush=True)
-    if not _prep_hover(ctx):
-        return TestResult("B1", False, fail_reason="prep_failed")
+    prep_ok, prep_reason = _prep_hover(ctx)
+    if not prep_ok:
+        return TestResult("B1", False, fail_reason=prep_reason or "prep_failed")
 
     t_start = len(ctx.ticks)
     ok, reason = _run_phases(ctx, "B1", rate_tracking_phase(ctx.hover_z))
@@ -336,8 +351,9 @@ def test_b1(ctx: RunContext) -> TestResult:
 
 def test_b2(ctx: RunContext, axis: str = "roll") -> TestResult:
     print(f"[B2] angle step ({axis}) ...", flush=True)
-    if not _prep_hover(ctx):
-        return TestResult("B2", False, fail_reason="prep_failed")
+    prep_ok, prep_reason = _prep_hover(ctx)
+    if not prep_ok:
+        return TestResult("B2", False, fail_reason=prep_reason or "prep_failed")
 
     t_start = len(ctx.ticks)
     ok, reason = _run_phases(ctx, "B2", angle_step_phases(axis, z=ctx.hover_z))
@@ -379,8 +395,9 @@ def test_b2(ctx: RunContext, axis: str = "roll") -> TestResult:
 
 def test_b3(ctx: RunContext) -> TestResult:
     print("[B3] hover jitter ...", flush=True)
-    if not _prep_hover(ctx):
-        return TestResult("B3", False, fail_reason="prep_failed")
+    prep_ok, prep_reason = _prep_hover(ctx)
+    if not prep_ok:
+        return TestResult("B3", False, fail_reason=prep_reason or "prep_failed")
 
     t_start = len(ctx.ticks)
     ok, reason = _run_phases(ctx, "B3", hover_jitter_phase(20.0, z=ctx.hover_z))
@@ -457,8 +474,9 @@ def test_b4(ctx: RunContext) -> TestResult:
 
 def test_b5(ctx: RunContext) -> TestResult:
     print("[B5] disturbance recovery ...", flush=True)
-    if not _prep_hover(ctx):
-        return TestResult("B5", False, fail_reason="prep_failed")
+    prep_ok, prep_reason = _prep_hover(ctx)
+    if not prep_ok:
+        return TestResult("B5", False, fail_reason=prep_reason or "prep_failed")
 
     t_start = len(ctx.ticks)
     ok, reason = _run_phases(ctx, "B5", disturbance_phase(ctx.hover_z))

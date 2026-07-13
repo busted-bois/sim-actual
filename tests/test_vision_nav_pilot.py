@@ -1,8 +1,8 @@
 import math
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from rl.fly2_course import HOVER_T
+from rl.fly2_course import HOVER_T, SIGN_PITCH, SIGN_ROLL, SIGN_YAW
 from simulator.vision_nav import Cmd
 from simulator.vision_nav_pilot import VisionNavPilot
 
@@ -41,7 +41,11 @@ class VisionNavPilotTests(unittest.TestCase):
         pilot.tick()
         controller.set_attitude_rates.assert_called_once_with(0, 0, 0, HOVER_T)
 
-    def test_tick_converts_guidance_cmd_to_rates(self):
+    @patch(
+        "rl.fly2_course._default_signs",
+        return_value=(SIGN_ROLL, SIGN_PITCH, SIGN_YAW),
+    )
+    def test_tick_converts_guidance_cmd_to_rates(self, _signs):
         data = {"odometry": dict(_LEVEL_ODO)}
         pilot, controller = self._make_pilot(data)
         pilot.guide = MagicMock()

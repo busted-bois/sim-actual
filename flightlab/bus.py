@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import threading
 import time
 
 os.environ.setdefault("MAVLINK20", "1")
@@ -14,6 +13,11 @@ from simulator.controller import (  # noqa: E402
     CONTROL_HZ,
     MAVLINK_CMD_SIM_RESET,
     _send_attitude_rates,
+)
+from simulator.mavlink_client import (  # noqa: E402
+    GcsHeartbeat,
+    request_flight_streams,
+    send_gcs_heartbeat,
 )
 from simulator.mavlink_rx import MAVLinkRX  # noqa: E402
 from simulator.preflight import vision_ready  # noqa: E402
@@ -26,41 +30,34 @@ from flightlab.state import Cmd, State  # noqa: E402
 CONTROL_DT = 1.0 / CONTROL_HZ
 LISTEN_ADDR = "127.0.0.1"
 LISTEN_PORT = 14550
-HEARTBEAT_HZ = 1.0
-IMU_INTERVAL_US = 10_000  # 100 Hz — match simulator/setup.py
-ODO_INTERVAL_US = 20_000  # 50 Hz
-ATT_INTERVAL_US = 20_000
-LPOS_INTERVAL_US = 20_000
 
 # Sim-ground-truth pose for attitude tests (not EKF).
 POSE_SOURCES_OK = frozenset({"odometry", "attitude"})
-VQ2_FALLBACK_S = 15.0
+VQ2_FALLBACK_S = float(os.environ.get("VQ2_FALLBACK_S", "2.0"))
 
 
-def _send_gcs_heartbeat(conn) -> None:
-    conn.mav.heartbeat_send(
-        mavutil.mavlink.MAV_TYPE_GCS,
-        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-        0,
-        0,
-        0,
-    )
-
-
-def _request_message_interval(conn, message_id: int, interval_us: int) -> None:
-    conn.mav.command_long_send(
-        conn.target_system,
-        conn.target_component,
-        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-        0,
-        message_id,
-        interval_us,
-        0,
-        0,
-        0,
-        0,
-        0,
-    )
+def _local_ned_from_data(
+    data: dict,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """LOCAL_POSITION_NED dict or legacy pos_ned/vel_ned from mavlink_rx."""
+    lpos = data.get("local_position_ned")
+    if lpos is not None:
+        return (
+            (float(lpos["x"]), float(lpos["y"]), float(lpos["z"])),
+            (
+                float(lpos.get("vx", 0.0)),
+                float(lpos.get("vy", 0.0)),
+                float(lpos.get("vz", 0.0)),
+            ),
+        )
+    if data.get("has_position") and data.get("pos_ned") is not None:
+        pos = data["pos_ned"]
+        vel = data.get("vel_ned") or (0.0, 0.0, 0.0)
+        return (
+            (float(pos[0]), float(pos[1]), float(pos[2])),
+            (float(vel[0]), float(vel[1]), float(vel[2])),
+        )
+    return None
 
 
 def _rpy_from_quat(q: tuple[float, float, float, float]) -> tuple[float, float, float]:
@@ -91,8 +88,7 @@ class Bus:
         self.system_boot_ms = int(time.time() * 1000)
         self._pose_mono: float | None = None
         self._last_stamp: object = None
-        self._hb_stop = threading.Event()
-        self._hb_thread: threading.Thread | None = None
+        self._gcs_hb: GcsHeartbeat | None = None
         self._seen: dict[str, bool] = {
             "imu": False,
             "attitude": False,
@@ -111,8 +107,12 @@ class Bus:
         )
         self.conn = mavutil.mavlink_connection(f"udpin:{LISTEN_ADDR}:{LISTEN_PORT}")
         self.conn.wait_heartbeat()
-        _send_gcs_heartbeat(self.conn)
+        send_gcs_heartbeat(self.conn)
         print(f"[bus] heartbeat from system {self.conn.target_system}", flush=True)
+        print(
+            "[bus] no ODOMETRY/ATTITUDE yet — will use EKF pose if blocked (VQ2 profile)",
+            flush=True,
+        )
 
         # Feed IMU into estimator for pose fallback when ODOMETRY is blocked.
         from simulator.state_estimator import StateEstimator
@@ -123,31 +123,19 @@ class Bus:
         )
         self.vision_rx = VisionRX(self.data)
         self._request_streams()
-        self._start_heartbeat_thread()
+        self._gcs_hb = GcsHeartbeat(self.conn)
+        self._gcs_hb.start()
 
     def _request_streams(self) -> None:
-        for msg_id, interval in (
-            (mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU, IMU_INTERVAL_US),
-            (mavutil.mavlink.MAVLINK_MSG_ID_ODOMETRY, ODO_INTERVAL_US),
-            (mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, ATT_INTERVAL_US),
-            (mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED, LPOS_INTERVAL_US),
-        ):
-            _request_message_interval(self.conn, msg_id, interval)
-
-    def _start_heartbeat_thread(self) -> None:
-        def _loop() -> None:
-            while not self._hb_stop.is_set():
-                _send_gcs_heartbeat(self.conn)
-                self._hb_stop.wait(1.0 / HEARTBEAT_HZ)
-
-        self._hb_thread = threading.Thread(target=_loop, daemon=True)
-        self._hb_thread.start()
+        request_flight_streams(self.conn)
 
     def _mark_seen(self) -> None:
         self._seen["imu"] = self.data.get("imu") is not None
         self._seen["attitude"] = self.data.get("attitude") is not None
         self._seen["odometry"] = self.data.get("odometry") is not None
-        self._seen["local_position"] = self.data.get("local_position_ned") is not None
+        self._seen["local_position"] = self.data.get(
+            "local_position_ned"
+        ) is not None or bool(self.data.get("has_position"))
         self._seen["estimator"] = self.estimator.ready
 
     def has_pose(self) -> bool:
@@ -250,7 +238,7 @@ class Bus:
                 elif not self._race_started():
                     hint = " → click Race"
                 elif now - t0 >= VQ2_FALLBACK_S:
-                    hint = " → VQ2 block: will use EKF pose"
+                    hint = " → switching to EKF pose"
                 print(
                     "[bus] waiting for pose... "
                     f"vision={vision} odo={self._seen['odometry']} "
@@ -293,7 +281,6 @@ class Bus:
     def _read_state(self) -> State | None:
         odo = self.data.get("odometry")
         att = self.data.get("attitude")
-        lpos = self.data.get("local_position_ned")
         imu = self.data.get("imu")
 
         roll = pitch = yaw = 0.0
@@ -324,9 +311,9 @@ class Bus:
             q = quat_from_rpy(roll, pitch, yaw)
             quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
             ang = (att["roll_speed"], att["pitch_speed"], att["yaw_speed"])
-            if lpos is not None:
-                pos = (lpos["x"], lpos["y"], lpos["z"])
-                vel = (lpos["vx"], lpos["vy"], lpos["vz"])
+            local = _local_ned_from_data(self.data)
+            if local is not None:
+                pos, vel = local
                 alt_trusted = True
         elif self.estimator.ready:
             pose_source = "ekf"
@@ -337,6 +324,7 @@ class Bus:
             vel = tuple(float(x) for x in v_e)  # type: ignore[assignment]
             if imu is not None:
                 ang = (imu["gx"], imu["gy"], imu["gz"])
+            alt_trusted = self.vq2_mode
         else:
             return None
 
@@ -457,9 +445,8 @@ class Bus:
         return False
 
     def close(self) -> None:
-        self._hb_stop.set()
-        if self._hb_thread is not None:
-            self._hb_thread.join(timeout=2.0)
+        if self._gcs_hb is not None:
+            self._gcs_hb.stop()
         for rx in (self.mavlink_rx, self.vision_rx):
             thread = rx.get_thread_for_join()
             if thread is not None:

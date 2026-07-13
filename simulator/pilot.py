@@ -1,4 +1,4 @@
-﻿"""Pilot — attitude-mode gate racer with altitude PID.
+"""Pilot — attitude-mode gate racer with altitude PID.
 
 Called at ~250 Hz by controller.update(). Uses ATTITUDE mode with pitch_rate
 for forward motion and an altitude PID for thrust control. Reads shared_data
