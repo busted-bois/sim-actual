@@ -92,5 +92,21 @@ class PDHookTests(unittest.TestCase):
         self.assertLess(damped[2], base[2])
 
 
+class Fly2MakeFlyStartupTests(unittest.TestCase):
+    """Offline wiring for `make fly` (live TRAINING session still required)."""
+
+    def test_takeoff_constants(self):
+        import rl.fly2 as fly2
+
+        self.assertEqual(fly2.TAKEOFF_S, 3.0)
+        self.assertEqual(fly2.HOVER_Z_NED, -3.0)
+
+    def test_sim_interface_live_boundary(self):
+        from rl.sim_interface import SimInterface
+
+        self.assertTrue(callable(getattr(SimInterface, "ensure_armed", None)))
+        self.assertTrue(callable(getattr(SimInterface, "send_attitude_rates", None)))
+
+
 if __name__ == "__main__":
     unittest.main()
