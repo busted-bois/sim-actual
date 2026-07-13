@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics vertical capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -74,6 +74,10 @@ fly-vision-est:
 # Hold a stable hover (sanity check the controller).
 hover:
 	uv run -m rl.fly2 --mode hover --seconds 8
+
+# Vertical-axis flight harness (V1–V4). Start sim + TRAINING session first.
+vertical:
+	uv run python -m flightlab.run_vertical
 
 # Measure the sim's attitude/thrust response (open-loop characterization).
 dynamics:
