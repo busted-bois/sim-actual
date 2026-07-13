@@ -119,7 +119,9 @@ class VQ2PilotTests(unittest.TestCase):
         self.assertEqual(pilot.gates_passed, 0)
 
     def test_sim_gate_advance_triggers_post_gate(self):
-        pilot, controller, data = self._make_pilot({"armed": True, "active_gate_index": 0})
+        pilot, controller, data = self._make_pilot(
+            {"armed": True, "active_gate_index": 0}
+        )
         pilot.on_attempt_start()
         data["active_gate_index"] = 1
         pilot.tick()

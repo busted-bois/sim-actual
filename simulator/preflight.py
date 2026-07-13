@@ -49,7 +49,9 @@ def race_go_already_passed(data, is_restart=False):
     race_start = race.get("race_start_boot_time_ms", -1)
     if race_start < 0:
         return False
-    go_boot = race_go_boot_ms(race.get("sim_boot_time_ms", 0), race_start, is_restart=is_restart)
+    go_boot = race_go_boot_ms(
+        race.get("sim_boot_time_ms", 0), race_start, is_restart=is_restart
+    )
     if go_boot is None:
         return False
     return race.get("sim_boot_time_ms", 0) >= go_boot
@@ -270,8 +272,7 @@ def wait_for_fresh_track(data, timeout_s=AUTO_TRACK_TIMEOUT_S):
         flush=True,
     )
     print(
-        "  Run make auto first, then click Race "
-        "(or Restart Race if you already raced)",
+        "  Run make auto first, then click Race (or Restart Race if you already raced)",
         flush=True,
     )
     deadline = time.time() + timeout_s

@@ -58,7 +58,9 @@ class SafetyMonitor:
             self._tilt_t0 = None
 
         alt = -s.pos_ned[2]
-        if s.alt_trusted:
+        # EKF z drifts under thrust (baro off) — do not trip on its altitude.
+        alt_safe = s.alt_trusted and s.pose_source != "ekf"
+        if alt_safe:
             if alt > TAKEOFF_LATCH_M:
                 self._airborne = True
             if not arm_grace:

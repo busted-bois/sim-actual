@@ -128,7 +128,9 @@ class RaceMonitorTests(unittest.TestCase):
             "race_status": {"race_finish_time_ns": -1},
             "active_gate_index": 2,
         }
-        self.assertTrue(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=16.0))
+        self.assertTrue(
+            gate_progress_stall(data, last_active=2, elapsed_since_advance_s=16.0)
+        )
 
     def test_gate_progress_stall_not_yet(self):
         data = {
@@ -136,7 +138,9 @@ class RaceMonitorTests(unittest.TestCase):
             "race_status": {"race_finish_time_ns": -1},
             "active_gate_index": 2,
         }
-        self.assertFalse(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=14.9))
+        self.assertFalse(
+            gate_progress_stall(data, last_active=2, elapsed_since_advance_s=14.9)
+        )
 
     def test_gate_progress_stall_no_stall_if_advanced(self):
         data = {
@@ -144,7 +148,9 @@ class RaceMonitorTests(unittest.TestCase):
             "race_status": {"race_finish_time_ns": -1},
             "active_gate_index": 3,
         }
-        self.assertFalse(gate_progress_stall(data, last_active=2, elapsed_since_advance_s=20.0))
+        self.assertFalse(
+            gate_progress_stall(data, last_active=2, elapsed_since_advance_s=20.0)
+        )
 
     def test_gate_progress_watch_line(self):
         line = gate_progress_watch_line({"active_gate_index": 2}, 1, 12.0)

@@ -15,7 +15,7 @@ VQ2_YAW_CLIP = 0.5
 
 
 def _thrust(s: State, target: Target) -> float:
-    if not s.alt_trusted:
+    if not s.alt_trusted and s.pose_source != "ekf":
         return HOVER_THRUST
     z, vz = s.pos_ned[2], s.vel_ned[2]
     return float(max(0.18, min(0.5, HOVER_THRUST + KP_Z * (z - target.z) + KD_Z * vz)))

@@ -138,9 +138,7 @@ class _AltitudeEstimator:
     def thrust(self, z_target: float, cruise: bool = False) -> float:
         error = self.z - z_target
         base = CRUISE_T if cruise else HOVER_T
-        return float(
-            _clamp(base + KP_Z * error + KD_Z * self.vz, 0.18, 0.5)
-        )
+        return float(_clamp(base + KP_Z * error + KD_Z * self.vz, 0.18, 0.5))
 
 
 class VQ2VisionPilot:
@@ -210,14 +208,10 @@ class VQ2VisionPilot:
         self.controller.set_attitude_rates(0, 0, 0, HOVER_T)
 
     def _level_roll_rate(self, roll: float) -> float:
-        return float(
-            _clamp(SIGN_ROLL * K_ATT * (0.0 - roll), -RATE_CLIP, RATE_CLIP)
-        )
+        return float(_clamp(SIGN_ROLL * K_ATT * (0.0 - roll), -RATE_CLIP, RATE_CLIP))
 
     def _level_pitch_rate(self, pitch: float) -> float:
-        return float(
-            _clamp(SIGN_PITCH * K_ATT * (0.0 - pitch), -RATE_CLIP, RATE_CLIP)
-        )
+        return float(_clamp(SIGN_PITCH * K_ATT * (0.0 - pitch), -RATE_CLIP, RATE_CLIP))
 
     def _check_sim_gate_advance(self) -> bool:
         """True if sim advanced active_gate_index — triggers post-gate coast."""
@@ -294,13 +288,9 @@ class VQ2VisionPilot:
             ny * VISION_VY_GAIN, -VISION_MAX_ALT_ADJUST, VISION_MAX_ALT_ADJUST
         )
         z_target = self._hold_z + ny_offset
-        centered = (
-            abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
-        )
+        centered = abs(nx) < VISION_CENTER_DEADBAND and abs(ny) < VISION_CENTER_DEADBAND
 
-        yaw_cmd = float(
-            _clamp(SIGN_YAW * VISION_YAW_GAIN * nx, -YAW_CLIP, YAW_CLIP)
-        )
+        yaw_cmd = float(_clamp(SIGN_YAW * VISION_YAW_GAIN * nx, -YAW_CLIP, YAW_CLIP))
         roll_cmd = self._level_roll_rate(roll)
 
         if not self._advancing and r_frac > 0.15:
@@ -366,9 +356,7 @@ class VQ2VisionPilot:
         pitch_cmd = (
             0.0
             if elapsed < SEARCH_WARMUP_S
-            else float(
-                _clamp(SEARCH_FORWARD_PITCH, -RATE_CLIP, RATE_CLIP)
-            )
+            else float(_clamp(SEARCH_FORWARD_PITCH, -RATE_CLIP, RATE_CLIP))
         )
         roll_cmd = self._level_roll_rate(roll)
         if pitch_cmd == 0.0:
@@ -380,8 +368,7 @@ class VQ2VisionPilot:
     def _obstacle_blocking(self) -> bool:
         obstacles = self.data.get("obstacles") or []
         return any(
-            abs(o.get("nx", 0.0)) < OBSTACLE_CLEAR_ZONE
-            and o.get("r_frac", 0.0) > 0.005
+            abs(o.get("nx", 0.0)) < OBSTACLE_CLEAR_ZONE and o.get("r_frac", 0.0) > 0.005
             for o in obstacles
         )
 

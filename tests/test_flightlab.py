@@ -82,6 +82,16 @@ class SafetyTakeoffLatchTests(unittest.TestCase):
         self.assertTrue(r.tripped)
         self.assertEqual(r.reason, "alt<0.2m")
 
+    def test_ekf_alt_does_not_trip_low_floor(self):
+        # EKF z can spike without a real climb — must not false-trip prep.
+        m = self._expired_monitor()
+        s_climb = _state(z=-1.0)
+        s_climb.pose_source = "ekf"
+        self.assertFalse(m.check(s_climb).tripped)
+        s_ground = _state(z=-(ALT_LOW_M / 2))
+        s_ground.pose_source = "ekf"
+        self.assertFalse(m.check(s_ground).tripped)
+
     def test_reset_clears_airborne_latch(self):
         m = self._expired_monitor()
         m.check(_state(z=-1.0))  # latch airborne
@@ -100,6 +110,12 @@ class ThrustLawTests(unittest.TestCase):
         # Documented fallback: without trusted altitude the law holds hover
         # thrust (prep now fails fast instead of relying on this in Training).
         t = _thrust(_state(z=0.0, alt_trusted=False), Target(z=-3.0))
+        self.assertEqual(t, HOVER_THRUST)
+
+    def test_thrust_freezes_when_unknown_pose_source(self):
+        s = _state(z=0.0, alt_trusted=False)
+        s.pose_source = "unknown"
+        t = _thrust(s, Target(z=-3.0))
         self.assertEqual(t, HOVER_THRUST)
 
 

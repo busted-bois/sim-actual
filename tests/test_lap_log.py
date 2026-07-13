@@ -12,8 +12,9 @@ class LapLogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             laps = os.path.join(tmp, "auto_laps.jsonl")
             best = os.path.join(tmp, "best_lap.txt")
-            with patch.object(lap_log, "LAPS_JSONL_PATH", laps), patch.object(
-                lap_log, "BEST_LAP_TXT_PATH", best
+            with (
+                patch.object(lap_log, "LAPS_JSONL_PATH", laps),
+                patch.object(lap_log, "BEST_LAP_TXT_PATH", best),
             ):
                 lap_log.append_lap(2, 45.3, 42.1)
                 lap_log.append_lap(3, 50.0, 42.1)
