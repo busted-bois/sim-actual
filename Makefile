@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_fly2_gate_aim tests.test_flightlab tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
 
 sim:
 	uv run main.py
@@ -110,3 +110,7 @@ rl-test:
 	uv run -m rl.observation --selftest
 	uv run -m rl.env --selftest
 	uv run -m rl.deploy --selftest
+
+# Attitude inner-loop harness (Spec B). Sim must be in TRAINING session.
+attitude-harness:
+	uv run python -m flightlab.run_attitude

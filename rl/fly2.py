@@ -56,8 +56,9 @@ def main():
     ap.add_argument(
         "--zoff",
         type=float,
-        default=-1.0,
-        help="altitude offset vs gate center (negative = fly higher, NED)",
+        default=0.0,
+        help="altitude trim vs gate OPENING CENTRE (negative = fly higher, NED); "
+        "centre = gate base + h/2, so 0 = dead centre",
     )
     ap.add_argument("--klat", type=float, default=0.04, help="cross-track roll gain")
     ap.add_argument(
@@ -250,9 +251,7 @@ def main():
             # Vision mode: bound vertical authority hard.
             z_err = float(np.clip(z - cmd.tgt_z, -3.0, 3.0))
             vz_c = float(np.clip(vz, -4.0, 4.0))
-            thrust = float(
-                np.clip(HOVER_T + 0.025 * z_err + 0.030 * vz_c, 0.20, 0.36)
-            )
+            thrust = float(np.clip(HOVER_T + 0.025 * z_err + 0.030 * vz_c, 0.20, 0.36))
             if scan_since is not None and time.time() - scan_since > 1.5:
                 thrust = HOVER_T - 0.012
         else:

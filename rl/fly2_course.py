@@ -20,6 +20,10 @@ HOVER_T = 0.27
 KP_Z, KD_Z = 0.025, 0.030
 K_ATT = 0.6
 K_YAW = 0.4
+# Body-rate damping (PD form, mirrors flightlab.controllers.PDController).
+# 0.0 = today's pure-P behavior; set from the flightlab harness B-report once
+# a stable k_d is measured live.
+K_D = 0.0
 # Measured command-sign conventions vs ODOMETRY attitude (pitch normal;
 # roll + yaw inverted). Valid when the attitude fed to the rate law comes
 # from sim odometry (Training mode).
@@ -34,6 +38,35 @@ SIGN_YAW = -1.0
 EST_SIGNS = (-1.0, -1.0, -1.0)
 RATE_CLIP = 0.30
 YAW_CLIP = 0.5
+
+# Signs measured live by the flightlab B0 harness override the constants above
+# (measured > guessed). Written by `make attitude-harness`; absent until run.
+_FLIGHTLAB_SIGNS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "flightlab", "signs.json"
+)
+_measured_signs_cache: tuple[float, float, float] | None | str = "unset"
+
+
+def measured_signs() -> tuple[float, float, float] | None:
+    """(roll, pitch, yaw) signs from flightlab/signs.json, or None if absent."""
+    try:
+        with open(_FLIGHTLAB_SIGNS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return float(d["roll"]), float(d["pitch"]), float(d["yaw"])
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+def _default_signs() -> tuple[float, float, float]:
+    global _measured_signs_cache
+    if _measured_signs_cache == "unset":
+        m = measured_signs()
+        if m is not None:
+            print(
+                f"[fly2] using measured signs (flightlab/signs.json): {m}", flush=True
+            )
+        _measured_signs_cache = m
+    return _measured_signs_cache or (SIGN_ROLL, SIGN_PITCH, SIGN_YAW)
 
 
 def rpy(q):
@@ -105,27 +138,41 @@ def resolve_gate_map(data: dict) -> list:
 
 
 def rates_from_attitude_targets(
-    roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z, signs=None
+    roll,
+    pitch,
+    z,
+    vz,
+    tgt_roll,
+    tgt_pitch,
+    yaw_err,
+    tgt_z,
+    signs=None,
+    k_d=None,
+    gyro=(0.0, 0.0, 0.0),
 ):
     """Attitude-angle targets -> rate commands with measured sign conventions.
 
-    `signs` selects the convention for the attitude SOURCE: default = odometry
-    attitude; pass EST_SIGNS when roll/pitch/yaw come from a gyro-integrated
-    estimate (VQ2 regime)."""
-    s_roll, s_pitch, s_yaw = (
-        signs
-        if signs is not None
-        else (
-            SIGN_ROLL,
-            SIGN_PITCH,
-            SIGN_YAW,
+    `signs` selects the convention for the attitude SOURCE: default = the
+    flightlab-measured signs when signs.json exists, else the odometry
+    constants; pass EST_SIGNS when roll/pitch/yaw come from a gyro-integrated
+    estimate (VQ2 regime). `k_d`/`gyro` add PD rate damping (same form as
+    flightlab.controllers.PDController); k_d=None uses module K_D (0.0 =
+    unchanged pure-P behavior)."""
+    s_roll, s_pitch, s_yaw = signs if signs is not None else _default_signs()
+    kd = K_D if k_d is None else k_d
+    roll_cmd = float(
+        np.clip(
+            s_roll * K_ATT * (tgt_roll - roll) - kd * gyro[0], -RATE_CLIP, RATE_CLIP
         )
     )
-    roll_cmd = float(np.clip(s_roll * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP))
     pitch_cmd = float(
-        np.clip(s_pitch * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
+        np.clip(
+            s_pitch * K_ATT * (tgt_pitch - pitch) - kd * gyro[1], -RATE_CLIP, RATE_CLIP
+        )
     )
-    yaw_cmd = float(np.clip(s_yaw * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+    yaw_cmd = float(
+        np.clip(s_yaw * K_YAW * yaw_err - kd * gyro[2], -YAW_CLIP, YAW_CLIP)
+    )
     thrust = float(np.clip(HOVER_T + KP_Z * (z - tgt_z) + KD_Z * vz, 0.18, 0.5))
     return roll_cmd, pitch_cmd, yaw_cmd, thrust
 
@@ -135,8 +182,23 @@ class Fly2Config:
     speed: float = 2.8
     lean: float = 0.12
     klat: float = 0.04
-    zoff: float = -1.0
+    # Altitude trim around the gate OPENING CENTRE (NED: negative = higher).
+    # Was -1.0 back when tgt_z aimed at the raw gate-map z; that z is the gate
+    # BASE, so the old aim sat ~0.4 m below the centre (h/2 = 1.36 > 1.0).
+    zoff: float = 0.0
     flipz: bool = False
+
+
+def gate_target_z(gate: dict, cfg: Fly2Config) -> float:
+    """NED z of the gate OPENING CENTRE (+ zoff trim).
+
+    Gate-map/track-burst z is the gate BASE — rl/data/gate_map.json gate 0
+    sits at z=-0.03 (ground level), impossible for a 2.72 m opening's centre.
+    The centre is h/2 above the base (NED up = negative)."""
+    z = float(gate["pos"][2])
+    base_z = -z if cfg.flipz else z
+    h = float(gate.get("h") or spec.GATE_SIZE_M)
+    return base_z - h / 2.0 + cfg.zoff
 
 
 def compute_course_rates(
@@ -147,6 +209,7 @@ def compute_course_rates(
     gate_map: list,
     hold_z: float,
     cfg: Fly2Config,
+    gyro=(0.0, 0.0, 0.0),
 ):
     """One course control step. Returns (roll_rate, pitch_rate, yaw_rate, thrust)."""
     p = np.asarray(pos_ned, float)
@@ -170,10 +233,10 @@ def compute_course_rates(
     lean = float(np.clip(0.05 * (v_des - speed), -0.05, cfg.lean))
     tgt_pitch = -lean
     tgt_roll = float(np.clip(cfg.klat * e_cross, -0.12, 0.12))
-    tgt_z = (-g[2] if cfg.flipz else g[2]) + cfg.zoff
+    tgt_z = gate_target_z(gate_map[active], cfg)
 
     return rates_from_attitude_targets(
-        roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z
+        roll, pitch, z, vz, tgt_roll, tgt_pitch, yaw_err, tgt_z, gyro=gyro
     )
 
 
@@ -259,6 +322,11 @@ class Fly2CoursePilot:
             print(f"[fly2] ACTIVE GATE -> {active}", flush=True)
             self._last_active = active
 
+        gyro = (
+            odo.get("roll_speed", 0.0),
+            odo.get("pitch_speed", 0.0),
+            odo.get("yaw_speed", 0.0),
+        )
         roll_cmd, pitch_cmd, yaw_cmd, thrust = compute_course_rates(
             pos,
             vel,
@@ -267,6 +335,7 @@ class Fly2CoursePilot:
             self.gate_map,
             self.hold_z,
             self.config,
+            gyro=gyro,
         )
 
         z = pos[2]
