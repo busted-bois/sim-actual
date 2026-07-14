@@ -125,39 +125,63 @@ class Bus:
         return False
 
     def wait_for_race_go(
-        self, timeout_s: float = 45.0, is_restart: bool = True
+        self, timeout_s: float = 45.0, is_restart: bool | None = None
     ) -> bool:
-        """Drain MAVLink until on-screen countdown hits 0 (sim GO!)."""
-        from simulator.preflight import RaceGoLatch, poll_race_go
+        """Drain MAVLink until on-screen countdown hits 0 (sim GO!).
+
+        Auto-detect first-run vs restart: if race_start is >1.5 s ahead of
+        sim_boot, race_start is the scheduled GO; else it is countdown start
+        and GO is +RACE_COUNTDOWN_MS.
+        """
+        from simulator.preflight import (
+            COUNTDOWN_SCHEDULED_THRESHOLD_MS,
+            RaceGoLatch,
+            poll_race_go,
+        )
 
         print("[bus] waiting for race GO (countdown -> 0)...", flush=True)
         latch = RaceGoLatch()
-        race = self.tracker.data.get("race_status") or {}
-        armed_boot = race.get("sim_boot_time_ms")
-        latch.reset_for_arm(armed_boot, is_restart=is_restart)
+        latched_mode = False
         t0 = time.monotonic()
         last_log = 0.0
         while time.monotonic() - t0 < timeout_s:
             self.drain()
+            race = self.tracker.data.get("race_status") or {}
+            sim_boot = race.get("sim_boot_time_ms", 0)
+            race_start = race.get("race_start_boot_time_ms", -1)
+
+            if not latched_mode and race_start >= 0:
+                if is_restart is None:
+                    # Future race_start → first-run scheduled GO. Else countdown start.
+                    delta = race_start - sim_boot
+                    use_restart = delta <= COUNTDOWN_SCHEDULED_THRESHOLD_MS
+                else:
+                    use_restart = is_restart
+                latch.reset_for_arm(None, is_restart=use_restart)
+                latched_mode = True
+
+            if not latched_mode:
+                time.sleep(0.02)
+                continue
+
             allowed, go_boot_ms = poll_race_go(self.tracker.data, latch)
             if allowed:
-                race = self.tracker.data.get("race_status") or {}
                 print(
                     "[bus] Race go! "
-                    f"sim_boot={race.get('sim_boot_time_ms')}ms "
-                    f"race_start={race.get('race_start_boot_time_ms')}ms "
-                    f"go_boot={go_boot_ms}ms branch={latch.branch}",
+                    f"sim_boot={sim_boot}ms "
+                    f"race_start={race_start}ms "
+                    f"go_boot={go_boot_ms}ms branch={latch.branch} "
+                    f"restart={latch.is_restart}",
                     flush=True,
                 )
                 return True
             now = time.monotonic()
             if now - last_log >= 1.0:
-                race = self.tracker.data.get("race_status") or {}
                 print(
                     "[bus] countdown... "
-                    f"sim_boot={race.get('sim_boot_time_ms', -1)} "
-                    f"race_start={race.get('race_start_boot_time_ms', -1)} "
-                    f"latch={latch.go_boot_ms}",
+                    f"sim_boot={sim_boot} "
+                    f"race_start={race_start} "
+                    f"latch={latch.go_boot_ms} restart={latch.is_restart}",
                     flush=True,
                 )
                 last_log = now
@@ -165,14 +189,25 @@ class Bus:
         print("[bus] race GO timeout", flush=True)
         return False
 
-    def wait_for_fresh_race_start(self, timeout_s: float = 30.0) -> bool:
-        """After sim reset, wait for a new race_start before arming."""
+    def wait_for_fresh_race_start(
+        self, timeout_s: float = 30.0, is_restart: bool | None = None
+    ) -> bool:
+        """After sim reset, wait for a new race_start that has not yet hit GO.
+
+        Skips stale already-GO race_start (caused early arms mid countdown).
+        """
+        from simulator.preflight import (
+            COUNTDOWN_SCHEDULED_THRESHOLD_MS,
+            _race_start_valid_after_baseline,
+            race_go_already_passed,
+        )
+
         print("[bus] waiting for fresh race_start after reset...", flush=True)
-        before = None
         race0 = self.tracker.data.get("race_status")
         if race0:
-            before = race0.get("race_start_boot_time_ms", -1)
-            self.tracker.data["_preflight_race_start_baseline"] = before
+            self.tracker.data["_preflight_race_start_baseline"] = race0.get(
+                "race_start_boot_time_ms", -1
+            )
         t0 = time.monotonic()
         last_log = 0.0
         while time.monotonic() - t0 < timeout_s:
@@ -180,27 +215,43 @@ class Bus:
             race = self.tracker.data.get("race_status") or {}
             race_start = race.get("race_start_boot_time_ms", -1)
             sim_boot = race.get("sim_boot_time_ms", 0)
-            if race_start >= 0:
-                # Fresh if differs from baseline, or scheduled in the future,
-                # or sim_boot reset small after teleport.
-                baseline = self.tracker.data.get("_preflight_race_start_baseline")
-                scheduled = race_start - sim_boot > 1500
-                changed = baseline is None or race_start != baseline
-                rebooted = sim_boot < 10000
-                if scheduled or changed or rebooted:
+            if is_restart is None:
+                use_restart = (
+                    race_start - sim_boot
+                ) <= COUNTDOWN_SCHEDULED_THRESHOLD_MS
+            else:
+                use_restart = is_restart
+            if race_start < 0:
+                time.sleep(0.05)
+                continue
+            # Stale post-GO telemetry must not unblock arm mid new countdown.
+            if race_go_already_passed({"race_status": race}, is_restart=use_restart):
+                now = time.monotonic()
+                if now - last_log >= 2.0:
                     print(
-                        f"[bus] fresh race_start={race_start} sim_boot={sim_boot}",
+                        f"[bus] race_start already past GO — waiting fresh "
+                        f"start={race_start} boot={sim_boot}",
                         flush=True,
                     )
-                    return True
-            now = time.monotonic()
-            if now - last_log >= 2.0:
-                print(
-                    f"[bus] waiting race_start... start={race_start} boot={sim_boot}",
-                    flush=True,
-                )
-                last_log = now
-            time.sleep(0.05)
+                    last_log = now
+                time.sleep(0.05)
+                continue
+            if not _race_start_valid_after_baseline(self.tracker.data, race, race_start):
+                now = time.monotonic()
+                if now - last_log >= 2.0:
+                    print(
+                        f"[bus] waiting race_start... start={race_start} boot={sim_boot}",
+                        flush=True,
+                    )
+                    last_log = now
+                time.sleep(0.05)
+                continue
+            print(
+                f"[bus] fresh race_start={race_start} sim_boot={sim_boot} "
+                f"restart={use_restart}",
+                flush=True,
+            )
+            return True
         print(
             "[bus] race_start timeout — click Restart Race if countdown never starts",
             flush=True,

@@ -195,10 +195,11 @@ def _prep(bus: Bus, ctrl: Controller, safety: SafetyMonitor) -> bool:
         print("[prep] no pose after reset", flush=True)
         return False
     # Do NOT arm/climb during 3-2-1 — wait until on-screen GO.
+    # Auto-detect first-run vs restart from race_start vs sim_boot delta.
     if not bus.wait_for_fresh_race_start(timeout_s=30.0):
         print("[prep] no fresh race_start after reset", flush=True)
         return False
-    if not bus.wait_for_race_go(timeout_s=45.0, is_restart=True):
+    if not bus.wait_for_race_go(timeout_s=45.0):
         print("[prep] race GO timeout — stay on countdown until 0", flush=True)
         return False
     # Hold level + hover briefly so estimator sees thrust_cmd before climb.
