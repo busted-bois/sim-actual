@@ -42,6 +42,7 @@ from rl.fly2_course import (
     SIGN_YAW,
     YAW_CLIP,
 )
+from simulator.tilt_filter import TiltFilter
 
 IMG_W, IMG_H = 640.0, 360.0
 CX, CY, FX = 320.0, 180.0, 320.0
@@ -62,64 +63,6 @@ RIGHT_THRUST = 0.20  # low thrust while righting: hover thrust while inverted
 
 def _wrap(a: float) -> float:
     return (a + math.pi) % (2.0 * math.pi) - math.pi
-
-
-class _TiltFilter:
-    """Complementary roll/pitch from HIGHRES_IMU: gyro integration corrected
-    toward the accel gravity direction when the specific force looks like
-    gravity (|f| near g). Every sample is NaN-guarded -- one bad packet must
-    not poison the attitude the way it poisoned the EKF pose."""
-
-    def __init__(self, alpha=0.02):
-        self.alpha = alpha
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.roll_acc = 0.0  # last accel-only tilt, logged so a single run
-        self.pitch_acc = 0.0  # shows whether gyro and accel conventions agree
-        self.f_ok = False  # last specific force was gravity-like (tilt valid)
-        self.gyro_mag = 0.0  # |gyro| of the last sample (rotation = not static)
-        self._last_us = None
-
-    def reset(self):
-        self.roll, self.pitch, self._last_us = 0.0, 0.0, None
-        self.roll_acc, self.pitch_acc = 0.0, 0.0
-        self.f_ok = False
-        self.gyro_mag = 0.0
-
-    def update(self, imu: dict, allow_accel: bool = True, boost: bool = False) -> None:
-        """allow_accel=False integrates gyro only: under sustained commanded
-        acceleration (commit dash) the specific force tilts away from gravity
-        and the accel blend biases pitch backward -- over-lean, runaway speed,
-        the late tumble of the first live IBVS runs. boost=True blends hard
-        (quasi-static: the accel IS gravity, trust it)."""
-        vals = [imu.get(k) for k in ("ax", "ay", "az", "gx", "gy", "gz", "time_us")]
-        if any(v is None for v in vals) or not all(np.isfinite(float(v)) for v in vals):
-            return
-        ax, ay, az, gx, gy, gz, t_us = (float(v) for v in vals)
-        self.gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
-        if self._last_us is not None:
-            dt = (t_us - self._last_us) * 1e-6
-            if 0.0 < dt < 0.5:
-                self.roll += gx * dt
-                self.pitch += gy * dt
-        self._last_us = t_us
-        f = math.sqrt(ax * ax + ay * ay + az * az)
-        self.f_ok = 8.0 < f < 12.0
-        if self.f_ok:  # not accelerating hard: accel points along gravity
-            self.roll_acc = math.atan2(-ay, -az)
-            self.pitch_acc = math.atan2(ax, math.hypot(ay, az))
-            if allow_accel:
-                a = 0.25 if boost else self.alpha
-                self.roll = (1 - a) * self.roll + a * self.roll_acc
-                self.pitch = (1 - a) * self.pitch + a * self.pitch_acc
-
-    def sync_to_accel(self) -> bool:
-        """Hard-set the estimate to the accel tilt. Only valid quasi-static
-        (spawn, resting) -- the caller gates that; returns True on success."""
-        if not self.f_ok:
-            return False
-        self.roll, self.pitch = self.roll_acc, self.pitch_acc
-        return True
 
 
 class IBVSPilot:
@@ -168,7 +111,7 @@ class IBVSPilot:
         self._frames_seen = 0
         self._down_since = None
         self._down_logged = False
-        self.tilt = _TiltFilter()
+        self.tilt = TiltFilter()
         self._ctr = None  # (u, v) of the held gate centre
         self._ex = 0.0
         self._ey = 0.0

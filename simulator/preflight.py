@@ -49,7 +49,9 @@ def race_go_already_passed(data, is_restart=False):
     race_start = race.get("race_start_boot_time_ms", -1)
     if race_start < 0:
         return False
-    go_boot = race_go_boot_ms(race.get("sim_boot_time_ms", 0), race_start, is_restart=is_restart)
+    go_boot = race_go_boot_ms(
+        race.get("sim_boot_time_ms", 0), race_start, is_restart=is_restart
+    )
     if go_boot is None:
         return False
     return race.get("sim_boot_time_ms", 0) >= go_boot
@@ -270,8 +272,7 @@ def wait_for_fresh_track(data, timeout_s=AUTO_TRACK_TIMEOUT_S):
         flush=True,
     )
     print(
-        "  Run make auto first, then click Race "
-        "(or Restart Race if you already raced)",
+        "  Run make auto first, then click Race (or Restart Race if you already raced)",
         flush=True,
     )
     deadline = time.time() + timeout_s
@@ -381,6 +382,7 @@ def wait_for_race_go(
     if is_restart is None:
         is_restart = is_restart_arm_context(armed_sim_boot_ms)
     latch.reset_for_arm(armed_sim_boot_ms, is_restart=is_restart)
+    last_status = 0.0
 
     while time.time() < deadline:
         if _cancel_requested(cancel):
@@ -398,6 +400,21 @@ def wait_for_race_go(
                 flush=True,
             )
             return True
+        now = time.time()
+        if now - last_status >= 5.0:
+            race = data.get("race_status") or {}
+            print(
+                "[RACE] waiting for GO... "
+                f"race_status={'yes' if data.get('race_status') else 'no'} "
+                f"sim_boot={race.get('sim_boot_time_ms', '?')}ms "
+                f"race_start={race.get('race_start_boot_time_ms', -1)}ms "
+                f"go_boot={latch.go_boot_ms} "
+                f"branch={latch.branch} "
+                f"left={max(0.0, deadline - now):.0f}s "
+                "(click Race in FlightSim if race_start=-1)",
+                flush=True,
+            )
+            last_status = now
         time.sleep(RACE_GO_POLL_S)
 
     print("Race go timeout: race never started", flush=True)

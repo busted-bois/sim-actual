@@ -23,8 +23,13 @@ import numpy as np
 from pymavlink import mavutil
 
 from simulator.controller import _send_attitude_rates
+from simulator.mavlink_client import (
+    GcsHeartbeat,
+    request_flight_streams,
+    send_gcs_heartbeat,
+)
 from simulator.mavlink_rx import MAVLinkRX
-from simulator.state_estimator import StateEstimator, quat_mult
+from simulator.state_estimator import StateEstimator, quat_from_rpy, quat_mult
 from simulator.timesync import TimeSync
 from simulator.transforms import quat_to_yaw
 from simulator.vision_rx import VisionRX
@@ -72,13 +77,18 @@ class SimInterface:
         self.use_estimator = use_estimator
         self._shadow = None  # lazy CSV: estimator-vs-odometry error log
         self._shadow_next_t = 0.0
+        self._gcs_hb: GcsHeartbeat | None = None
         print(f"[sim] connecting MAVLink udpin:{ip}:{mav_port} ...", flush=True)
         self.conn = mavutil.mavlink_connection(f"udpin:{ip}:{mav_port}")
         self.conn.wait_heartbeat()
+        send_gcs_heartbeat(self.conn)
         print(f"[sim] heartbeat from system {self.conn.target_system}", flush=True)
+        request_flight_streams(self.conn)
         self.mavlink_rx = MAVLinkRX.create_mavlink_rx(
             self.conn, self.data, estimator=self.estimator
         )
+        self._gcs_hb = GcsHeartbeat(self.conn)
+        self._gcs_hb.start()
         self.timesync = TimeSync(self.conn, self.data)
         self.timesync.thread = None  # TimeSync.create starts a thread; start manually
         self._start_timesync()
@@ -121,15 +131,34 @@ class SimInterface:
             ang = (odo["roll_speed"], odo["pitch_speed"], odo["yaw_speed"])
         elif att is not None:
             ang = (att["roll_speed"], att["pitch_speed"], att["yaw_speed"])
+            q = quat_from_rpy(att["roll"], att["pitch"], att["yaw"])
+            quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+            if d.get("has_position") and d.get("pos_ned") is not None:
+                pos = tuple(d["pos_ned"])
+                vel = tuple(d.get("vel_ned") or (0.0, 0.0, 0.0))
         est_pose = self.estimator.pose() if self.estimator.ready else None
         if est_pose is not None and odo is not None:
             self._shadow_log(odo, est_pose)
-        if est_pose is not None and (odo is None or self.use_estimator):
+        # Prefer ODOMETRY, then MAVLink ATTITUDE (+LOCAL_POSITION). Only fall
+        # back to the EKF when those streams are blocked (VQ2) or --est is set.
+        # Chasing EKF euler under thrust caused takeoff pitch runaway (-23->-68)
+        # and ABORT flipped on make fly (TRAINING / incomplete streams).
+        use_ekf = est_pose is not None and (
+            self.use_estimator or (odo is None and att is None)
+        )
+        if use_ekf and (pos is None or quat is None or self.use_estimator):
             p_e, v_e, q_e = est_pose
-            pos, vel, quat = tuple(p_e), tuple(v_e), tuple(q_e)
-            yaw = quat_to_yaw(*q_e)
+            if pos is None or self.use_estimator:
+                pos, vel = tuple(p_e), tuple(v_e)
+            if quat is None or self.use_estimator:
+                quat = tuple(q_e)
+                yaw = quat_to_yaw(*q_e)
             if ang is None and imu is not None:
                 ang = (imu["gx"], imu["gy"], imu["gz"])
+        elif est_pose is not None and odo is None and att is not None and pos is None:
+            # Attitude present but no position stream: EKF for pos/vel only.
+            p_e, v_e, _q_e = est_pose
+            pos, vel = tuple(p_e), tuple(v_e)
         return Snapshot(
             t_mono=time.monotonic(),
             armed=bool(d.get("armed", False)),
@@ -246,6 +275,18 @@ class SimInterface:
             0,
         )
 
+    def ensure_armed(self, timeout_s: float = 30.0) -> bool:
+        t0 = time.monotonic()
+        last_arm = 0.0
+        while time.monotonic() - t0 < timeout_s:
+            if self.data.get("armed"):
+                return True
+            if time.monotonic() - last_arm >= 1.0:
+                self.arm()
+                last_arm = time.monotonic()
+            time.sleep(0.05)
+        return False
+
     def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
         # The estimator predicts velocity from the commanded thrust (this
         # sim's accelerometer is garbage under power) -- keep it informed.
@@ -276,6 +317,8 @@ class SimInterface:
 
     def close(self):
         """Stop the RX + timesync loops and join their (non-daemon) threads."""
+        if self._gcs_hb is not None:
+            self._gcs_hb.stop()
         for rx in (self.mavlink_rx, self.vision_rx, self.timesync):
             thread = rx.get_thread_for_join()  # sets is_running=False, returns thread
             if thread is not None:

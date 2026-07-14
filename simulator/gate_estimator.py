@@ -100,10 +100,16 @@ class GateEstimator:
 
         # 3. Range estimation (focal locked, or VQ2 pixel-width heuristic).
         if self.focal_px is not None:
-            real_width = gate.width_m if gate is not None and gate.width_m > 0 else REFERENCE_GATE_WIDTH_M
+            real_width = (
+                gate.width_m
+                if gate is not None and gate.width_m > 0
+                else REFERENCE_GATE_WIDTH_M
+            )
             range_m = real_width * self.focal_px / max(detection.width_px, 1.0)
         elif detection.width_px > 0:
-            range_m = REFERENCE_GATE_WIDTH_M * _FX_DEFAULT / max(detection.width_px, 1.0)
+            range_m = (
+                REFERENCE_GATE_WIDTH_M * _FX_DEFAULT / max(detection.width_px, 1.0)
+            )
         else:
             range_m = None
 
