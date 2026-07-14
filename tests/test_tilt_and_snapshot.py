@@ -1,6 +1,5 @@
 """Offline unit checks for tilt filter + sim pose source preference."""
 
-import math
 import unittest
 from unittest.mock import MagicMock
 
