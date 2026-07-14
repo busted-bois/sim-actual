@@ -31,11 +31,12 @@ class ProportionalController:
         rate_clip: float = RATE_CLIP,
         yaw_clip: float = YAW_CLIP,
         vq2: bool = False,
+        signs: dict[str, float] | None = None,
     ) -> None:
         self.k_att = k_att * gain_scale
         self.rate_clip = rate_clip
         self.yaw_clip = yaw_clip
-        self.signs = load_signs(vq2=vq2)
+        self.signs = dict(signs) if signs is not None else load_signs(vq2=vq2)
 
     def reset(self, s: State) -> None:
         pass
@@ -59,28 +60,32 @@ class PDController:
         rate_clip: float = RATE_CLIP,
         yaw_clip: float = YAW_CLIP,
         vq2: bool = False,
+        signs: dict[str, float] | None = None,
     ) -> None:
         self.k_att = k_att * gain_scale
         self.k_d = k_d
         self.rate_clip = rate_clip
         self.yaw_clip = yaw_clip
-        self.signs = load_signs(vq2=vq2)
+        self.signs = dict(signs) if signs is not None else load_signs(vq2=vq2)
 
     def reset(self, s: State) -> None:
         pass
 
     def update(self, s: State, target: Target, dt: float) -> Cmd:
+        # Damping sits INSIDE the sign multiply: the plant responds
+        # rate = sign*cmd, so opposing a measured rate needs cmd = -sign*kd*rate
+        # — outside the sign it anti-damps on sign=-1 axes (roll/yaw).
         sr, sp, sy = self.signs["roll"], self.signs["pitch"], self.signs["yaw"]
         rr = _clip(
-            sr * self.k_att * (target.roll - s.roll) - self.k_d * s.gyro[0],
+            sr * (self.k_att * (target.roll - s.roll) - self.k_d * s.gyro[0]),
             self.rate_clip,
         )
         pr = _clip(
-            sp * self.k_att * (target.pitch - s.pitch) - self.k_d * s.gyro[1],
+            sp * (self.k_att * (target.pitch - s.pitch) - self.k_d * s.gyro[1]),
             self.rate_clip,
         )
         yr = _clip(
-            sy * self.k_att * _wrap(target.yaw - s.yaw) - self.k_d * s.gyro[2],
+            sy * (self.k_att * _wrap(target.yaw - s.yaw) - self.k_d * s.gyro[2]),
             self.yaw_clip,
         )
         return Cmd(rr, pr, yr, _thrust(s, target))
@@ -99,9 +104,16 @@ class ShapedPDController:
         rate_clip: float = RATE_CLIP,
         yaw_clip: float = YAW_CLIP,
         vq2: bool = False,
+        signs: dict[str, float] | None = None,
     ) -> None:
         self._pd = PDController(
-            k_att, k_d, gain_scale, rate_clip=rate_clip, yaw_clip=yaw_clip, vq2=vq2
+            k_att,
+            k_d,
+            gain_scale,
+            rate_clip=rate_clip,
+            yaw_clip=yaw_clip,
+            vq2=vq2,
+            signs=signs,
         )
         self.tau = tau_s
         self.slew = slew_rate
@@ -137,6 +149,7 @@ class ScheduledPDController:
         rate_clip: float = RATE_CLIP,
         yaw_clip: float = YAW_CLIP,
         vq2: bool = False,
+        signs: dict[str, float] | None = None,
     ) -> None:
         import math
 
@@ -145,7 +158,7 @@ class ScheduledPDController:
         self.rate_clip = rate_clip
         self.yaw_clip = yaw_clip
         self.level_rad = math.radians(level_deg)
-        self.signs = load_signs(vq2=vq2)
+        self.signs = dict(signs) if signs is not None else load_signs(vq2=vq2)
 
     def reset(self, s: State) -> None:
         pass
@@ -156,9 +169,10 @@ class ScheduledPDController:
         k = self.k_att * scale
         kd = self.k_d * (2.0 - scale)
         sr, sp, sy = self.signs["roll"], self.signs["pitch"], self.signs["yaw"]
-        rr = _clip(sr * k * (target.roll - s.roll) - kd * s.gyro[0], self.rate_clip)
-        pr = _clip(sp * k * (target.pitch - s.pitch) - kd * s.gyro[1], self.rate_clip)
-        yr = _clip(sy * k * _wrap(target.yaw - s.yaw) - kd * s.gyro[2], self.yaw_clip)
+        # Damping inside the sign multiply (see PDController.update).
+        rr = _clip(sr * (k * (target.roll - s.roll) - kd * s.gyro[0]), self.rate_clip)
+        pr = _clip(sp * (k * (target.pitch - s.pitch) - kd * s.gyro[1]), self.rate_clip)
+        yr = _clip(sy * (k * _wrap(target.yaw - s.yaw) - kd * s.gyro[2]), self.yaw_clip)
         return Cmd(rr, pr, yr, _thrust(s, target))
 
 

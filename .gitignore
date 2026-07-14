@@ -21,6 +21,8 @@ scripts/node_modules/
 runs/
 # Per-run nav telemetry CSVs
 rl/data/nav_log*.csv
-# B0 harness output + estimator debug logs (local only)
+rl/data/course_log*.csv
+# Harness outputs (measured signs + plant calibration) + estimator debug logs
 flightlab/signs.json
+flightlab/calibration.json
 rl/data/est_log_*.jsonl

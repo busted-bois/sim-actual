@@ -17,6 +17,9 @@ class Phase:
     target: Target
     open_loop_rates: tuple[float, float, float] | None = None
     open_loop_thrust: float | None = None
+    # Damp body rates toward zero using the signs measured so far
+    # (ctx.sign_accum); axes without a measured sign get zero command.
+    rate_null: bool = False
 
 
 def hover_target(
@@ -25,38 +28,32 @@ def hover_target(
     return Target(roll=roll, pitch=pitch, yaw=0.0, z=z)
 
 
-def sign_id_phases(
-    z: float = HOVER_Z_NED, roll: float = 0.0, pitch: float = 0.0
+def sign_doublet_phases(
+    axis: str,
+    z: float = HOVER_Z_NED,
+    pulse: float = 0.2,
+    dur: float = 0.3,
+    gap: float = 0.4,
 ) -> list[Phase]:
-    """B0: +0.2 rad/s pulse 0.3 s per axis at hover."""
-    pulse = 0.2
-    dur = 0.3
-    settle = 1.5
-    axes = [
-        ("roll", (pulse, 0.0, 0.0)),
-        ("pitch", (0.0, pulse, 0.0)),
-        ("yaw", (0.0, 0.0, pulse)),
+    """B0: open-loop ± rate doublet on one axis (net rate ~ 0, so tilt does
+    not accumulate across axes the way single pulses did)."""
+    i = ("roll", "pitch", "yaw").index(axis)
+    pos = tuple(pulse if j == i else 0.0 for j in range(3))
+    neg = tuple(-pulse if j == i else 0.0 for j in range(3))
+    zero = (0.0, 0.0, 0.0)
+    tgt = hover_target(z)
+    return [
+        Phase(f"sign_{axis}_base0", gap, tgt, open_loop_rates=zero),
+        Phase(f"sign_{axis}_pulse_pos", dur, tgt, open_loop_rates=pos),
+        Phase(f"sign_{axis}_mid", gap, tgt, open_loop_rates=zero),
+        Phase(f"sign_{axis}_pulse_neg", dur, tgt, open_loop_rates=neg),
+        Phase(f"sign_{axis}_base1", gap, tgt, open_loop_rates=zero),
     ]
-    phases: list[Phase] = [
-        Phase("hover_settle", 2.0, hover_target(z, roll, pitch)),
-    ]
-    for name, rates in axes:
-        phases.append(
-            Phase(
-                f"sign_{name}_pulse",
-                dur,
-                hover_target(z, roll, pitch),
-                open_loop_rates=rates,
-            )
-        )
-        phases.append(
-            Phase(
-                f"sign_{name}_settle",
-                settle,
-                hover_target(z, roll, pitch),
-            )
-        )
-    return phases
+
+
+def rate_null_phase(z: float = HOVER_Z_NED, duration_s: float = 0.5) -> Phase:
+    """Damp residual body rates between B0 axes (uses measured signs only)."""
+    return Phase("rate_null", duration_s, hover_target(z), rate_null=True)
 
 
 def rate_tracking_phase(z: float = HOVER_Z_NED) -> list[Phase]:

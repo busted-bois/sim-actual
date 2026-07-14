@@ -11,6 +11,7 @@ import numpy as np
 from scipy import signal
 
 SIGNS_PATH = os.path.join(os.path.dirname(__file__), "signs.json")
+CAL_PATH = os.path.join(os.path.dirname(__file__), "calibration.json")
 
 
 def signs_measured() -> bool:
@@ -48,13 +49,84 @@ def save_signs(signs: dict[str, float]) -> None:
     print(f"[metrics] wrote {SIGNS_PATH}: {signs}", flush=True)
 
 
+def save_calibration(cal: dict) -> None:
+    """Measured plant values consumed by rl.calibration.load_calibration."""
+    with open(CAL_PATH, "w", encoding="utf-8") as f:
+        json.dump(cal, f, indent=2)
+    print(f"[metrics] wrote {CAL_PATH}: {cal}", flush=True)
+
+
+def fit_rate_tau(
+    times: list[float], cmds: list[float], rates: list[float]
+) -> float | None:
+    """First-order time constant: command step to 63.2% of |cmd| in the rate."""
+    t0_idx = None
+    for i, c in enumerate(cmds):
+        if abs(c) > 0.1:
+            t0_idx = i
+            break
+    if t0_idx is None:
+        return None
+    target = 0.632 * abs(cmds[t0_idx])
+    for j in range(t0_idx, len(rates)):
+        if abs(rates[j]) >= target:
+            return max(times[j] - times[t0_idx], 0.0)
+    return None
+
+
+def wrap_pi(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
 def identify_sign_from_pulse(
     angles_before: float, angles_after: float, cmd_rate: float
 ) -> float:
+    """Sign of cmd -> euler response from a single pulse; 0.0 = no evidence."""
     delta = angles_after - angles_before
     if abs(delta) < math.radians(0.5):
-        return 1.0
+        return 0.0
     return 1.0 if (delta * cmd_rate) > 0 else -1.0
+
+
+def sign_from_gyro_doublet(
+    base_mean: float,
+    pos_mean: float,
+    neg_mean: float,
+    pulse: float,
+    min_resp: float = 0.05,
+) -> float:
+    """Sign of cmd -> gyro from a ± doublet's baseline-subtracted rate means.
+
+    Gyro (HIGHRES_IMU, 100 Hz) responds within the actuation latency and does
+    not integrate drift the way euler deltas do, so this works even when the
+    drone is tilted. Both halves must respond above min_resp AND agree, else
+    0.0 (unknown) — never a silent +1.
+    """
+    resp_pos = pos_mean - base_mean
+    resp_neg = neg_mean - base_mean
+    if abs(resp_pos) < min_resp or abs(resp_neg) < min_resp:
+        return 0.0
+    s_pos = math.copysign(1.0, resp_pos * pulse)
+    s_neg = math.copysign(1.0, resp_neg * -pulse)
+    return s_pos if s_pos == s_neg else 0.0
+
+
+def euler_delta_sign(
+    before: float,
+    after: float,
+    drift_rate: float,
+    dur: float,
+    cmd_rate: float,
+    min_delta: float = math.radians(1.5),
+) -> float:
+    """Sign of cmd -> euler over a pulse, with pre-pulse drift subtracted.
+
+    Cross-check for sign_from_gyro_doublet; 0.0 = no usable evidence.
+    """
+    delta = wrap_pi(after - before) - drift_rate * dur
+    if abs(delta) < min_delta or abs(cmd_rate) < 1e-6:
+        return 0.0
+    return 1.0 if delta * cmd_rate > 0 else -1.0
 
 
 def imu_tilt_sign_check(
