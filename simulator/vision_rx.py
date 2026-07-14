@@ -2,6 +2,7 @@ import os
 import socket
 import struct
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -257,7 +258,8 @@ class VisionRX:
     ) -> None:
         from simulator.auto_flight import auto_flight_enabled
 
-        if auto_flight_enabled():
+        # Rate-limit spam so race-GO / arm prompts stay visible (make fly).
+        if auto_flight_enabled() or self.data.get("_quiet_vision"):
             if detected and not self._gate_was_detected:
                 print("[vision] GATE acquired", flush=True)
             elif not detected and self._gate_was_detected:
@@ -268,6 +270,12 @@ class VisionRX:
         if not detected:
             self._gate_was_detected = False
             return
+
+        now = time.monotonic()
+        last = float(self.data.get("_vision_gate_log_t", 0.0) or 0.0)
+        if now - last < 1.0 and self._gate_was_detected:
+            return
+        self.data["_vision_gate_log_t"] = now
 
         range_s = f" range={range_m:.1f}m" if range_m is not None else ""
         print(

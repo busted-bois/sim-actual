@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_fly2_gate_aim tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_fly2_gate_aim tests.test_fly2_smooth tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
 
 sim:
 	uv run main.py
@@ -56,13 +56,13 @@ est-selftest:
 capture-gates:
 	uv run -m rl.capture_gates
 
-# Fly the full 6-gate course (resets, arms, flies). Start the race first.
+# Fly the full 6-gate course. Enter TRAINING/SUBMISSION, then click Race;
+# drone arms when the on-screen countdown hits 0. Free UDP 14550 first if needed.
 fly:
 	uv run -m rl.fly2 --mode course
 
-# Fly the course from VISION ONLY -- YOLO gate detection + PnP, no gate map,
-# no hardcoded coordinates. Start the race first. Under the VQ2 block the
-# IMU+vision estimator takes over automatically (odometry absent).
+# Vision-only course (YOLO+PnP). Same Race/GO gate as `make fly`. Under VQ2
+# the IMU+vision estimator takes over automatically (odometry absent).
 fly-vision:
 	uv run -m rl.fly2 --mode vision
 

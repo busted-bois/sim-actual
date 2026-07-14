@@ -6,6 +6,11 @@ would be far too slow. The live sim is used only in Modules 1-2 (data) and
 final evaluation. Domain randomization on the internal model covers the
 sim-to-sim gap.
 
+Plant parameters THRUST_ACCEL / RATE_TAU / spec.HOVER_THRUST come from
+flightlab/calibration.json when `make attitude-harness` has measured them
+(built-in guesses otherwise). Gate layout/jitter/spawn stay randomized via
+CURRICULUM; DRAG remains a guess (not measurable from the attitude harness).
+
   * Action      : 4-D normalized [-1,1] -> (roll,pitch,yaw rate, thrust)  [spec.scale_action]
   * Observation : 24-D gate-relative vector                              [Module 6]
   * Reward      : dense progress + gate-pass bonus - crash/time/effort
@@ -23,12 +28,14 @@ import numpy as np
 from gymnasium import spaces
 
 from rl import spec
+from rl.calibration import load_calibration
 from rl.observation import build_observation
 
-# Reduced quadrotor parameters.
+# Reduced quadrotor parameters — measured overrides when calibration exists.
+_CAL = load_calibration()
 MASS = 1.0
-THRUST_ACCEL = spec.GRAVITY / spec.HOVER_THRUST  # thrust=0.5 -> hover
-RATE_TAU = 0.05  # body-rate first-order lag (s)
+THRUST_ACCEL = float(_CAL.get("thrust_accel", spec.GRAVITY / spec.HOVER_THRUST))
+RATE_TAU = float(_CAL.get("rate_tau_s", 0.05))  # body-rate first-order lag (s)
 DRAG = 0.1
 SIM_DT = 1 / 100.0
 DECISION_HZ = 50

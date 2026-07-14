@@ -139,13 +139,26 @@ class SimInterface:
         est_pose = self.estimator.pose() if self.estimator.ready else None
         if est_pose is not None and odo is not None:
             self._shadow_log(odo, est_pose)
-        if est_pose is not None and (odo is None or self.use_estimator):
-            if pos is None or quat is None or self.use_estimator:
-                p_e, v_e, q_e = est_pose
-                pos, vel, quat = tuple(p_e), tuple(v_e), tuple(q_e)
+        # Prefer ODOMETRY, then MAVLink ATTITUDE (+LOCAL_POSITION). Only fall
+        # back to the EKF when those streams are blocked (VQ2) or --est is set.
+        # Chasing EKF euler under thrust caused takeoff pitch runaway (-23->-68)
+        # and ABORT flipped on make fly (TRAINING / incomplete streams).
+        use_ekf = est_pose is not None and (
+            self.use_estimator or (odo is None and att is None)
+        )
+        if use_ekf and (pos is None or quat is None or self.use_estimator):
+            p_e, v_e, q_e = est_pose
+            if pos is None or self.use_estimator:
+                pos, vel = tuple(p_e), tuple(v_e)
+            if quat is None or self.use_estimator:
+                quat = tuple(q_e)
                 yaw = quat_to_yaw(*q_e)
-                if ang is None and imu is not None:
-                    ang = (imu["gx"], imu["gy"], imu["gz"])
+            if ang is None and imu is not None:
+                ang = (imu["gx"], imu["gy"], imu["gz"])
+        elif est_pose is not None and odo is None and att is not None and pos is None:
+            # Attitude present but no position stream: EKF for pos/vel only.
+            p_e, v_e, _q_e = est_pose
+            pos, vel = tuple(p_e), tuple(v_e)
         return Snapshot(
             t_mono=time.monotonic(),
             armed=bool(d.get("armed", False)),

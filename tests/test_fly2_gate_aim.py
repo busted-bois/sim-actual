@@ -71,9 +71,10 @@ class PDHookTests(unittest.TestCase):
         self.assertEqual(got, self._expected_p_only(*args))
 
     def test_kd_damps_against_measured_rate(self):
-        base = rates_from_attitude_targets(
-            0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 0.0, -2.0, signs=SIGNS, k_d=0.0
-        )
+        # Plant responds rate = sign*cmd, so damping a positive measured rate
+        # requires sign*cmd < 0 on EVERY axis — including sign=-1 roll/yaw,
+        # where the old (damping outside the sign) form commanded the opposite
+        # and pumped energy in.
         damped = rates_from_attitude_targets(
             0.0,
             0.0,
@@ -87,9 +88,8 @@ class PDHookTests(unittest.TestCase):
             k_d=0.15,
             gyro=(0.5, 0.5, 0.5),
         )
-        self.assertLess(damped[0], base[0])
-        self.assertLess(damped[1], base[1])
-        self.assertLess(damped[2], base[2])
+        for i, s in enumerate(SIGNS):
+            self.assertLess(s * damped[i], 0.0, f"axis {i} must oppose +rate")
 
 
 class Fly2MakeFlyStartupTests(unittest.TestCase):
@@ -98,8 +98,49 @@ class Fly2MakeFlyStartupTests(unittest.TestCase):
     def test_takeoff_constants(self):
         import rl.fly2 as fly2
 
-        self.assertEqual(fly2.TAKEOFF_S, 3.0)
+        self.assertEqual(fly2.TAKEOFF_S, 4.0)
         self.assertEqual(fly2.HOVER_Z_NED, -3.0)
+        self.assertLessEqual(fly2.TAKEOFF_THRUST, 0.32)
+        self.assertLess(fly2.TAKEOFF_IDLE_THRUST, fly2.HOVER_T)
+        self.assertGreater(fly2.TAKEOFF_KD, 0.0)
+
+    def test_tilt_rate_signs_flip_pitch(self):
+        """IMU tilt path must invert signs.json pitch (+1 → −1)."""
+        from rl.fly2 import _rate_signs
+        from rl.fly2_course import rates_from_attitude_targets
+
+        odo = (-1.0, 1.0, -1.0)
+        self.assertEqual(_rate_signs("odo", odo), odo)
+        self.assertEqual(_rate_signs("mav_attitude", odo), odo)
+        tilt = _rate_signs("tilt", odo)
+        self.assertEqual(tilt, (-1.0, -1.0, -1.0))
+        # Nose-down → negative pitch_cmd with tilt signs (was +0.30 → dive).
+        pcmd = rates_from_attitude_targets(
+            0.0,
+            -0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -3.0,
+            signs=tilt,
+            k_d=0.12,
+            gyro=(0.0, -0.76, 0.0),
+        )[1]
+        self.assertLess(pcmd, 0.0)
+
+    def test_default_skips_enter_wait(self):
+        """make fly/fly-vision must not block on input(); race GO gates launch."""
+        import inspect
+
+        import rl.fly2 as fly2
+
+        src = inspect.getsource(fly2.main)
+        self.assertIn('--wait"', src)
+        self.assertIn('action="store_true"', src)
+        self.assertNotIn("store_false", src)
+        self.assertNotIn("READY -- press ENTER the moment", src)
 
     def test_sim_interface_live_boundary(self):
         from rl.sim_interface import SimInterface

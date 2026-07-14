@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from rl.calibration import load_calibration
+
 # ----------------------------------------------------------------------------
 # Camera intrinsics (fixed, given). fx=fy=320, cx=320, cy=180 => 640x360 frame.
 # ----------------------------------------------------------------------------
@@ -69,7 +71,10 @@ MAX_PITCH_RATE = 4.0
 MAX_YAW_RATE = 3.0
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
-HOVER_THRUST = 0.5
+# Internal-model guess 0.5; overridden by the harness-measured value from
+# flightlab/calibration.json (real sim hovers at ~0.27 — a policy trained
+# around 0.5-hover double-thrusts live).
+HOVER_THRUST = float(load_calibration().get("hover_thrust", 0.5))
 
 # Policy emits 4 values in [-1, 1]; scale_action() maps to physical commands.
 ACTION_DIM = 4

@@ -17,6 +17,7 @@ TAKEOFF_LATCH_M = 0.5  # low-alt trip arms only after first climbing past this
 HORIZ_LIMIT_M = 100.0
 TILT_TRIP_S = 0.2
 GYRO_TRIP_S = 0.5
+ALT_UNTRUSTED_TRIP_S = 0.5
 HOVER_THRUST = 0.27
 
 
@@ -31,6 +32,7 @@ class SafetyMonitor:
     def __init__(self) -> None:
         self._tilt_t0: float | None = None
         self._gyro_t0: float | None = None
+        self._alt_untrusted_t0: float | None = None
         self._was_armed = False
         self._arm_mono: float | None = None
         self._airborne = False  # latched once alt first exceeds TAKEOFF_LATCH_M
@@ -41,6 +43,7 @@ class SafetyMonitor:
         up-to-45 s race-GO wait silently burn the whole grace window."""
         self._tilt_t0 = None
         self._gyro_t0 = None
+        self._alt_untrusted_t0 = None
         self._was_armed = False
         self._arm_mono = time.monotonic()
         self._airborne = False
@@ -58,6 +61,25 @@ class SafetyMonitor:
             self._tilt_t0 = None
 
         alt = -s.pos_ned[2]
+        # No trusted altitude and no EKF fallback -> the thrust law silently
+        # freezes at hover (controllers._thrust) and the drone sinks/climbs
+        # unchecked. Trip loudly instead of flying ballistic (0.5 s debounce).
+        if (
+            not arm_grace
+            and not s.alt_trusted
+            and s.pose_source
+            not in (
+                "ekf",
+                "imu_tilt",
+            )
+        ):
+            if self._alt_untrusted_t0 is None:
+                self._alt_untrusted_t0 = now
+            elif now - self._alt_untrusted_t0 >= ALT_UNTRUSTED_TRIP_S:
+                return SafetyResult(True, "alt_untrusted", _level_hover())
+        else:
+            self._alt_untrusted_t0 = None
+
         # EKF z drifts under thrust (baro off) — do not trip on its altitude.
         alt_safe = s.alt_trusted and s.pose_source != "ekf"
         if alt_safe:
