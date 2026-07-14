@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto auto-gp free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -27,6 +27,12 @@ sim:
 # Auto flight — continuous overnight retry; Ctrl+C stops
 auto:
 	uv run auto.py
+
+# AndurilGP vendor flyer — thin pointer to submodule `python main.py`.
+# First time: `git submodule update --init --recursive`
+# Full control port for RL merge lives on branch `feat/andurilgp-controls`.
+auto-gp:
+	uv run auto_gp.py
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.

@@ -1,0 +1,3 @@
+[submodule "vendor/AndurilGP"]
+	path = vendor/AndurilGP
+	url = https://github.com/ayushc121/AndurilGP.git
