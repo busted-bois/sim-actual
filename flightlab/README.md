@@ -24,7 +24,7 @@ Logs → `runs/vertical_<utc>/log.jsonl` + `report.md`. Exit 0 iff all tests PAS
 
 | # | Test | PASS criteria |
 |---|------|---------------|
-| V1 | Hover 3 m / 30 s | alt std < 0.15; drift < 0.3; vz std < 0.2; thrust std < 0.02; r/p p2p < 3° |
+| V1 | Climb to first-gate pass height, hold 30 s | alt std < 0.15; drift < 0.3; vz std < 0.2; thrust std < 0.02; r/p p2p < 3° |
 | V2 | ±5 m steps | overshoot < 15%; settle ±0.25 m in < 2.5 s; bounce decay |
 | V3 | vz rate tracking | mean vz within 15% or sat at thrust clamps |
 | V4 | Soft land 5 m & 10 m | touchdown \|vz\| < 2; disarm on settle (no timer) |

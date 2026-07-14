@@ -22,6 +22,7 @@ os.environ["MAVLINK20"] = "1"
 
 from flightlab.bus import CONTROL_HZ, HOVER_THRUST, Bus
 from flightlab.controllers import list_methods, make_controller
+from flightlab.gates import first_gate_pass_z
 from flightlab import metrics as M
 from flightlab.maneuvers import Schedule, Segment, altitude_steps, lean_hold
 from flightlab.protocol import Controller, Target
@@ -212,6 +213,19 @@ def _prep(bus: Bus, ctrl: Controller, safety: SafetyMonitor) -> bool:
     return True
 
 
+def _hold_z_for_gate(bus: Bus) -> float:
+    """Climb/hold altitude aligned with first gate opening."""
+    s = bus.drain()
+    z_hold, info = first_gate_pass_z(bus.tracker.data, spawn_z=s.pos[2])
+    print(
+        f"[gate] hold_z={z_hold:.2f} (alt≈{info.get('alt_m', -z_hold):.2f}m) "
+        f"source={info.get('source')} flipz={info.get('flipz')} "
+        f"gate0_z={info.get('gate0_z')}",
+        flush=True,
+    )
+    return z_hold
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -220,13 +234,12 @@ def _prep(bus: Bus, ctrl: Controller, safety: SafetyMonitor) -> bool:
 def test_v1(
     bus: Bus, ctrl: Controller, safety: SafetyMonitor, log: list[TickLog]
 ) -> TestResult:
-    """Hover calibration + jitter at 3 m AGL for 30 s."""
+    """Climb to first-gate pass height and hover for jitter/hover calibration."""
     name = "V1"
     if not _prep(bus, ctrl, safety):
         return TestResult(name, False, "arm_failed")
 
-    # Spawn z≈0; 3 m AGL → z = -3
-    z_hold = -3.0
+    z_hold = _hold_z_for_gate(bus)
     ok, reason = _takeoff_to(bus, ctrl, safety, z_hold, log, name)
     if not ok:
         return TestResult(name, False, reason, blowup=reason.startswith("blowup"))
@@ -260,6 +273,8 @@ def test_v1(
         "roll_p2p_deg": M.peak_to_peak(rolls),
         "pitch_p2p_deg": M.peak_to_peak(pitches),
         "true_hover_thrust": M.mean(thrusts),
+        "z_hold": z_hold,
+        "alt_hold_m": _alt(z_hold),
     }
     checks = [
         (m["alt_std"] < 0.15, f"alt_std={m['alt_std']:.3f}"),
@@ -287,7 +302,7 @@ def test_v2(
     if not _prep(bus, ctrl, safety):
         return TestResult(name, False, "arm_failed")
 
-    z_base = -3.0
+    z_base = _hold_z_for_gate(bus)
     ok, reason = _takeoff_to(bus, ctrl, safety, z_base, log, name)
     if not ok:
         return TestResult(name, False, reason, blowup=reason.startswith("blowup"))
@@ -361,7 +376,7 @@ def test_v3(
     if not _prep(bus, ctrl, safety):
         return TestResult(name, False, "arm_failed")
 
-    z0 = -8.0  # room to climb/descend
+    z0 = _hold_z_for_gate(bus) - 5.0  # room above/below gate pass height
     ok, reason = _takeoff_to(bus, ctrl, safety, z0, log, name)
     if not ok:
         return TestResult(name, False, reason, blowup=reason.startswith("blowup"))
@@ -522,7 +537,7 @@ def test_tilt_check(
     if not _prep(bus, ctrl, safety):
         return TestResult(name, False, "arm_failed")
 
-    z_hold = -3.0
+    z_hold = _hold_z_for_gate(bus)
     ok, reason = _takeoff_to(bus, ctrl, safety, z_hold, log, name)
     if not ok:
         return TestResult(name, False, reason, blowup=reason.startswith("blowup"))
