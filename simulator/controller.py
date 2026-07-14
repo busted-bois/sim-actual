@@ -141,11 +141,17 @@ class Controller:
 
         from simulator.auto_flight import auto_flight_enabled
 
+        # AUTO_PILOT=gp works outside overnight AUTO_FLIGHT (make auto-gp /
+        # Anduril-style single-shot main). Other AUTO_PILOT values only apply
+        # under make auto.
+        pilot = os.environ.get("AUTO_PILOT", "").strip().lower()
+        if pilot == "gp":
+            from simulator.gp_pilot import GPPilot
+
+            return GPPilot(self, self.data)
+
         if auto_flight_enabled():
-            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
-            # pixel servo (needs no position estimate; smoothest live flight
-            # so far). AUTO_PILOT=vnav selects the world-map vision navigator
-            # (NaN-proofed EKF pose).
+            # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
             if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
                 from simulator.vision_nav_pilot import VisionNavPilot
 
