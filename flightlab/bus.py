@@ -112,7 +112,8 @@ class Bus:
             s = self.drain()
             if s.has_pose:
                 print(
-                    f"[bus] pose source: {s.pose_source} (imu_seen={imu_n})",
+                    f"[bus] pose source: {s.pose_source} (imu_seen={imu_n} "
+                    f"baro_ok={s.baro_ok})",
                     flush=True,
                 )
                 return True

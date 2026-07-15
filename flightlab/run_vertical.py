@@ -2,7 +2,7 @@
 
 Usage:
     uv run python -m flightlab.run_vertical
-    uv run python -m flightlab.run_vertical --method pid --only V1
+    uv run python -m flightlab.run_vertical --method baro_hold --only V1
     uv run python -m flightlab.run_vertical --list
 """
 
@@ -44,6 +44,10 @@ class TickLog:
     vn: float
     ve: float
     vz: float
+    zhat: float
+    vzhat: float
+    vz_cmd: float
+    baro_ok: bool
     roll: float
     pitch: float
     yaw: float
@@ -127,6 +131,10 @@ def _run_loop(
                 vn=s.vel[0],
                 ve=s.vel[1],
                 vz=s.vel[2],
+                zhat=s.zhat,
+                vzhat=s.vzhat,
+                vz_cmd=float(getattr(ctrl, "last_vz_cmd", 0.0)),
+                baro_ok=s.baro_ok,
                 roll=s.roll,
                 pitch=s.pitch,
                 yaw=s.yaw,
@@ -636,9 +644,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Vertical-axis flight harness")
     ap.add_argument(
         "--method",
-        default="pd",
+        default="baro_hold",
         choices=list_methods(),
-        help="controller method",
+        help="controller method (default: baro_hold)",
     )
     ap.add_argument("--only", default=None, help="run a single test (e.g. V1)")
     ap.add_argument("--list", action="store_true", help="list tests and methods")
