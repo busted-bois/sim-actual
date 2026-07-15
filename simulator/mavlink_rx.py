@@ -20,7 +20,10 @@ def _gate_pose_valid(x, y, z, width, height) -> bool:
 
 
 def _auto_flight_debug() -> bool:
-    return os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower() in _AUTO_FLIGHT_DEBUG_VALUES
+    return (
+        os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower()
+        in _AUTO_FLIGHT_DEBUG_VALUES
+    )
 
 
 class MAVLinkRX:
@@ -156,6 +159,15 @@ class MAVLinkRX:
         self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
         self.data["pos_time_ms"] = msg.time_boot_ms
         self.data["has_position"] = True
+        # manual-flight fallback source (simulator/manual_control.py)
+        self.data["local_position_ned"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+        }
 
     def on_odometry(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
@@ -176,6 +188,8 @@ class MAVLinkRX:
             "qy": qy,
             "qz": qz,
             "qw": qw,
+            # (w, x, y, z) tuple for manual flight's _quat_to_euler
+            "q": (qw, qx, qy, qz),
             "roll_speed": msg.rollspeed,
             "pitch_speed": msg.pitchspeed,
             "yaw_speed": msg.yawspeed,
@@ -202,6 +216,9 @@ class MAVLinkRX:
             "time_us": msg.time_usec,
         }
         self.data["imu"] = imu
+        # Arrival marker for manual flight: event/qualification sessions stream
+        # IMU while blocking pose telemetry — lets it tell "blocked" from "silent".
+        self.data["highres_imu_mono"] = time.monotonic()
         if self.estimator is not None:
             self.estimator.on_imu(imu)
 

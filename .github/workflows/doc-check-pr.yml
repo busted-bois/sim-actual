@@ -61,7 +61,7 @@ jobs:
               "",
               "This PR changes flight/RL code but not `docs/main-documentation.md`.",
               "",
-              "After merge to `main`, the [Update main documentation](.github/workflows/update-main-documentation.yml) workflow will rewrite the doc on branch `main-documentation` via Cursor SDK.",
+              "After merge to `main`, the [Update main documentation](.github/workflows/update-main-documentation.yml) workflow will rewrite the doc via Cursor SDK and open a follow-up PR with the update.",
               "",
               "Optional: preview doc changes locally with `make doc-update` (requires `CURSOR_API_KEY`).",
             ].join("\n");

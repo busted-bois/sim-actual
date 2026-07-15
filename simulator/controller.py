@@ -166,14 +166,27 @@ class Controller:
         self._yaw_rate = yaw_rate
         self._thrust = thrust
 
+    def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        """Send body-rate + thrust directly this tick (used by manual flight).
+
+        Manual flight drives its own control loop (manual.py) rather than
+        Controller.update(), so it commands the wire immediately instead of
+        latching values for update() to send.
+        """
+        _send_attitude_rates(
+            self.sim_conn,
+            self.system_boot_ms,
+            roll_rate=float(roll_rate),
+            pitch_rate=float(pitch_rate),
+            yaw_rate=float(yaw_rate),
+            thrust=float(thrust),
+        )
+
     def set_velocity_ned(self, vx, vy, vz, yaw_rate):
         self._vx = vx
         self._vy = vy
         self._vz = vz
         self._yaw_rate = yaw_rate
-
-    def disarm(self):
-        pass
 
     def update(self):
         self.pilot.tick()
@@ -218,6 +231,24 @@ class Controller:
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
             1,  # arm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    # -------------------------------
+    # Disarm the drone (used by manual auto-land on touchdown)
+    # -------------------------------
+    def disarm(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,  # disarm
             0,
             0,
             0,
