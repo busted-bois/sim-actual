@@ -44,7 +44,8 @@ if ! grep -qE '^\| \*\*Last updated\*\* \|' "$DOC"; then
   exit 1
 fi
 
-DOC_SHA="$(grep -E '^\| \*\*Main commit\*\*' "$DOC" | sed -n 's/.*`\([0-9a-f]\{7,40\}\)`.*/\1/p' | head -1)"
+# Tolerate no match so the explicit check below reports it; pipefail would abort first.
+DOC_SHA="$(grep -E '^\| \*\*Main commit\*\*' "$DOC" | sed -n 's/.*`\([0-9a-f]\{7,40\}\)`.*/\1/p' | head -1 || true)"
 if [[ -z "$DOC_SHA" ]]; then
   echo "doc-validate: could not parse Main commit from header" >&2
   exit 1
