@@ -11,14 +11,27 @@ Or: `make vertical`
 ## CLI
 
 ```
+uv run python -m flightlab.run_vertical
+uv run python -m flightlab.run_vertical --method baro_hold --only V1
 uv run python -m flightlab.run_vertical --method pd
-uv run python -m flightlab.run_vertical --method pid --only V1
 uv run python -m flightlab.run_vertical --list
 ```
 
-Methods: `pd`, `pid`, `pid_tilt`, `pid_tilt_filt`
+Methods: `baro_hold` (default), `pd`, `pid`, `pid_tilt`, `pid_tilt_filt`
 
-Logs → `runs/vertical_<utc>/log.jsonl` + `report.md`. Exit 0 iff all tests PASS.
+### Barometric altitude hold (`baro_hold`)
+
+```
+Vz_cmd = kp * (z_up_tgt - zhat_up) - kd * vzhat_up
+thrust  = hover + kt * Vz_cmd
+```
+
+- `zhat` / `vzhat` from VIO/Kalman (`StateEstimator`). Baro fused when `pressure_alt` is finite.
+- On many TRAINING builds baro is NaN → zhat rides EKF thrust model.
+- Start gains: `kp=1.0`, `kd=0.4`, `kt=0.05`.
+- Soft/ESKF mode: **zero roll/pitch rates** (boot pitch bias + P leveler → pitch→70° blowup).
+
+Logs → `runs/vertical_<utc>/log.jsonl` + `report.md` (includes `zhat`, `vzhat`, `vz_cmd`, `baro_ok`). Exit 0 iff all tests PASS.
 
 ## Tests
 

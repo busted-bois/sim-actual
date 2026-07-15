@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import math
 
-# Measured odometry sign conventions (rl/fly2_course.py). Estimator attitude
-# is accel-anchored / truth-convention — same signs (EST_SIGNS were falsified).
+# Measured odometry sign conventions (rl/fly2_course.py).
 SIGN_ROLL = -1.0
 SIGN_PITCH = +1.0
 
 LEVEL_GAIN = 3.0  # rad/s per rad (odometry)
 LEVEL_CLIP = 0.5  # rad/s
-# Softer when flying on ESKF (VQ2): big init pitch bias + gain 3 → dive into gate
-EST_LEVEL_GAIN = 0.6
-EST_LEVEL_CLIP = 0.30
 
 
 def level_rates(
@@ -23,13 +19,18 @@ def level_rates(
     lean_pitch: float = 0.0,
     soft: bool = False,
 ) -> tuple[float, float]:
-    """P controller toward (lean_roll, lean_pitch) attitude targets."""
-    gain = EST_LEVEL_GAIN if soft else LEVEL_GAIN
-    clip = EST_LEVEL_CLIP if soft else LEVEL_CLIP
-    roll_cmd = SIGN_ROLL * gain * (lean_roll - roll)
-    pitch_cmd = SIGN_PITCH * gain * (lean_pitch - pitch)
-    roll_cmd = float(max(-clip, min(clip, roll_cmd)))
-    pitch_cmd = float(max(-clip, min(clip, pitch_cmd)))
+    """P controller toward (lean_roll, lean_pitch) attitude targets.
+
+    soft=True (VQ2 / ESKF): send zero rates. Boot pitch bias (±20°) + any
+    non-zero P made pitch run to 70° and trip safety. Vertical tests only
+    need thrust; plant holds attitude under zero rates (no auto-level).
+    """
+    if soft:
+        return 0.0, 0.0
+    roll_cmd = SIGN_ROLL * LEVEL_GAIN * (lean_roll - roll)
+    pitch_cmd = SIGN_PITCH * LEVEL_GAIN * (lean_pitch - pitch)
+    roll_cmd = float(max(-LEVEL_CLIP, min(LEVEL_CLIP, roll_cmd)))
+    pitch_cmd = float(max(-LEVEL_CLIP, min(LEVEL_CLIP, pitch_cmd)))
     return roll_cmd, pitch_cmd
 
 

@@ -29,6 +29,11 @@ class State:
     pose_age: float  # s since last pose update
     has_pose: bool
     pose_source: str = "none"  # odometry | estimator | none
+    # VIO/Kalman vertical estimate (NED). Same as pos[2]/vel[2] today;
+    # named for the altitude-hold law (baro fused into EKF when finite).
+    zhat: float = 0.0
+    vzhat: float = 0.0
+    baro_ok: bool = False
 
 
 def quat_to_rpy(
@@ -192,4 +197,7 @@ class StateTracker:
             pose_age=pose_age,
             has_pose=has_pose,
             pose_source=self.pose_source,
+            zhat=float(pos[2]),
+            vzhat=float(vel[2]),
+            baro_ok=bool(self.estimator.baro_ok),
         )
