@@ -1,4 +1,4 @@
-.PHONY: i install check test sim manual view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics vertical capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_manual_control -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_flightlab_bus_race tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
 
 sim:
 	uv run main.py
@@ -78,6 +78,10 @@ fly-vision-est:
 # Hold a stable hover (sanity check the controller).
 hover:
 	uv run -m rl.fly2 --mode hover --seconds 8
+
+# Vertical-axis flight harness (V1–V4). Start sim + TRAINING session first.
+vertical:
+	uv run python -m flightlab.run_vertical
 
 # Measure the sim's attitude/thrust response (open-loop characterization).
 dynamics:
