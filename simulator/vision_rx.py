@@ -257,7 +257,9 @@ class VisionRX:
     ) -> None:
         from simulator.auto_flight import auto_flight_enabled
 
-        if auto_flight_enabled():
+        # Quiet modes: overnight auto, or tools that set data["_quiet_vision"]
+        # (fly-policy / fly2) so Race/arm prompts stay readable.
+        if auto_flight_enabled() or self.data.get("_quiet_vision"):
             if detected and not self._gate_was_detected:
                 print("[vision] GATE acquired", flush=True)
             elif not detected and self._gate_was_detected:
