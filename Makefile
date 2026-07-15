@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim manual view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
 
 i install:
 	uv sync
@@ -19,10 +19,14 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_manual_control -v
 
 sim:
 	uv run main.py
+
+# Manual keyboard flight — WASD move, Q/E turn, R/F up/down, C level, L auto-land.
+manual:
+	uv run manual.py
 
 # Auto flight — continuous overnight retry; Ctrl+C stops
 auto:
