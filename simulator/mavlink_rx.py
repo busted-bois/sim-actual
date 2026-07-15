@@ -3,6 +3,8 @@ import struct
 import time
 import threading
 
+from pymavlink import mavutil
+
 from simulator.config import TrackGate
 from simulator.transforms import quat_to_yaw
 
@@ -20,7 +22,10 @@ def _gate_pose_valid(x, y, z, width, height) -> bool:
 
 
 def _auto_flight_debug() -> bool:
-    return os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower() in _AUTO_FLIGHT_DEBUG_VALUES
+    return (
+        os.environ.get("AUTO_FLIGHT_DEBUG", "").strip().lower()
+        in _AUTO_FLIGHT_DEBUG_VALUES
+    )
 
 
 class MAVLinkRX:
@@ -133,6 +138,8 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
+        if msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+            return
         self.data["armed"] = bool(msg.base_mode & 0b10000000)
 
     def on_timesync(self, msg):
@@ -154,6 +161,14 @@ class MAVLinkRX:
     def on_local_position_ned(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
         self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
+        self.data["local_position_ned"] = {
+            "x": msg.x,
+            "y": msg.y,
+            "z": msg.z,
+            "vx": msg.vx,
+            "vy": msg.vy,
+            "vz": msg.vz,
+        }
         self.data["pos_time_ms"] = msg.time_boot_ms
         self.data["has_position"] = True
 

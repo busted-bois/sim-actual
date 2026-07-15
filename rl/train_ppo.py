@@ -26,6 +26,7 @@ from rl.env import CURRICULUM, GateRacingEnv
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 ZIP_PATH = os.path.join(DATA_DIR, "policy_ppo.zip")
 POLICY_PT = os.path.join(DATA_DIR, "policy.pt")
+POLICY_BC_PT = os.path.join(DATA_DIR, "policy_bc.pt")
 
 NET_ARCH = [64, 64, 64]  # 3x64 MLP (shared depth for pi and vf)
 
@@ -87,7 +88,19 @@ def _verify_export(model, std, n=64):
     return err
 
 
-def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0):
+def load_bc_init(model: PPO, path: str) -> None:
+    """Warm-start the PPO actor from a BC-pretrained StandalonePolicy."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    assert ckpt.get("arch") == NET_ARCH, f"BC arch {ckpt.get('arch')} != {NET_ARCH}"
+    std = StandalonePolicy()
+    std.load_state_dict(ckpt["state_dict"])
+    # Inverse of export_policy: our body + head -> SB3 policy_net + action_net.
+    model.policy.mlp_extractor.policy_net.load_state_dict(std.body.state_dict())
+    model.policy.action_net.load_state_dict(std.head.state_dict())
+    print(f"[ppo] warm-started actor from BC weights {path}", flush=True)
+
+
+def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0, bc_init=None):
     os.makedirs(DATA_DIR, exist_ok=True)
     if quick:
         total_per_stage, n_envs = 4000, 4
@@ -110,6 +123,11 @@ def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0):
         seed=seed,
         device="cpu",
     )
+
+    if bc_init is None and os.path.exists(POLICY_BC_PT):
+        bc_init = POLICY_BC_PT  # make train-bc output found -> warm start
+    if bc_init:
+        load_bc_init(model, bc_init)
 
     for stage in range(len(CURRICULUM)):
         model.set_env(_vec_env(stage, n_envs, seed + 1000 * stage))
@@ -158,5 +176,16 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=300_000, help="steps per stage")
     ap.add_argument("--envs", type=int, default=8)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument(
+        "--bc-init",
+        default=None,
+        help="BC checkpoint to warm-start the actor (default: "
+        "rl/data/policy_bc.pt when it exists)",
+    )
     args = ap.parse_args()
-    train(total_per_stage=args.steps, n_envs=args.envs, quick=args.quick)
+    train(
+        total_per_stage=args.steps,
+        n_envs=args.envs,
+        quick=args.quick,
+        bc_init=args.bc_init,
+    )

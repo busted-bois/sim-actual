@@ -13,6 +13,7 @@ from enum import Enum, auto
 
 import numpy as np
 
+from rl import spec
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
     VisionVelocityTracker,
@@ -20,7 +21,9 @@ from simulator.gp_vision import (
     vision_gate_estimate,
 )
 
-HOVER_THRUST = 0.264
+# Single hover source (flightlab/calibration.json else ~0.27; Anduril's own
+# measured trim was 0.264).
+HOVER_THRUST = spec.HOVER_THRUST
 DESIRED_PITCH_DEG = -3.0
 K_BEARING = 4.5
 K_LAT_D = 9.0

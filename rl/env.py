@@ -23,12 +23,14 @@ import numpy as np
 from gymnasium import spaces
 
 from rl import spec
+from rl.calibration import load_calibration
 from rl.observation import build_observation
 
-# Reduced quadrotor parameters.
+# Reduced quadrotor parameters — measured overrides when calibration exists.
+_CAL = load_calibration()
 MASS = 1.0
-THRUST_ACCEL = spec.GRAVITY / spec.HOVER_THRUST  # thrust=0.5 -> hover
-RATE_TAU = 0.05  # body-rate first-order lag (s)
+THRUST_ACCEL = float(_CAL.get("thrust_accel", spec.GRAVITY / spec.HOVER_THRUST))
+RATE_TAU = float(_CAL.get("rate_tau_s", 0.05))  # body-rate first-order lag (s)
 DRAG = 0.1
 SIM_DT = 1 / 100.0
 DECISION_HZ = 50
@@ -290,6 +292,26 @@ def _selftest():
             f"gate-crossings over {trials} episodes"
         )
         assert passes >= trials, f"expert should clear stage {stage} gates"
+
+    # GP (AndurilGP guidance) expert should clear stage 0 like the geometric one.
+    from rl.gp_expert import GPExpert
+
+    gp = GPExpert()
+    gp_passes = 0
+    trials = 6
+    for trial in range(trials):
+        e = GateRacingEnv(stage=0, seed=200 + trial)
+        e.reset()
+        gp.reset()
+        term = trunc = False
+        while not (term or trunc):
+            a = gp.act(e.p, e.v, e.q, e.gate_map, e.gate_idx)
+            _, _, term, trunc, info = e.step(a)
+            if info.get("gate_passed"):
+                gp_passes += 1
+                break
+    print(f"[selftest] GP expert passed {gp_passes}/{trials} stage-0 gates")
+    assert gp_passes >= trials - 1, "GP expert should clear nearly all stage-0 gates"
     print("[selftest] OK — env steps, rewards, gate-pass + 3-stage curriculum wired")
 
 

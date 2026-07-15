@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto auto-gp free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline -v
 
 sim:
 	uv run main.py
@@ -84,6 +84,12 @@ hover:
 dynamics:
 	uv run -m rl.dynamics_id
 
+# Attitude inner-loop harness (Spec B). Writes flightlab/calibration.json +
+# signs.json consumed by rl/spec, rl/env, and the GP expert. Sim must be in
+# a TRAINING session.
+attitude-harness:
+	uv run python -m flightlab.run_attitude
+
 # --- RL pipeline (Modules 1-8) ------------------------------------------------
 # Module 1: connect to live sim, dump telemetry snapshot + gate map.
 capture:
@@ -96,6 +102,16 @@ dataset:
 # Module 3: train GateNet U-Net -> rl/data/gatenet.pt
 train-gatenet:
 	uv run -m rl.gatenet
+
+# GP expert demos: AndurilGP guidance rollouts in the internal env
+# -> rl/data/gp_demos.npz (offline, no live sim).
+log-demos:
+	uv run -m rl.log_demos
+
+# BC pretrain on GP demos -> rl/data/policy_bc.pt (train-ppo warm-starts
+# from it automatically when present).
+train-bc:
+	uv run -m rl.train_bc
 
 # Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
 train-ppo:
