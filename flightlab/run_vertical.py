@@ -47,6 +47,7 @@ class TickLog:
     zhat: float
     vzhat: float
     vz_cmd: float
+    tilt_comp: float
     baro_ok: bool
     roll: float
     pitch: float
@@ -134,6 +135,7 @@ def _run_loop(
                 zhat=s.zhat,
                 vzhat=s.vzhat,
                 vz_cmd=float(getattr(ctrl, "last_vz_cmd", 0.0)),
+                tilt_comp=float(getattr(ctrl, "last_tilt_comp", 1.0)),
                 baro_ok=s.baro_ok,
                 roll=s.roll,
                 pitch=s.pitch,
@@ -540,7 +542,7 @@ def test_v4(
 def test_tilt_check(
     bus: Bus, ctrl: Controller, safety: SafetyMonitor, log: list[TickLog]
 ) -> TestResult:
-    """Scripted 8° lean hold — alt sag < 0.3 m (for pid_tilt methods)."""
+    """Scripted 8° lean hold — alt sag < 0.3 m (baro_hold / pid_tilt)."""
     name = "TILT"
     if not _prep(bus, ctrl, safety):
         return TestResult(name, False, "arm_failed")
@@ -694,7 +696,9 @@ def main(argv: list[str] | None = None) -> int:
         to_run = [key]
     else:
         to_run = ["V1", "V2", "V3", "V4"]
-        if args.method.startswith("pid_tilt") and not args.skip_tilt:
+        if not args.skip_tilt and (
+            args.method.startswith("pid_tilt") or args.method == "baro_hold"
+        ):
             to_run.append("TILT")
 
     results: list[TestResult] = []
