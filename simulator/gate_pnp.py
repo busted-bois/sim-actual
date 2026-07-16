@@ -50,8 +50,17 @@ _GATE_PTS_3D = np.array(
     dtype=np.float32,
 )
 
+# Inner-opening corners ordered [TL, TR, BR, BL] as they appear in the IMAGE
+# for a front-facing gate (camera +x right, +y down): used by the CV-refined
+# 4-corner path, no YOLO slot/label ambiguity involved.
+_INNER_CORNERS_3D = np.array(
+    [[-_hi, -_hi, 0], [_hi, -_hi, 0], [_hi, _hi, 0], [-_hi, _hi, 0]],
+    dtype=np.float32,
+)
+
 KEYPOINT_CONF_THRESHOLD = 0.7
 EDGE_MARGIN_PX = 1  # corners pinned to the image border are clip artifacts
+MAX_REPROJ_PX = 10.0  # RMS reprojection above this = bad correspondence/depth
 
 # --- camera optical -> body FRD, with 20deg up-tilt (spec 3.8) ---------------
 CAM_TILT_DEG = 20.0
@@ -85,16 +94,10 @@ def _reproj_rms(obj, img, rvec, tvec):
     return float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - img) ** 2, axis=1))))
 
 
-def estimate_pose(keypoints, confs):
-    """Planar PnP via IPPE (two-fold ambiguous -> pick lower reproj error),
-    then one LM polish. Needs >=4 confident, non-edge corners. -> pose dict."""
-    kp = np.asarray(keypoints, np.float64)
-    confs = np.asarray(confs, np.float64)
-    vis = _visible_mask(kp, confs)
-    if vis.sum() < 4:
-        return None
-
-    obj, img = _GATE_PTS_3D[vis], kp[vis]
+def _solve_ippe(obj, img):
+    """IPPE (two-fold ambiguous -> pick lower reproj error) + one LM polish.
+    Rejects solutions with RMS reprojection above MAX_REPROJ_PX.
+    -> (rvec, tvec, reproj_px) | None."""
     n, rvecs, tvecs, _ = cv2.solvePnPGeneric(
         obj, img, _K, _DIST, flags=cv2.SOLVEPNP_IPPE
     )
@@ -102,12 +105,31 @@ def estimate_pose(keypoints, confs):
         return None
     best = min(range(n), key=lambda i: _reproj_rms(obj, img, rvecs[i], tvecs[i]))
     rvec, tvec = cv2.solvePnPRefineLM(obj, img, _K, _DIST, rvecs[best], tvecs[best])
+    reproj = _reproj_rms(obj, img, rvec, tvec)
+    if reproj > MAX_REPROJ_PX:
+        return None
+    return rvec, tvec, reproj
+
+
+def estimate_pose(keypoints, confs):
+    """Planar PnP on the YOLO keypoints. Needs >=4 confident, non-edge
+    corners. -> pose dict | None."""
+    kp = np.asarray(keypoints, np.float64)
+    confs = np.asarray(confs, np.float64)
+    vis = _visible_mask(kp, confs)
+    if vis.sum() < 4:
+        return None
+
+    solved = _solve_ippe(_GATE_PTS_3D[vis], kp[vis])
+    if solved is None:
+        return None
+    rvec, tvec, reproj = solved
     return {
         "rvec": rvec,
         "tvec": tvec,
-        "reproj_px": _reproj_rms(obj, img, rvec, tvec),
+        "reproj_px": reproj,
         "n_visible": int(vis.sum()),
-        "method": "ippe-mincost",
+        "method": "ippe-yolo8",
     }
 
 
@@ -129,9 +151,6 @@ def estimate_gate_pose(keypoints, confs, box=None):
     pose = estimate_pose(keypoints, confs)
     if pose is None:
         return None
-    depth = float(pose["tvec"].reshape(3)[2])
-    if depth <= 0:  # gate must be in front of the camera
-        return None
     kp = np.asarray(keypoints, np.float64)
     cf = np.asarray(confs, np.float64)
     inner = kp[:4]
@@ -144,6 +163,36 @@ def estimate_gate_pose(keypoints, confs, box=None):
     else:
         vis = _visible_mask(kp, cf)
         ctr = kp[vis].mean(axis=0) if vis.any() else kp.mean(axis=0)
+    return _finalize_pose(pose, ctr)
+
+
+def estimate_gate_pose_from_corners(corners):
+    """Full result from 4 CV-refined inner-opening corners [TL,TR,BR,BL]
+    (image order, see simulator/gate_corners_cv.py). Same dict as
+    estimate_gate_pose; method 'ippe-cv4'. -> dict | None."""
+    corners = np.asarray(corners, np.float64).reshape(4, 2)
+    if not np.all(np.isfinite(corners)):
+        return None
+    solved = _solve_ippe(_INNER_CORNERS_3D, corners)
+    if solved is None:
+        return None
+    rvec, tvec, reproj = solved
+    pose = {
+        "rvec": rvec,
+        "tvec": tvec,
+        "reproj_px": reproj,
+        "n_visible": 4,
+        "method": "ippe-cv4",
+    }
+    return _finalize_pose(pose, corners.mean(axis=0))
+
+
+def _finalize_pose(pose, ctr):
+    """PnP depth + centre pixel -> body-frame position, plane normal and
+    bearings (shared by the YOLO-keypoint and CV-corner paths)."""
+    depth = float(pose["tvec"].reshape(3)[2])
+    if depth <= 0:  # gate must be in front of the camera
+        return None
     x_cam = (ctr[0] - _K[0, 2]) / _K[0, 0] * depth
     y_cam = (ctr[1] - _K[1, 2]) / _K[1, 1] * depth
     gate_pos_cam = np.array([x_cam, y_cam, depth])

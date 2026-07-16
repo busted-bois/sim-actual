@@ -114,7 +114,7 @@ class GPExpert:
         )
         vision_vel = self.tracker.update(vision)
 
-        roll_r, pitch_r, yaw_r, thrust, _dbg = compute_guidance(
+        roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, _dbg = compute_guidance(
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
             quat=q,
@@ -123,8 +123,15 @@ class GPExpert:
             vision=vision,
             vision_vel=vision_vel,
             state=self.hold,
+            hover_thrust=spec.HOVER_THRUST,  # env plant hovers at spec value
         )
-        # compute_guidance emits the live sim's inverted roll/yaw rate signs
+        # The live pilot ships these degree commands on the attitude-quat
+        # wire; the internal env is a rate plant, so interpret deg -> rad/s
+        # here (the exact conversion the old rate-port applied).
+        roll_r = math.radians(roll_cmd_deg)
+        pitch_r = math.radians(pitch_cmd_deg)
+        yaw_r = math.radians(yaw_cmd_deg)
+        # compute_guidance emits the live sim's inverted roll/yaw signs
         # (gp_pilot KR = KY = -1, per measured signs.json). The internal env
         # integrates proper NED/FRD rates, so flip those two axes back.
         g = ATT_RATE_GAIN

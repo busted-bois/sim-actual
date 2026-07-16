@@ -84,7 +84,18 @@ def collect(episodes_per_stage: int = EPISODES_PER_STAGE, seed: int = 0) -> dict
 
 def save(demos: dict, path: str = DEMOS_PATH) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez_compressed(path, obs=demos["obs"], act=demos["act"])
+    np.savez_compressed(
+        path,
+        obs=demos["obs"],
+        act=demos["act"],
+        # Plant stamp: actions/obs are normalized by these scales. rl.train_bc
+        # refuses demos from a different build so a caps change can't silently
+        # clone the wrong normalization into the BC policy.
+        action_scale=np.array(
+            [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE]
+        ),
+        hover_thrust=np.array(spec.HOVER_THRUST),
+    )
     print(
         f"[demos] saved {len(demos['obs'])} transitions -> {path}",
         flush=True,

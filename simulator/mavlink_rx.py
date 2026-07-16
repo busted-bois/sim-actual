@@ -40,6 +40,7 @@ class MAVLinkRX:
         self.expected_num_track_chunks = {}
         self._debug_last_race_log = 0.0
         self._debug_logged_track = False
+        self._last_recv_warn = 0.0
 
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data, estimator=None):
@@ -60,11 +61,21 @@ class MAVLinkRX:
         while self.is_running:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
-            except ConnectionResetError:
-                print(
-                    "WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port."
-                )
-                return
+            except OSError:
+                # Windows raises ConnectionResetError on UDP recv after an
+                # ICMP port-unreachable (sim closing/restarting); the link
+                # comes back when the sim does. Keep listening — a dead RX
+                # thread silently starves every consumer of telemetry.
+                now = time.monotonic()
+                if now - self._last_recv_warn >= 5.0:
+                    print(
+                        "WARNING: MAVLink recv error (sim restarting?); "
+                        "still listening...",
+                        flush=True,
+                    )
+                    self._last_recv_warn = now
+                time.sleep(0.05)
+                continue
 
             if msg is None:
                 time.sleep(0.001)

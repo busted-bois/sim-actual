@@ -1,6 +1,7 @@
 """Unit tests for AndurilGP controls port (AHRS, guidance, wiring)."""
 
 import math
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -200,9 +201,325 @@ class WiringTests(unittest.TestCase):
         pilot = GPPilot(ctrl, {"armed": False})
         self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
         pilot.tick()
-        args = ctrl.set_attitude_rates.call_args[0]
+        # Idle holds ride the same attitude-quat wire: level + zero thrust.
+        args = ctrl.set_attitude_quat_deg.call_args[0]
         self.assertEqual(args, (0.0, 0.0, 0.0, 0.0))
         pilot.shutdown()
+
+    def test_gp_selects_quat_wire_at_60hz(self):
+        from simulator.gp_pilot import GP_CONTROL_HZ, GPPilot
+
+        ctrl = MagicMock()
+        pilot = GPPilot(ctrl, {"armed": False})
+        # Original AndurilGP wire: attitude-quat encoding at 60 Hz.
+        ctrl.set_control_mode.assert_called_with("attitude_quat")
+        self.assertEqual(ctrl.control_hz, GP_CONTROL_HZ)
+        self.assertEqual(GP_CONTROL_HZ, 60)
+        pilot.shutdown()
+
+    def test_attitude_quat_wire_format(self):
+        from simulator.controller import ATT_QUAT_TYPE_MASK, _send_attitude_quat
+
+        conn = MagicMock()
+        conn.target_system = 1
+        conn.target_component = 1
+        _send_attitude_quat(
+            conn, 0, roll_deg=10.0, pitch_deg=-5.0, yaw_deg=3.0, thrust=0.3
+        )
+        args = conn.mav.set_attitude_target_send.call_args[0]
+        # (time, sys, comp, mask, q, roll_rate, pitch_rate, yaw_rate, thrust)
+        self.assertEqual(args[3], 0b00000111)  # ignore rates, USE attitude
+        self.assertEqual(ATT_QUAT_TYPE_MASK, 0b00000111)
+        expected_q = euler_to_quat(
+            math.radians(10.0), math.radians(-5.0), math.radians(3.0)
+        )
+        np.testing.assert_allclose(args[4], expected_q, atol=1e-12)
+        self.assertEqual(args[5:8], (0.0, 0.0, 0.0))  # body rates zeroed
+        self.assertEqual(args[8], 0.3)
+
+
+class GpRaceGateTests(unittest.TestCase):
+    """WAIT_FOR_START must fly fresh countdowns AND recover stale/reset races."""
+
+    def _pilot(self):
+        from simulator.gp_pilot import GPPilot
+
+        ctrl = MagicMock()
+        data = {"armed": True, "imu": {"time_us": 1}}
+        pilot = GPPilot(ctrl, data)
+        pilot._open_log = lambda: None  # keep unit tests out of rl/data
+        return ctrl, data, pilot
+
+    def test_flying_sends_degree_commands_on_quat_wire(self):
+        from simulator.gp_pilot import DESIRED_PITCH_DEG, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 1000,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 5000,
+                "race_start_boot_time_ms": 4000,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            pilot.tick()  # one FLYING tick, no vision: pitch-trim + hover-ish
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = ctrl.set_attitude_quat_deg.call_args[
+                0
+            ]
+            # Estimator seeded at the -17.8 deg ramp; desired -3 deg, KP=+1:
+            # the command is DEGREES (+14.8), not the rad/s 0.26 of the old
+            # rate wire — the unit reinterpretation that caused launch flips.
+            self.assertAlmostEqual(pitch_cmd, DESIRED_PITCH_DEG - (-17.8), delta=0.5)
+            self.assertGreater(abs(pitch_cmd), 5.0)  # clearly degrees
+            self.assertAlmostEqual(roll_cmd, 0.0, delta=0.5)
+            self.assertGreater(thrust, 0.2)
+            self.assertLess(thrust, 0.4)
+        finally:
+            pilot.shutdown()
+
+    def test_fresh_race_go_flies(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()  # armed + IMU -> WAIT_FOR_START
+            data["race_status"] = {
+                "sim_boot_time_ms": 1000,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()  # anchor at 1000
+            data["race_status"] = {
+                "sim_boot_time_ms": 5000,
+                "race_start_boot_time_ms": 4000,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            ctrl.send_sim_reset_command.assert_not_called()
+        finally:
+            pilot.shutdown()
+
+    def test_already_running_race_flies_immediately(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            # Race started 3.3 s after sim boot; client launched 7 min later.
+            # The sim ignores MAVLink resets, so the pilot must fly this race.
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 3307,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            ctrl.send_sim_reset_command.assert_not_called()
+        finally:
+            pilot.shutdown()
+
+    def test_sim_clock_reset_reanchors_then_flies_new_countdown(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()  # anchored high, no race yet
+            # User clicks Restart Race: sim clock rewinds. Must re-arm +
+            # re-anchor, not stay gated off by the stale 433289 anchor.
+            data["race_status"] = {
+                "sim_boot_time_ms": 400,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
+            pilot.tick()  # armed + IMU -> back to WAIT_FOR_START
+            data["race_status"] = {
+                "sim_boot_time_ms": 900,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()  # fresh anchor at 900
+            data["race_status"] = {
+                "sim_boot_time_ms": 4000,
+                "race_start_boot_time_ms": 3500,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+        finally:
+            pilot.shutdown()
+
+    def test_frozen_imu_clock_notes_idle_physics_and_recovers(self):
+        import simulator.gp_pilot as gp
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 3307,
+                "race_finish_time_ns": -1,
+            }
+            pilot.tick()  # -> FLYING (clock live)
+            with patch.object(gp, "IMU_FROZEN_S", -1.0):
+                pilot.tick()  # same ts, past threshold -> idle note
+            self.assertTrue(pilot._frozen_noted)
+            data["imu"] = {"time_us": 2}  # clock moves: physics live again
+            pilot.tick()
+            self.assertFalse(pilot._frozen_noted)
+        finally:
+            pilot.shutdown()
+
+    def test_frozen_physics_blocks_flying_entry(self):
+        import simulator.gp_pilot as gp
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            with patch.object(gp, "IMU_FROZEN_S", -1.0):
+                pilot.tick()  # -> WAIT_FOR_START
+                # Running race but the sim's physics are idle (frozen IMU
+                # clock): flying now would command a clamped drone and tip
+                # it over at release. Must hold.
+                data["race_status"] = {
+                    "sim_boot_time_ms": 433289,
+                    "race_start_boot_time_ms": 3307,
+                    "race_finish_time_ns": -1,
+                }
+                pilot.tick()
+                pilot.tick()
+                self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            data["imu"] = {"time_us": 2}  # release: clock advances
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+        finally:
+            pilot.shutdown()
+
+    def test_disarm_blip_mid_flight_keeps_flying(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 3307,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            # One stale/blipped heartbeat must NOT zero-thrust + re-seed the
+            # estimator mid-air (the launch tip-over failure).
+            data["armed"] = False
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            data["armed"] = True
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            self.assertIsNone(pilot._disarm_since)
+        finally:
+            pilot.shutdown()
+
+    def test_persistent_disarm_mid_flight_recycles_to_arm_phase(self):
+        import simulator.gp_pilot as gp
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 3307,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            data["armed"] = False  # real sim reset: disarm persists
+            with patch.object(gp, "DISARM_PERSIST_S", 0.0):
+                pilot.tick()  # starts the confirmation window
+                pilot.tick()  # window elapsed -> recycle
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
+        finally:
+            pilot.shutdown()
+
+    def test_finished_race_holds_and_instructs_restart(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            # Finished race: the sim parks the drone and ignores setpoints,
+            # so flying it would be a silent dead-stick. Hold and instruct.
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 3307,
+                "race_finish_time_ns": 120_000_000_000,
+            }
+            pilot.tick()
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            ctrl.send_sim_reset_command.assert_not_called()
+        finally:
+            pilot.shutdown()
+
+    def test_disarm_during_wait_returns_to_arm_phase(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            data["armed"] = False  # sim reset disarms the drone
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
+        finally:
+            pilot.shutdown()
+
+
+class EstimatorResilienceTests(unittest.TestCase):
+    def test_estimator_thread_survives_malformed_imu(self):
+        from simulator.gp_estimation import GPEstimation
+
+        def imu(t_us, gz=0.0):
+            return {
+                "gx": 0.0,
+                "gy": 0.0,
+                "gz": gz,
+                "ax": 0.0,
+                "ay": 0.0,
+                "az": -9.81,
+                "time_us": t_us,
+            }
+
+        data = {"imu": {"time_us": "garbage"}}  # int() raises ValueError
+        est = GPEstimation(data, launch_pitch_deg=0.0)
+        with patch("simulator.gp_estimation.traceback.print_exc") as pe:
+            est.start()
+            try:
+                time.sleep(0.1)  # loop must chew on the bad sample and live
+                self.assertTrue(est._thread.is_alive())
+                self.assertTrue(pe.called)
+
+                # Valid samples must then integrate normally: 0.5 rad/s yaw
+                # for 0.1 s (sign-negated) -> ~ -2.9 deg.
+                data["imu"] = imu(1_000_000)
+                time.sleep(0.05)
+                data["imu"] = imu(1_100_000, gz=0.5)
+                deadline = time.monotonic() + 2.0
+                yaw = 0.0
+                while time.monotonic() < deadline:
+                    yaw = est.snapshot()["att_deg"][2]
+                    if abs(yaw) > 0.5:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(est._thread.is_alive())
+                self.assertGreater(abs(yaw), 0.5)
+            finally:
+                est.stop()
 
 
 if __name__ == "__main__":

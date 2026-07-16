@@ -29,14 +29,17 @@ from rl import spec
 from rl.ekf import ESKF
 from rl.env import GateRacingEnv
 from rl.fly2_course import HOVER_T as LIVE_HOVER_THRUST
-from rl.observation import build_observation
+from rl.observation import RATE_SCALE, build_observation
 from rl.train_ppo import POLICY_PT, StandalonePolicy
 
-# Training plant (rl/env) uses HOVER≈0.5 and rate caps of 4 rad/s. The live
-# FlightSim plant hovers at ~0.27 and becomes unstable well below those rates
-# (fly2 clips at 0.30). Remap scaled policy actions before MAVLink send.
-TRAIN_HOVER_THRUST = 0.5
-LIVE_RATE_CLIP = 0.60  # rad/s — above fly2's 0.30 so policy can bank, below 4
+# The live FlightSim plant hovers at ~0.27 and becomes unstable well below the
+# training rate caps (fly2 clips at 0.30). Checkpoints carry the plant they
+# were trained against ("train_hover_thrust" + "action_scale"); legacy
+# checkpoints without that metadata predate the calibrated-hover env and were
+# trained around a 0.5 hover with ±4/±4/±3 rad/s caps.
+LEGACY_TRAIN_HOVER = 0.5
+LEGACY_ACTION_SCALE = (4.0, 4.0, 3.0)
+LIVE_RATE_CLIP = 0.60  # rad/s — above fly2's 0.30 so policy can bank
 LIVE_THRUST_MIN = 0.12
 LIVE_THRUST_MAX = 0.55
 FLIP_RECOVERY_S = 2.0
@@ -44,6 +47,12 @@ TILT_FLIP_RAD = np.radians(70.0)
 
 
 def load_policy(path: str = POLICY_PT, device: str = "cpu"):
+    """Load policy.pt -> (act_fn, meta) where meta holds the training plant."""
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"[deploy] no policy at {path} — run `make train-ppo` "
+            "(or `uv run -m rl.train_ppo --quick` for a smoke checkpoint)"
+        )
     dev = torch.device(device)
     ckpt = torch.load(path, map_location=dev)
     net = StandalonePolicy(
@@ -55,30 +64,56 @@ def load_policy(path: str = POLICY_PT, device: str = "cpu"):
     net.to(dev)
     net.eval()
 
+    if "train_hover_thrust" not in ckpt or "action_scale" not in ckpt:
+        print(
+            "[deploy] WARNING: legacy checkpoint without training metadata — "
+            f"assuming hover={LEGACY_TRAIN_HOVER} rates ±{LEGACY_ACTION_SCALE}"
+            " rad/s (pre-calibration plant). Retrain to embed the real plant.",
+            flush=True,
+        )
+    meta = {
+        "train_hover": float(ckpt.get("train_hover_thrust", LEGACY_TRAIN_HOVER)),
+        "action_scale": tuple(
+            float(s) for s in ckpt.get("action_scale", LEGACY_ACTION_SCALE)
+        ),
+    }
+    if abs(meta["action_scale"][1] - RATE_SCALE) > 1e-9:
+        print(
+            "[deploy] WARNING: checkpoint pitch-rate scale "
+            f"{meta['action_scale'][1]:.2f} != current obs RATE_SCALE "
+            f"{RATE_SCALE:.2f} — the policy's observation normalization no "
+            "longer matches this build; retrain before trusting it.",
+            flush=True,
+        )
+
     @torch.no_grad()
     def act(obs: np.ndarray) -> np.ndarray:
         x = torch.from_numpy(np.asarray(obs, np.float32)[None]).to(dev)
         return np.clip(net(x)[0].cpu().numpy(), -1.0, 1.0)
 
-    return act
+    return act, meta
 
 
-def live_scale_action(a: np.ndarray) -> np.ndarray:
+def live_scale_action(a: np.ndarray, meta: dict) -> np.ndarray:
     """Map policy [-1,1]^4 onto live-sim rate/thrust limits.
 
-    Keeps the policy's signed deltas around hover, but recenters thrust on the
-    measured live hover (~0.27) and hard-clips rates so a train-env policy
-    cannot dump ±4 rad/s into FlightSim (the failure mode that flips the
+    Actions are interpreted with the CHECKPOINT's own training scales (rate
+    caps + hover thrust) rather than the current spec, then clipped to live
+    limits. The thrust remap anchors the checkpoint's hover on the measured
+    live hover (~0.27) with proportional residuals, so a legacy 0.5-hover
+    policy and a calibrated 0.27-hover policy both hold altitude, and neither
+    can dump ±4 rad/s into FlightSim (the failure mode that flips the
     airframe after arm / reset).
     """
-    roll, pitch, yaw, thrust_train = spec.scale_action(a)
-    roll = float(np.clip(roll, -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
-    pitch = float(np.clip(pitch, -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
-    yaw = float(np.clip(yaw, -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
-    # thrust_train≈0.5 → LIVE_HOVER; keep proportional residuals so climb/dive
-    # intents survive, but never near the train-env "double hover" of 0.5+.
-    thrust = LIVE_HOVER_THRUST + (float(thrust_train) - TRAIN_HOVER_THRUST) * (
-        LIVE_HOVER_THRUST / TRAIN_HOVER_THRUST
+    a = np.clip(np.asarray(a, np.float64), -1.0, 1.0)
+    scale = meta["action_scale"]
+    roll = float(np.clip(a[0] * scale[0], -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
+    pitch = float(np.clip(a[1] * scale[1], -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
+    yaw = float(np.clip(a[2] * scale[2], -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
+    thrust_train = (float(a[3]) + 1.0) * 0.5  # [-1,1] -> [0,1]
+    train_hover = meta["train_hover"]
+    thrust = LIVE_HOVER_THRUST + (thrust_train - train_hover) * (
+        LIVE_HOVER_THRUST / train_hover
     )
     thrust = float(np.clip(thrust, LIVE_THRUST_MIN, LIVE_THRUST_MAX))
     return np.array([roll, pitch, yaw, thrust], dtype=np.float64)
@@ -114,7 +149,7 @@ def _passed(p, prev_signed, g):
 
 class PolicyRunner:
     def __init__(self, policy_path: str = POLICY_PT):
-        self.act = load_policy(policy_path)
+        self.act, self.meta = load_policy(policy_path)
         self.ekf = ESKF()
         self.last_action = np.zeros(spec.ACTION_DIM)
         self.gate_idx = 0
@@ -164,7 +199,8 @@ class PolicyRunner:
         print(
             f"[deploy] live remap: hover={LIVE_HOVER_THRUST:.2f} "
             f"rate_clip=±{LIVE_RATE_CLIP:.2f} rad/s "
-            "(policy trained at hover=0.5 / ±4 rad/s)",
+            f"(ckpt trained at hover={self.meta['train_hover']:.2f} / "
+            f"±{max(self.meta['action_scale']):.1f} rad/s)",
             flush=True,
         )
 
@@ -274,7 +310,7 @@ class PolicyRunner:
             )
             action = self.act(obs)
             self.last_action = action
-            roll, pitch, yaw, thrust = live_scale_action(action)
+            roll, pitch, yaw, thrust = live_scale_action(action, self.meta)
             sim.send_attitude_rates(roll, pitch, yaw, thrust)
             time.sleep(1.0 / 100.0)
 
@@ -283,7 +319,19 @@ def _selftest():
     if not os.path.exists(POLICY_PT):
         print("[selftest] no policy.pt — run `uv run -m rl.train_ppo --quick` first")
         return
-    act = load_policy(POLICY_PT)
+    act, meta = load_policy(POLICY_PT)
+    # Remap invariants: the checkpoint's OWN hover action must land on the live
+    # hover thrust, and saturated actions must respect the live clips.
+    hover_a = np.array([0.0, 0.0, 0.0, 2.0 * meta["train_hover"] - 1.0])
+    cmd = live_scale_action(hover_a, meta)
+    assert abs(cmd[3] - LIVE_HOVER_THRUST) < 1e-6, cmd
+    sat = live_scale_action(np.ones(spec.ACTION_DIM), meta)
+    assert np.all(np.abs(sat[:3]) <= LIVE_RATE_CLIP + 1e-9), sat
+    assert sat[3] <= LIVE_THRUST_MAX + 1e-9, sat
+    print(
+        f"[selftest] remap OK: ckpt hover={meta['train_hover']:.2f} -> live "
+        f"{LIVE_HOVER_THRUST:.2f}, rates clipped at ±{LIVE_RATE_CLIP:.2f}"
+    )
     # Closed-loop on the internal env (deterministic policy) — verifies the full
     # obs->policy->action loop runs and the exported weights drive the sim model.
     for stage in (0, 2):

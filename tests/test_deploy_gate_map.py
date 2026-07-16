@@ -96,23 +96,91 @@ class QuietVisionTests(unittest.TestCase):
 
 
 class LiveRemapTests(unittest.TestCase):
-    def test_hover_action_maps_near_live_hover(self):
+    # Legacy = pre-calibration checkpoint (no metadata): hover 0.5, ±4/4/3.
+    # Calibrated = post-calibration checkpoint: hover 0.27, ±0.6 caps.
+    LEGACY = {"train_hover": 0.5, "action_scale": (4.0, 4.0, 3.0)}
+    CALIBRATED = {"train_hover": 0.27, "action_scale": (0.6, 0.6, 0.6)}
+
+    def test_legacy_hover_action_maps_to_live_hover(self):
         from rl.deploy import LIVE_HOVER_THRUST, LIVE_RATE_CLIP, live_scale_action
 
-        # Policy idle (all zeros) → train thrust 0.5 → live hover.
-        cmd = live_scale_action(np.zeros(4))
+        # Legacy policy idle (all zeros) → train thrust 0.5 → live hover.
+        cmd = live_scale_action(np.zeros(4), self.LEGACY)
         self.assertAlmostEqual(cmd[3], LIVE_HOVER_THRUST, places=5)
         self.assertTrue(np.all(np.abs(cmd[:3]) <= LIVE_RATE_CLIP + 1e-9))
+
+    def test_calibrated_hover_action_maps_to_live_hover(self):
+        from rl.deploy import LIVE_HOVER_THRUST, live_scale_action
+
+        # Calibrated policy hovers at its OWN train hover (0.27), i.e.
+        # a3 = 2*0.27-1 — this is the case the old 0.5-anchored remap sank.
+        a = np.array([0.0, 0.0, 0.0, 2.0 * 0.27 - 1.0])
+        cmd = live_scale_action(a, self.CALIBRATED)
+        self.assertAlmostEqual(cmd[3], LIVE_HOVER_THRUST, places=5)
+
+    def test_calibrated_thrust_is_identity_within_clips(self):
+        from rl.deploy import LIVE_THRUST_MAX, LIVE_THRUST_MIN, live_scale_action
+
+        # train hover == live hover → thrust passes through (then live clips).
+        for t in (0.05, 0.2, 0.27, 0.4, 0.8):
+            a = np.array([0.0, 0.0, 0.0, 2.0 * t - 1.0])
+            cmd = live_scale_action(a, self.CALIBRATED)
+            self.assertAlmostEqual(
+                cmd[3], float(np.clip(t, LIVE_THRUST_MIN, LIVE_THRUST_MAX)), places=6
+            )
+
+    def test_rates_use_ckpt_scale_then_live_clip(self):
+        from rl.deploy import LIVE_RATE_CLIP, live_scale_action
+
+        # Calibrated ckpt half-stick = 0.5*0.6 = 0.3 rad/s — inside the clip,
+        # must NOT be re-scaled by the current spec caps.
+        cmd = live_scale_action(np.array([0.5, -0.5, 0.5, 0.0]), self.CALIBRATED)
+        self.assertAlmostEqual(cmd[0], 0.30, places=6)
+        self.assertAlmostEqual(cmd[1], -0.30, places=6)
+        self.assertAlmostEqual(cmd[2], 0.30, places=6)
+        # Legacy ckpt half-stick = 2 rad/s → live clip.
+        cmd = live_scale_action(np.array([0.5, -0.5, 0.5, 0.0]), self.LEGACY)
+        self.assertAlmostEqual(cmd[0], LIVE_RATE_CLIP, places=6)
+        self.assertAlmostEqual(cmd[1], -LIVE_RATE_CLIP, places=6)
 
     def test_saturated_policy_cannot_command_4rad_or_full_thrust(self):
         from rl.deploy import LIVE_RATE_CLIP, LIVE_THRUST_MAX, live_scale_action
 
-        cmd = live_scale_action(np.ones(4))
-        self.assertLessEqual(abs(cmd[0]), LIVE_RATE_CLIP + 1e-9)
-        self.assertLessEqual(abs(cmd[1]), LIVE_RATE_CLIP + 1e-9)
-        self.assertLessEqual(abs(cmd[2]), LIVE_RATE_CLIP + 1e-9)
-        self.assertLessEqual(cmd[3], LIVE_THRUST_MAX + 1e-9)
-        self.assertLess(cmd[3], 0.9)  # must not dump train-env "1.0" thrust live
+        for meta in (self.LEGACY, self.CALIBRATED):
+            cmd = live_scale_action(np.ones(4), meta)
+            self.assertLessEqual(abs(cmd[0]), LIVE_RATE_CLIP + 1e-9)
+            self.assertLessEqual(abs(cmd[1]), LIVE_RATE_CLIP + 1e-9)
+            self.assertLessEqual(abs(cmd[2]), LIVE_RATE_CLIP + 1e-9)
+            self.assertLessEqual(cmd[3], LIVE_THRUST_MAX + 1e-9)
+            self.assertLess(cmd[3], 0.9)  # never train-env "1.0" thrust live
+
+    def test_legacy_checkpoint_loads_with_fallback_meta(self):
+        import torch
+
+        from rl.deploy import LEGACY_ACTION_SCALE, LEGACY_TRAIN_HOVER, load_policy
+        from rl.train_ppo import NET_ARCH, StandalonePolicy
+
+        std = StandalonePolicy()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "policy.pt")
+            torch.save(
+                {
+                    "state_dict": std.state_dict(),
+                    "arch": NET_ARCH,
+                },
+                path,
+            )
+            act, meta = load_policy(path)
+        self.assertEqual(meta["train_hover"], LEGACY_TRAIN_HOVER)
+        self.assertEqual(meta["action_scale"], tuple(LEGACY_ACTION_SCALE))
+
+    def test_missing_policy_exits_with_instructions(self):
+        from rl.deploy import load_policy
+
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as ctx:
+                load_policy(os.path.join(d, "nope.pt"))
+        self.assertIn("train-ppo", str(ctx.exception))
 
 
 if __name__ == "__main__":
