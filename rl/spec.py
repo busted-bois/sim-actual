@@ -66,9 +66,12 @@ GATE_CORNERS_LOCAL = np.array(
 # ----------------------------------------------------------------------------
 # Control / action space — attitude-rate + thrust.
 # ----------------------------------------------------------------------------
-MAX_ROLL_RATE = 4.0  # rad/s
-MAX_PITCH_RATE = 4.0
-MAX_YAW_RATE = 3.0
+# Match rl.deploy's LIVE_RATE_CLIP (±0.60 rad/s): the live FlightSim plant is
+# unstable well below the old ±4 caps, so training with them taught moves the
+# deploy clamp then cut off. Train inside the envelope the policy will fly in.
+MAX_ROLL_RATE = 0.6  # rad/s
+MAX_PITCH_RATE = 0.6
+MAX_YAW_RATE = 0.6
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
 # Measured by `make attitude-harness` (flightlab/calibration.json). Default is

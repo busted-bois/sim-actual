@@ -31,7 +31,22 @@ LR = 1e-3
 
 
 def load_demos(path: str = DEMOS_PATH) -> tuple[torch.Tensor, torch.Tensor]:
+    if not os.path.exists(path):
+        raise SystemExit(f"[bc] no demos at {path} — run `make log-demos` first")
     with np.load(path) as d:
+        cur = [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE]
+        stamped = "action_scale" in d.files and np.allclose(d["action_scale"], cur)
+        if stamped and "hover_thrust" in d.files:
+            stamped = np.allclose(d["hover_thrust"], spec.HOVER_THRUST)
+        if not stamped:
+            got = (
+                d["action_scale"].tolist() if "action_scale" in d.files else "unstamped"
+            )
+            raise SystemExit(
+                f"[bc] demos at {path} were logged under action scales {got}, "
+                f"but this build uses {cur} — re-run `make log-demos` (stale "
+                "demos would clone the wrong normalization into the policy)"
+            )
         obs = torch.from_numpy(d["obs"].astype(np.float32))
         act = torch.from_numpy(d["act"].astype(np.float32))
     assert obs.shape[1] == spec.OBS_DIM and act.shape[1] == spec.ACTION_DIM
@@ -78,6 +93,13 @@ def save_policy(policy: StandalonePolicy, out: str = POLICY_BC_PT) -> None:
             "arch": NET_ARCH,
             "obs_dim": spec.OBS_DIM,
             "act_dim": spec.ACTION_DIM,
+            # Same training-plant contract as rl.train_ppo.export_policy.
+            "train_hover_thrust": spec.HOVER_THRUST,
+            "action_scale": [
+                spec.MAX_ROLL_RATE,
+                spec.MAX_PITCH_RATE,
+                spec.MAX_YAW_RATE,
+            ],
         },
         out,
     )

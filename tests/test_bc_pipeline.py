@@ -37,6 +37,61 @@ class DemoLoggingTests(unittest.TestCase):
             with np.load(path) as loaded:
                 self.assertEqual(loaded["obs"].shape, (7, spec.OBS_DIM))
                 self.assertEqual(loaded["act"].shape, (7, spec.ACTION_DIM))
+                # Plant stamp checked by rl.train_bc.load_demos.
+                np.testing.assert_allclose(
+                    loaded["action_scale"],
+                    [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE],
+                )
+                np.testing.assert_allclose(loaded["hover_thrust"], spec.HOVER_THRUST)
+
+    def test_load_demos_roundtrips_current_stamp(self):
+        from rl.train_bc import load_demos
+
+        demos = {
+            "obs": np.zeros((5, spec.OBS_DIM), np.float32),
+            "act": np.zeros((5, spec.ACTION_DIM), np.float32),
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "gp_demos.npz")
+            save(demos, path)
+            obs, act = load_demos(path)
+        self.assertEqual(obs.shape, (5, spec.OBS_DIM))
+        self.assertEqual(act.shape, (5, spec.ACTION_DIM))
+
+    def test_load_demos_refuses_stale_or_unstamped(self):
+        from rl.train_bc import load_demos
+
+        with tempfile.TemporaryDirectory() as d:
+            # Unstamped (pre-caps-change) demo file.
+            path = os.path.join(d, "old.npz")
+            np.savez_compressed(
+                path,
+                obs=np.zeros((3, spec.OBS_DIM), np.float32),
+                act=np.zeros((3, spec.ACTION_DIM), np.float32),
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                load_demos(path)
+            self.assertIn("log-demos", str(ctx.exception))
+
+            # Stamped under different caps.
+            path2 = os.path.join(d, "stale.npz")
+            np.savez_compressed(
+                path2,
+                obs=np.zeros((3, spec.OBS_DIM), np.float32),
+                act=np.zeros((3, spec.ACTION_DIM), np.float32),
+                action_scale=np.array([4.0, 4.0, 3.0]),
+                hover_thrust=np.array(0.5),
+            )
+            with self.assertRaises(SystemExit):
+                load_demos(path2)
+
+    def test_load_demos_missing_file_points_at_make_target(self):
+        from rl.train_bc import load_demos
+
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as ctx:
+                load_demos(os.path.join(d, "nope.npz"))
+        self.assertIn("log-demos", str(ctx.exception))
 
 
 class BCTrainTests(unittest.TestCase):
@@ -59,6 +114,12 @@ class BCTrainTests(unittest.TestCase):
         self.assertEqual(ckpt["arch"], NET_ARCH)
         self.assertEqual(ckpt["obs_dim"], spec.OBS_DIM)
         self.assertEqual(ckpt["act_dim"], spec.ACTION_DIM)
+        # Training-plant contract consumed by rl.deploy.live_scale_action.
+        self.assertEqual(ckpt["train_hover_thrust"], spec.HOVER_THRUST)
+        self.assertEqual(
+            list(ckpt["action_scale"]),
+            [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE],
+        )
         std = StandalonePolicy()
         std.load_state_dict(ckpt["state_dict"])  # same schema as policy.pt
 
@@ -98,6 +159,19 @@ class PPOWarmStartTests(unittest.TestCase):
             bc_act = policy(torch.from_numpy(obs)).numpy()
         err = np.abs(np.clip(sb3_act, -1, 1) - np.clip(bc_act, -1, 1)).max()
         self.assertLess(err, 1e-5)
+
+        # PPO export carries the same training-plant metadata as BC.
+        from rl.train_ppo import export_policy
+
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "policy.pt")
+            export_policy(model, out)
+            ckpt = torch.load(out, map_location="cpu", weights_only=True)
+        self.assertEqual(ckpt["train_hover_thrust"], spec.HOVER_THRUST)
+        self.assertEqual(
+            list(ckpt["action_scale"]),
+            [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE],
+        )
 
 
 if __name__ == "__main__":

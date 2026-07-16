@@ -68,6 +68,15 @@ def export_policy(model: PPO, out: str = POLICY_PT):
             "arch": NET_ARCH,
             "obs_dim": spec.OBS_DIM,
             "act_dim": spec.ACTION_DIM,
+            # Training-plant contract: deploy must interpret [-1,1] actions
+            # with the scales the policy was trained against, not whatever
+            # spec says at load time.
+            "train_hover_thrust": spec.HOVER_THRUST,
+            "action_scale": [
+                spec.MAX_ROLL_RATE,
+                spec.MAX_PITCH_RATE,
+                spec.MAX_YAW_RATE,
+            ],
         },
         out,
     )

@@ -6,6 +6,7 @@ Action space matches rl/spec.py for later expert / RL merge.
 
 from __future__ import annotations
 
+import csv
 import math
 import os
 import time
@@ -13,7 +14,6 @@ from enum import Enum, auto
 
 import numpy as np
 
-from rl import spec
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
     VisionVelocityTracker,
@@ -21,9 +21,12 @@ from simulator.gp_vision import (
     vision_gate_estimate,
 )
 
-# Single hover source (flightlab/calibration.json else ~0.27; Anduril's own
-# measured trim was 0.264).
-HOVER_THRUST = spec.HOVER_THRUST
+# Anduril's own measured trim, byte-faithful to the original that flew the
+# course (their controller.py hardcoded 0.264). The RL stack keeps using
+# spec.HOVER_THRUST — rl.gp_expert passes its own hover_thrust in.
+HOVER_THRUST = 0.264
+# Original AndurilGP command rate (2:1 with the 30 Hz camera; spec cap 100).
+GP_CONTROL_HZ = 60
 DESIRED_PITCH_DEG = -3.0
 K_BEARING = 4.5
 K_LAT_D = 9.0
@@ -40,6 +43,9 @@ OF_ALPHA = 0.6
 KP, KR, KY = 1.0, -1.0, -1.0
 DEBUG_EVERY_N = 45  # ~2 Hz at 90 Hz
 ARM_RETRY_S = 1.0
+CLOCK_RESET_SLACK_MS = 500
+IMU_FROZEN_S = 2.0  # sensor clock stuck this long => sim physics is idle
+DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips mid-flight
 
 
 class Phase(Enum):
@@ -58,8 +64,15 @@ def compute_guidance(
     vision: dict | None,
     vision_vel: dict | None,
     state: dict,
+    hover_thrust: float = HOVER_THRUST,
 ) -> tuple[float, float, float, float, dict]:
-    """Anduril FLYING guidance. Mutates `state`. Returns rates (rad/s) + thrust."""
+    """Anduril FLYING guidance. Mutates `state`.
+
+    Returns DEGREE-valued commands (roll, pitch, yaw) + thrust, exactly like
+    the original — the live pilot ships them on the attitude-quaternion wire
+    (Controller "attitude_quat" mode); rl.gp_expert converts to rad/s for the
+    internal rate-plant env.
+    """
     vision_valid = False
     bx = by = bz = float("nan")
     vis_frame_id = None
@@ -192,13 +205,8 @@ def compute_guidance(
         math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
     )
     elev_err = float(state.get("last_elev_err", 0.0))
-    thrust = (HOVER_THRUST - elev_err * K_P_THRUST + d_vert * K_D_THRUST) / tilt
+    thrust = (hover_thrust - elev_err * K_P_THRUST + d_vert * K_D_THRUST) / tilt
     thrust = float(np.clip(thrust, 0.0, 1.0))
-
-    # Anduril encoded deg commands via quat→sim quirk; we send true rad/s.
-    roll_rate = math.radians(roll_cmd_deg)
-    pitch_rate = math.radians(pitch_cmd_deg)
-    yaw_rate = math.radians(yaw_cmd_deg)
 
     dbg = {
         "bearing_deg": bearing_body,
@@ -212,7 +220,7 @@ def compute_guidance(
         "by": by,
         "bz": bz,
     }
-    return roll_rate, pitch_rate, yaw_rate, thrust, dbg
+    return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
 
 def _fresh_hold_state() -> dict:
@@ -247,9 +255,20 @@ class GPPilot:
         self._est_started = False
         self._last_arm_attempt = 0.0
         self._wait_start_sim_ms = None
+        self._finish_noted = False
+        self._imu_ts_seen = None
+        self._imu_ts_wall = 0.0
+        self._frozen_noted = False
+        self._disarm_since = None
+        self._log = None
+        self._log_wr = None
+        self._log_last_flush = 0.0
         self._debug = os.environ.get("GP_DEBUG", "").strip() in ("1", "true", "yes")
-        controller.set_control_mode("attitude")
-        controller.set_attitude_rates(0.0, 0.0, 0.0, 0.0)
+        # Original AndurilGP wire behavior: degree commands on the attitude
+        # quaternion at 60 Hz (the encoding that flew the course).
+        controller.control_hz = GP_CONTROL_HZ
+        controller.set_control_mode("attitude_quat")
+        controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
         print("[gp] AndurilGP controls pilot ready (make auto-gp)", flush=True)
 
     @property
@@ -261,8 +280,8 @@ class GPPilot:
 
     def reset_for_attempt(self) -> None:
         self._reset_state()
-        self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0.0, 0.0, 0.0, 0.0)
+        self.controller.set_control_mode("attitude_quat")
+        self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
 
     def _reset_state(self) -> None:
         self.n_passed = 0
@@ -273,15 +292,95 @@ class GPPilot:
         self._tick = 0
         self._last_arm_attempt = 0.0
         self._wait_start_sim_ms = None
+        self._finish_noted = False
+        self._imu_ts_seen = None
+        self._imu_ts_wall = 0.0
+        self._frozen_noted = False
+        self._disarm_since = None
+        self._close_log()
+
+    def _open_log(self) -> None:
+        self._close_log()
+        try:
+            os.makedirs(os.path.join("rl", "data"), exist_ok=True)
+            path = os.path.join("rl", "data", time.strftime("gp_log_%Y%m%d_%H%M%S.csv"))
+            self._log = open(path, "w", newline="")
+            self._log_wr = csv.writer(self._log)
+            self._log_wr.writerow(
+                "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
+                "thrust bx by bz blend d_lat d_vert vY vD".split()
+            )
+            print(f"[gp] flight log -> {path}", flush=True)
+        except OSError as e:  # telemetry must never ground the pilot
+            print(f"[gp] flight log unavailable: {e}", flush=True)
+            self._log, self._log_wr = None, None
+
+    def _close_log(self) -> None:
+        if self._log is not None:
+            try:
+                self._log.close()
+            except OSError:
+                pass
+        self._log, self._log_wr = None, None
+
+    def _log_tick(self, att, cmds, thrust, vY, vD, dbg) -> None:
+        if self._log_wr is None:
+            return
+        try:
+            now = time.time()
+            self._log_wr.writerow(
+                [f"{now:.3f}"]
+                + [f"{v:.3f}" for v in att]
+                + [f"{v:.3f}" for v in cmds]
+                + [f"{thrust:.4f}"]
+                + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
+                + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
+                + [f"{vY:.3f}", f"{vD:.3f}"]
+            )
+            if now - self._log_last_flush >= 1.0:
+                self._log.flush()
+                self._log_last_flush = now
+        except (OSError, ValueError, KeyError):
+            self._close_log()
+
+    def _physics_live(self, imu) -> bool:
+        """Track the IMU sensor clock; frozen clock = sim idled the physics.
+
+        Observed on stale races and countdown holds: telemetry keeps
+        streaming and arm is acknowledged, but the HIGHRES_IMU timestamp
+        stops advancing and attitude setpoints do nothing. Flying commands
+        into that state and being released mid-command is what tips the
+        drone over at launch — so FLYING waits for a live clock.
+        """
+        now = time.time()
+        if imu is not None:
+            ts = imu.get("time_us") or imu.get("time_usec")
+            if ts != self._imu_ts_seen:
+                self._imu_ts_seen = ts
+                self._imu_ts_wall = now
+                if self._frozen_noted:
+                    print("[gp] IMU clock moving again — physics live.", flush=True)
+                    self._frozen_noted = False
+        live = self._imu_ts_wall > 0.0 and now - self._imu_ts_wall <= IMU_FROZEN_S
+        if not live and self._imu_ts_wall > 0.0 and not self._frozen_noted:
+            print(
+                "[gp] Sim physics is IDLE (IMU clock frozen) — the drone "
+                "will not respond. Click Restart Race in FlightSim; this "
+                "client re-arms and flies the new countdown automatically.",
+                flush=True,
+            )
+            self._frozen_noted = True
+        return live
 
     def tick(self) -> None:
         self._tick += 1
         armed = bool(self.data.get("armed", False))
         imu = self.data.get("imu")
         race = self.data.get("race_status")
+        physics_live = self._physics_live(imu)
 
         if self.phase == Phase.WAIT_FOR_DATA:
-            self.controller.set_attitude_rates(0.0, 0.0, 0.0, 0.0)
+            self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
             if not armed:
                 now = time.time()
                 if now - self._last_arm_attempt >= ARM_RETRY_S:
@@ -298,35 +397,95 @@ class GPPilot:
 
         if self.phase == Phase.WAIT_FOR_START:
             # Hold on pad — zero thrust until race GO (AndurilGP).
-            self.controller.set_attitude_rates(0.0, 0.0, 0.0, 0.0)
+            self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
+            if not armed:
+                # A sim reset disarms the drone; go back and re-arm before
+                # the new countdown finishes, or GO would fly a dead stick.
+                self.phase = Phase.WAIT_FOR_DATA
+                return
             if race is not None:
                 sim_ms = int(race.get("sim_boot_time_ms", 0) or 0)
                 start_ms = int(race.get("race_start_boot_time_ms", -1) or -1)
                 if self._wait_start_sim_ms is None:
                     self._wait_start_sim_ms = sim_ms
                     print(f"[WAIT] Anchor set: sim_ms={sim_ms}", flush=True)
+                if sim_ms < self._wait_start_sim_ms - CLOCK_RESET_SLACK_MS:
+                    # Sim clock went backwards: the sim was reset (our request
+                    # below, or Restart Race in the UI). Restart the attempt so
+                    # WAIT_FOR_DATA re-arms and the anchor re-syncs to the new
+                    # clock epoch — the old anchor would gate GO off forever.
+                    print(
+                        f"[WAIT] Sim clock reset (sim_ms={sim_ms} < anchor="
+                        f"{self._wait_start_sim_ms}) — re-arming for the new race.",
+                        flush=True,
+                    )
+                    self._reset_state()
+                    return
+                finish_ns = int(race.get("race_finish_time_ns", -1) or -1)
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                go = race_fresh and sim_ms >= start_ms
+                # finish_ns >= 0 means the race is OVER — the sim parks the
+                # drone and ignores attitude setpoints until a new race.
+                race_running = start_ms > 0 and sim_ms >= start_ms and finish_ns < 0
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
-                        f"fresh={race_fresh} go={go}",
+                        f"finish_ns={finish_ns} fresh={race_fresh} "
+                        f"go={race_fresh and race_running}",
                         flush=True,
                     )
-                if go:
+                if race_fresh and race_running and physics_live:
                     print("Countdown complete! Flying!", flush=True)
                     self.phase = Phase.FLYING
+                elif race_running and physics_live:
+                    # Race began before this client launched. It can never
+                    # pass the freshness gate, and the sim ignores MAVLink
+                    # reset requests here — so fly the running race (same
+                    # any-time semantics as make fly / the IBVS pilot).
+                    print(
+                        f"[WAIT] Race already running (started {start_ms}ms, "
+                        "before this client) — flying it now. Restart Race "
+                        "in FlightSim any time for a fresh clock.",
+                        flush=True,
+                    )
+                    self.phase = Phase.FLYING
+                elif start_ms > 0 and finish_ns >= 0 and not self._finish_noted:
+                    # Finished race: controls are dead until a new race, and
+                    # the sim ignores MAVLink resets — needs the UI button.
+                    print(
+                        "[WAIT] Race is FINISHED — click Restart Race in "
+                        "FlightSim; this client will re-arm and fly the new "
+                        "countdown automatically.",
+                        flush=True,
+                    )
+                    self._finish_noted = True
             elif self._debug and self._tick % DEBUG_EVERY_N == 0:
                 print("[WAIT] No race_status yet — holding...", flush=True)
             return
 
         # FLYING — Anduril guidance
+        if not armed:
+            # Only a PERSISTENT disarm means the sim was reset (Restart Race
+            # in the UI). A single 1 Hz heartbeat blip must NOT trigger a
+            # mid-air reset (zero thrust + ramp-pitch re-seed = tip-over);
+            # keep flying the guidance through the confirmation window.
+            now = time.time()
+            if self._disarm_since is None:
+                self._disarm_since = now
+            elif now - self._disarm_since >= DISARM_PERSIST_S:
+                print("[gp] Disarmed (sim reset?) — re-arming.", flush=True)
+                self._reset_state()
+                return
+        else:
+            self._disarm_since = None
         if not self._est_started and imu is not None:
             self.est.start()
             self._est_started = True
 
+        if self._log is None:
+            self._open_log()
+
         snap = self.est.snapshot()
-        roll_deg, pitch_deg, _yaw_deg = snap["att_deg"]
+        roll_deg, pitch_deg, yaw_deg = snap["att_deg"]
         vY = float(snap["vel_body"][1])
         vD = float(snap["vel_ned"][2])
 
@@ -337,7 +496,7 @@ class GPPilot:
         if active > self.n_passed:
             self.n_passed = active
 
-        roll_r, pitch_r, yaw_r, thrust, dbg = compute_guidance(
+        roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
             quat=snap["quat"],
@@ -347,7 +506,16 @@ class GPPilot:
             vision_vel=vision_vel,
             state=self._hold,
         )
-        self.controller.set_attitude_rates(roll_r, pitch_r, yaw_r, thrust)
+        # Degree commands on the attitude-quaternion wire (original encoding).
+        self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
+        self._log_tick(
+            (roll_deg, pitch_deg, yaw_deg),
+            (roll_cmd, pitch_cmd, yaw_cmd),
+            thrust,
+            vY,
+            vD,
+            dbg,
+        )
 
         if self._debug and self._tick % DEBUG_EVERY_N == 0:
             print(
@@ -360,3 +528,4 @@ class GPPilot:
 
     def shutdown(self) -> None:
         self.est.stop()
+        self._close_log()

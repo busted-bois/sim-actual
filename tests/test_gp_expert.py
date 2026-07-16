@@ -10,7 +10,15 @@ from rl.gp_expert import GPExpert
 
 class UnscaleActionTests(unittest.TestCase):
     def test_roundtrip_within_limits(self):
-        phys = np.array([1.5, -2.0, 0.7, 0.27])
+        # Cap-relative so the test tracks the spec rate limits.
+        phys = np.array(
+            [
+                0.5 * spec.MAX_ROLL_RATE,
+                -0.9 * spec.MAX_PITCH_RATE,
+                0.3 * spec.MAX_YAW_RATE,
+                0.27,
+            ]
+        )
         back = spec.scale_action(spec.unscale_action(phys))
         np.testing.assert_allclose(back, phys, atol=1e-12)
 

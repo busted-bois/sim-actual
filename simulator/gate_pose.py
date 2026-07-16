@@ -19,14 +19,22 @@ import os
 import threading
 import time
 
+import cv2
+import numpy as np
 import torch
 from ultralytics import YOLO
 
-from simulator.gate_pnp import estimate_gate_pose
+from simulator.gate_corners_cv import find_gate_inner_corners
+from simulator.gate_pnp import estimate_gate_pose, estimate_gate_pose_from_corners
 
 _WEIGHTS = os.path.join(os.path.dirname(__file__), "models", "gate_pose.pt")
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _IMGSZ = 640
+
+# CV corner refine on the best YOLO hit (default ON): contour-accurate inner
+# corners fix long-range PnP depth, where raw keypoint error dominates.
+_CV_REFINE = os.environ.get("GATE_CV_REFINE", "1").lower() not in ("0", "false", "no")
+_CV_BOX_MARGIN = 0.2  # CV quad centre must sit inside the YOLO box +20%
 
 _model = None
 
@@ -78,7 +86,30 @@ def detect(img):
                 "pose": pose,
             }
         )
-    return gates, res.plot(line_width=2)
+    annotated = res.plot(line_width=2)
+    if _CV_REFINE and gates:
+        _cv_refine_best(img, gates, annotated)
+    return gates, annotated
+
+
+def _cv_refine_best(img, gates, annotated):
+    """Replace the best-conf gate's pose with a CV-corner PnP solve when the
+    contour extractor finds the inner opening inside that gate's YOLO box."""
+    best = max(gates, key=lambda g: g["conf"])
+    corners = find_gate_inner_corners(img)
+    if corners is None:
+        return
+    ctr = corners.mean(axis=0)
+    b = np.asarray(best["box"], np.float64).reshape(-1)
+    mx = (b[2] - b[0]) * _CV_BOX_MARGIN
+    my = (b[3] - b[1]) * _CV_BOX_MARGIN
+    if not (b[0] - mx <= ctr[0] <= b[2] + mx and b[1] - my <= ctr[1] <= b[3] + my):
+        return  # CV found a different gate than YOLO's best -- don't mix
+    pose = estimate_gate_pose_from_corners(corners)
+    if pose is None:
+        return  # keep the YOLO-keypoint pose
+    best["pose"] = pose
+    cv2.polylines(annotated, [corners.astype(np.int32)], True, (0, 255, 0), 2)
 
 
 class GatePoseRunner:

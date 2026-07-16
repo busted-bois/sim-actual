@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+import traceback
 from collections import deque
 
 import numpy as np
@@ -77,16 +78,22 @@ class GPEstimation:
 
     def _loop(self) -> None:
         interval = 1.0 / ESTIMATION_POLL_HZ
+        last_tb = 0.0
         while self._running:
-            data_lock = self.data.get("lock")
-            imu = None
-            if data_lock is not None:
-                with data_lock:
-                    imu = self.data.get("imu")
-            else:
-                imu = self.data.get("imu")
+            # RX swaps in a fresh imu dict per message (atomic ref under the
+            # GIL), so reading it needs no lock.
+            imu = self.data.get("imu")
             if imu is not None:
-                self._process_imu(imu)
+                try:
+                    self._process_imu(imu)
+                except Exception:
+                    # One malformed IMU sample must not kill this thread —
+                    # snapshot() would silently freeze at the last value and
+                    # the pilot would fly a stale attitude.
+                    now = time.monotonic()
+                    if now - last_tb >= 5.0:
+                        traceback.print_exc()
+                        last_tb = now
             time.sleep(interval)
 
     def _process_imu(self, imu: dict) -> None:

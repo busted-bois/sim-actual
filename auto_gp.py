@@ -6,6 +6,7 @@
 import os
 import sys
 import time
+import traceback
 
 # Select GP pilot before Controller is constructed (via setup → main path).
 os.environ["AUTO_PILOT"] = "gp"
@@ -35,9 +36,19 @@ print("Arming drone...", flush=True)
 controller.arm()
 
 print("Starting control loop...", flush=True)
+_last_tb = 0.0
 try:
     while True:
-        controller.update()
+        try:
+            controller.update()
+        except Exception:
+            # A transient tick error (bad packet, momentary NaN) must not
+            # drop the aircraft mid-flight; log rate-limited and keep going.
+            now = time.monotonic()
+            if now - _last_tb >= 5.0:
+                traceback.print_exc()
+                _last_tb = now
+            time.sleep(1.0 / 90.0)  # keep loop cadence if update() bailed early
 except KeyboardInterrupt:
     print("Exiting.", flush=True)
 finally:

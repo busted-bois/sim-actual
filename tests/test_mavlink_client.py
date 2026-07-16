@@ -43,6 +43,37 @@ class GcsHeartbeatFilterTests(unittest.TestCase):
         rx.on_heartbeat(msg)
         self.assertNotIn("armed", rx.data)
 
+
+class RecvResilienceTests(unittest.TestCase):
+    def test_receive_loop_survives_connection_reset(self):
+        # Windows raises ConnectionResetError on UDP recv after an ICMP
+        # port-unreachable (sim restart). The loop must keep listening and
+        # handle later traffic, not die.
+        conn = mock.MagicMock()
+        rx = MAVLinkRX(conn, {})
+        rx.is_running = True
+
+        hb = mock.MagicMock()
+        hb.get_type.return_value = "HEARTBEAT"
+        hb.type = 2  # quadrotor, not GCS
+        hb.base_mode = 0b10000000
+
+        calls = {"n": 0}
+
+        def recv(blocking=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionResetError("simulated ICMP port-unreachable")
+            if calls["n"] == 2:
+                return hb
+            rx.is_running = False
+            return None
+
+        conn.recv_match.side_effect = recv
+        rx.mavlink_receive_loop()  # must not raise or bail on call 1
+        self.assertGreaterEqual(calls["n"], 3)
+        self.assertTrue(rx.data.get("armed"))  # post-reset message handled
+
     def test_vehicle_heartbeat_sets_armed(self):
         rx = MAVLinkRX(None, {})
         msg = mock.MagicMock()
