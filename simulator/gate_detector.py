@@ -23,6 +23,13 @@ _KERNEL = cv2.getStructuringElement(
 _HUE_MAX_UPPER = np.array([[[179, 255, 255]]])
 _HUE_MIN_LOWER = np.array([[[0, 0, 0]]])
 
+# Desaturated-orange fallback for VQ2 R2 scanned gates. Bounds must be (1, 3)
+# for cv2.inRange -- (1, 1, 3) arrays match every pixel in OpenCV 4.13.
+_DESAT_LOWER = np.array([[max(0, int(_HSV_LOWER[0, 0]) - 12), 25, 35]], dtype=np.uint8)
+_DESAT_UPPER = np.array(
+    [[min(179, int(_HSV_UPPER[0, 0]) + 12), 140, 255]], dtype=np.uint8
+)
+
 
 def _color_mask(hsv: np.ndarray) -> np.ndarray:
     if _HSV_LOWER[0][0] > _HSV_UPPER[0][0]:
@@ -34,13 +41,7 @@ def _color_mask(hsv: np.ndarray) -> np.ndarray:
 
 def _desaturated_orange_mask(hsv: np.ndarray) -> np.ndarray:
     """VQ2 R2 scanned gates are often less saturated than VQ1."""
-    h_lo = max(0, int(_HSV_LOWER[0][0]) - 12)
-    h_hi = min(179, int(_HSV_UPPER[0][0]) + 12)
-    return cv2.inRange(
-        hsv,
-        np.array([[[h_lo, 25, 35]]], dtype=np.uint8),
-        np.array([[[h_hi, 140, 255]]], dtype=np.uint8),
-    )
+    return cv2.inRange(hsv, _DESAT_LOWER, _DESAT_UPPER)
 
 
 def _best_gate_contour(mask: np.ndarray) -> np.ndarray | None:

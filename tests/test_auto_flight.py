@@ -88,6 +88,15 @@ class AutoFlightTests(unittest.TestCase):
             ctrl = Controller(MagicMock(), {}, 0)
             self.assertIsInstance(ctrl.pilot, VisionNavPilot)
 
+    def test_controller_uses_gp_pilot_when_requested(self):
+        with patch.dict("os.environ", {"AUTO_PILOT": "gp"}, clear=False):
+            from simulator.controller import Controller
+            from simulator.gp_pilot import GPPilot
+
+            ctrl = Controller(MagicMock(), {}, 0)
+            self.assertIsInstance(ctrl.pilot, GPPilot)
+            ctrl.pilot.shutdown()
+
     def test_run_auto_flight_preflight_fail_without_vision(self):
         controller = MagicMock()
         pilot = MagicMock()
