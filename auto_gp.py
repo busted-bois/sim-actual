@@ -1,5 +1,5 @@
 #
-# make auto-gp — AndurilGP-style entry (same shape as their main.py).
+# make control-flight — smooth GP vision flight (YOLO/PnP -> GPPilot guidance).
 # Arm, then run the GP control loop until Ctrl+C. No overnight AUTO_FLIGHT.
 #
 

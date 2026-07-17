@@ -64,6 +64,13 @@ class GPEstimation:
             self._att_deg = (0.0, self._launch_pitch_deg, 0.0)
             self._acc_buf = deque(maxlen=ACC_SMOOTH_N)
 
+    def zero_velocity(self) -> None:
+        """Clear dead-reckoned speed without reseeding AHRS (post-GO hygiene)."""
+        with self._lock:
+            self.vel_ned[:] = 0.0
+            self.vel_body[:] = 0.0
+            self.pos_ned[:] = 0.0
+
     def snapshot(self) -> dict:
         """Atomic copy of attitude / velocity / position for the control tick."""
         with self._lock:
