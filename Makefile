@@ -24,6 +24,10 @@ test:
 sim:
 	uv run main.py
 
+# Manual keyboard flight — WASD move, Q/E turn, R/F up/down, C level, L auto-land.
+manual:
+	uv run manual.py
+
 # Auto flight — continuous overnight retry; Ctrl+C stops
 auto:
 	uv run auto.py
