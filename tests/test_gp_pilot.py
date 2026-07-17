@@ -528,7 +528,6 @@ class GpRaceGateTests(unittest.TestCase):
         return ctrl, data, pilot
 
     def test_flying_sends_degree_commands_on_quat_wire(self):
-        from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
         try:
@@ -823,7 +822,7 @@ class GpRaceGateTests(unittest.TestCase):
 
     def test_backoff_levels_pitch_when_reverse_overspeed(self):
         """Reverse > BACKOFF_MAX_SPEED must not keep commanding hard nose-up."""
-        from simulator.gp_pilot import BACKOFF_PITCH_DEG, Phase
+        from simulator.gp_pilot import BACKOFF_PITCH_DEG
 
         ctrl, data, pilot = self._pilot()
         try:
