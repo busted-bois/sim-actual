@@ -89,7 +89,10 @@ For which command to run and what to do when something fails, see [§2.5](#25-ch
 make capture-gates          # live sim — start race while this listens
 make dataset                # live sim — records frames + auto-labeled masks
 make train-gatenet          # offline → rl/data/gatenet.pt (optional vision fusion)
-make train-ppo              # offline → rl/data/policy.pt
+make attitude-harness       # live sim — measures plant → flightlab/calibration.json
+make log-demos              # offline → rl/data/gp_demos.npz (GP expert rollouts)
+make train-bc               # offline → rl/data/policy_bc.pt (BC pretrain)
+make train-ppo              # offline → rl/data/policy.pt (warm-starts from BC)
 make fly-policy             # live sim — EKF + policy; odom default, GateNet if present
 ```
 
