@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from simulator.state_estimator import StateEstimator
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
+MAV_TYPE_GCS = 6
 
 
 @dataclass
@@ -85,6 +86,17 @@ class StateTracker:
         now = time.monotonic()
 
         if msg_type == "HEARTBEAT":
+            mav_type = int(getattr(msg, "type", -1))
+            if mav_type == MAV_TYPE_GCS:
+                return
+            src_sys = int(getattr(msg, "get_srcSystem", lambda: -1)())
+            if getattr(self, "_vehicle_sys_id", None) is None and src_sys > 0:
+                self._vehicle_sys_id = src_sys
+            if (
+                getattr(self, "_vehicle_sys_id", None) is not None
+                and src_sys != self._vehicle_sys_id
+            ):
+                return
             self.armed = bool(msg.base_mode & 128)
 
         elif msg_type == "ODOMETRY":

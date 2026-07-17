@@ -248,6 +248,14 @@ class Bus:
             s = self.drain()
             if s.armed:
                 print("[bus] armed", flush=True)
+                # Flush stale pre-arm HBs; re-arm if buffer drops armed bit.
+                flush_until = time.monotonic() + 0.35
+                while time.monotonic() < flush_until:
+                    s = self.drain()
+                    if not s.armed:
+                        self._send_arm(True)
+                        self._last_arm_t = time.monotonic()
+                    time.sleep(0.02)
                 return True
             time.sleep(0.05)
         print("[bus] arm timeout", flush=True)

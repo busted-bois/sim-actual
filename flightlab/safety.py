@@ -18,6 +18,7 @@ NE_LIMIT_M = 100.0
 GYRO_LIMIT = 8.0  # rad/s
 GYRO_HOLD_S = 0.5
 POSE_GAP_S = 0.5
+DISARM_HOLD_S = 0.4  # debounce brief armed HB flicker / stale buffer
 KILL_HOLD_S = 2.0
 
 
@@ -35,6 +36,7 @@ class SafetyMonitor:
     armed_expected: bool = True
     _att_bad_since: float | None = None
     _gyro_bad_since: float | None = None
+    _disarm_bad_since: float | None = None
     _ever_had_pose: bool = False
     _was_airborne: bool = False
     trips: list[str] = field(default_factory=list)
@@ -42,6 +44,7 @@ class SafetyMonitor:
     def reset(self) -> None:
         self._att_bad_since = None
         self._gyro_bad_since = None
+        self._disarm_bad_since = None
         self._ever_had_pose = False
         self._was_airborne = False
         self.expect_near_ground = False
@@ -56,9 +59,14 @@ class SafetyMonitor:
         if self._ever_had_pose and s.pose_age > POSE_GAP_S:
             return self._trip(f"pose_gap={s.pose_age:.2f}s")
 
-        # Unexpected disarm
+        # Unexpected disarm (debounced — ignore brief HB flicker / stale buffer)
         if self.armed_expected and self._ever_had_pose and not s.armed:
-            return self._trip("unexpected_disarm")
+            if self._disarm_bad_since is None:
+                self._disarm_bad_since = now
+            elif now - self._disarm_bad_since >= DISARM_HOLD_S:
+                return self._trip("unexpected_disarm")
+        else:
+            self._disarm_bad_since = None
 
         if not s.has_pose:
             return SafetyResult()
