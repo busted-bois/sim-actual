@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -28,10 +28,14 @@ sim:
 auto:
 	uv run auto.py
 
-# AndurilGP-style single-shot flight (their `python main.py`). Arm + GP
-# control loop with WAIT_FOR_* inside the pilot. Not overnight `make auto`.
-auto-gp:
+# Smooth GP control flight — YOLO/PnP vision -> GPPilot guidance (~8 km/h
+# cruise speed loop, collision backoff). Single-shot: arm + WAIT_FOR_* inside
+# the pilot. Not overnight `make auto`.
+control-flight:
 	uv run auto_gp.py
+
+# Back-compat alias for the original AndurilGP-style entry name.
+auto-gp: control-flight
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.

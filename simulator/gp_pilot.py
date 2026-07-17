@@ -1,7 +1,13 @@
 """AndurilGP guidance pilot — bearing bank + elev thrust + GyroAHRS est.
 
-Opt-in via AUTO_PILOT=gp. Same rate+thrust action interface as IBVS.
-Action space matches rl/spec.py for later expert / RL merge.
+Opt-in via AUTO_PILOT=gp (make control-flight). Same rate+thrust action
+interface as IBVS. Action space matches rl/spec.py for later expert / RL merge.
+
+Smooth-flight additions on top of the original AndurilGP port:
+  * closed-loop forward speed (~8 km/h cruise) via speed-PD -> pitch lean,
+  * vision smoothing (gate-position EMA, PnP-sticky source selection) and
+    attitude-command slew limiting against YOLO frame flicker,
+  * collision backoff: reverse a few meters after a hit, then re-acquire.
 """
 
 from __future__ import annotations
@@ -16,9 +22,9 @@ import numpy as np
 
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
+    GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
-    vision_gate_estimate,
 )
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
@@ -27,10 +33,10 @@ from simulator.gp_vision import (
 HOVER_THRUST = 0.264
 # Original AndurilGP command rate (2:1 with the 30 Hz camera; spec cap 100).
 GP_CONTROL_HZ = 60
-DESIRED_PITCH_DEG = -3.0
-K_BEARING = 4.5
-K_LAT_D = 9.0
-MAX_BANK_DEG = 25.0
+DESIRED_PITCH_DEG = -2.0
+K_BEARING = 2.5
+K_LAT_D = 5.0
+MAX_BANK_DEG = 14.0
 PERP_BLEND_DIST = 6.0
 TILT_EMA_ALPHA = 0.25
 K_P_THRUST = 0.014
@@ -47,11 +53,42 @@ CLOCK_RESET_SLACK_MS = 500
 IMU_FROZEN_S = 2.0  # sensor clock stuck this long => sim physics is idle
 DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips mid-flight
 
+# Closed-loop forward speed. Hard cap 10 km/h — always-on IMU regulation
+# (not gated on vision) so lost-lock cannot open-loop dive to 20–30 km/h.
+MAX_SPEED_MPS = 10.0 / 3.6  # ≈2.78 m/s
+CRUISE_SPEED_MPS = 2.2
+THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
+BLIND_CRAWL_MPS = 1.0  # no gate in view
+SLOWDOWN_START_M = 5.0
+K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
+K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
+PITCH_DES_MIN_DEG = -2.5
+PITCH_DES_MAX_DEG = 6.0
+PITCH_WIRE_MAX_DEG = 18.0  # clamp on attitude-quat pitch command
+
+# Attitude-command slew limits (vision flicker → bank twitch).
+CMD_SLEW_DEG_S = 90.0
+THRUST_SLEW_PER_S = 1.0
+
+# Collision backoff: reverse a few meters then re-acquire.
+BACKOFF_DIST_M = 3.0
+BACKOFF_PITCH_DEG = 4.0  # mild nose-up while reversing
+BACKOFF_MAX_SPEED_MPS = 1.5  # ~5.4 km/h reverse cap
+BACKOFF_MIN_S = 0.6
+BACKOFF_MAX_S = 4.0
+WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
+
+# Post-GO speed safety: IMU vX is often ~0 right after reset, which otherwise
+# saturates PITCH_DES_MIN and open-loop dives to 20–30 km/h.
+LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
+UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
+
 
 class Phase(Enum):
     WAIT_FOR_DATA = auto()
     WAIT_FOR_START = auto()
     FLYING = auto()
+    BACKOFF = auto()
 
 
 def compute_guidance(
@@ -65,6 +102,9 @@ def compute_guidance(
     vision_vel: dict | None,
     state: dict,
     hover_thrust: float = HOVER_THRUST,
+    vX: float = float("nan"),
+    dt: float = 1.0 / GP_CONTROL_HZ,
+    flying_t: float = float("nan"),
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -72,8 +112,16 @@ def compute_guidance(
     the original — the live pilot ships them on the attitude-quaternion wire
     (Controller "attitude_quat" mode); rl.gp_expert converts to rad/s for the
     internal rate-plant env.
+
+    When a forward-speed estimate `vX` (body m/s) is supplied, a speed-PD
+    pitch loop always runs (gate or not), targeting at most MAX_SPEED_MPS
+    (10 km/h). Callers that omit vX (RL expert, sign-audit harness) keep the
+    original fixed DESIRED_PITCH_DEG behavior.
+
+    `flying_t` is seconds since GO (lean ramp / untrusted-vX guards).
     """
     vision_valid = False
+    reliable = False
     bx = by = bz = float("nan")
     vis_frame_id = None
     if vision is not None:
@@ -83,6 +131,8 @@ def compute_guidance(
         vis_frame_id = vision.get("frame_id")
         if not any(math.isnan(v) for v in (bx, by, bz)) and bx > 0.1:
             vision_valid = True
+            # Anduril reliable tier; YOLO/legacy estimates default True.
+            reliable = bool(vision.get("reliable", True))
 
     elev_rate = 0.0
     if vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None:
@@ -103,7 +153,8 @@ def compute_guidance(
         state["prev_gate_pD"] = None
         state["prev_elev_frame_id"] = None
 
-    # Vision-IMU velocity fusion (lateral + body-down only; vX stays IMU).
+    # Vision-IMU velocity fusion (lateral + body-down). Forward speed for the
+    # cap stays IMU-only — OF understates closing rate and caused dive saturation.
     if (
         vision_vel is not None
         and vis_frame_id is not None
@@ -131,6 +182,9 @@ def compute_guidance(
     if vision_valid:
         bearing_body = float(np.clip(math.degrees(math.atan2(by, bx)), -25.0, 25.0))
         blend = float(np.clip(bx / PERP_BLEND_DIST, 0.0, 1.0))
+        if not reliable:
+            # Weak Anduril hint: servo descend/yaw only — don't bank hard.
+            blend *= WEAK_BLEND_SCALE
 
         prev_bf = state.get("prev_bearing_frame_id")
         if (
@@ -193,7 +247,53 @@ def compute_guidance(
         d_lat = vY - state["vY_at_vision"]
         d_vert = vD - state["vD_at_vision"]
 
-    pitch_cmd_deg = (DESIRED_PITCH_DEG - pitch_deg) * KP
+    if math.isnan(vX):
+        # RL expert / offline harnesses: original fixed lean.
+        pitch_des_deg = DESIRED_PITCH_DEG
+        v_target = float("nan")
+        state["prev_vx"] = None
+    else:
+        if vision_valid and reliable:
+            ease = float(np.clip(bx / SLOWDOWN_START_M, 0.0, 1.0))
+            v_target = THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease
+        elif vision_valid:
+            v_target = THRU_SPEED_MPS  # weak detection: crawl
+        else:
+            v_target = BLIND_CRAWL_MPS  # lost lock: crawl, never free-dive
+        v_target = min(v_target, MAX_SPEED_MPS)
+        prev_vx = state.get("prev_vx")
+        a_fwd = 0.0 if prev_vx is None else (vX - prev_vx) / max(dt, 1e-3)
+        state["prev_vx"] = vX
+        state["ax_fwd_ema"] = 0.3 * a_fwd + 0.7 * state["ax_fwd_ema"]
+        pitch_des_deg = float(
+            np.clip(
+                DESIRED_PITCH_DEG
+                - K_SPEED_P * (v_target - vX)
+                + K_SPEED_D * state["ax_fwd_ema"],
+                PITCH_DES_MIN_DEG,
+                PITCH_DES_MAX_DEG,
+            )
+        )
+        # Hard speed cap: nose-up whenever over MAX, stronger past 15% over.
+        if vX > MAX_SPEED_MPS * 1.15:
+            pitch_des_deg = PITCH_DES_MAX_DEG
+        elif vX > MAX_SPEED_MPS:
+            pitch_des_deg = max(pitch_des_deg, 0.5 * PITCH_DES_MAX_DEG)
+        # Post-GO lean ramp: don't max-dive while IMU vX is still settling.
+        if not math.isnan(flying_t) and flying_t < LEAN_RAMP_S:
+            pitch_des_deg = max(pitch_des_deg, DESIRED_PITCH_DEG)
+        # Untrusted-vX: dead-reckon near zero → no dive (immediate). Waiting
+        # used to open-loop to 30–40 km/h after Restart Race.
+        if abs(vX) < UNTRUSTED_VX_MPS:
+            pitch_des_deg = max(pitch_des_deg, DESIRED_PITCH_DEG)
+        state["min_dive_s"] = 0.0
+    pitch_cmd_deg = float(
+        np.clip(
+            (pitch_des_deg - pitch_deg) * KP,
+            -PITCH_WIRE_MAX_DEG,
+            PITCH_WIRE_MAX_DEG,
+        )
+    )
     p_lat = K_BEARING * bearing_body * blend
     d_lat_term = K_LAT_D * d_lat * blend
     desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
@@ -216,9 +316,13 @@ def compute_guidance(
         "d_lat": d_lat,
         "d_vert": d_vert,
         "vision_valid": vision_valid,
+        "reliable": reliable,
         "bx": bx,
         "by": by,
         "bz": bz,
+        "v_target": v_target,
+        "pitch_des_deg": pitch_des_deg,
+        "source": (vision or {}).get("source", ""),
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -231,13 +335,54 @@ def _fresh_hold_state() -> dict:
         "last_d_frame_id": None,
         "vY_at_vision": 0.0,
         "vD_at_vision": 0.0,
+        "vision_vx_ema": 0.0,
         "vision_vy_ema": 0.0,
         "vision_vz_ema": 0.0,
         "prev_bearing_body": None,
         "prev_bearing_frame_id": None,
         "prev_gate_pD": None,
         "prev_elev_frame_id": None,
+        "prev_vx": None,
+        "ax_fwd_ema": 0.0,
+        "min_dive_s": 0.0,
     }
+
+
+class CommandSlew:
+    """Rate-limit the outgoing attitude/thrust commands.
+
+    Per-frame YOLO jitter otherwise lands on the wire as step changes in the
+    attitude target — visible as bank/pitch twitch. Limiting the slew keeps
+    the response smooth without touching the guidance gains.
+    """
+
+    def __init__(self, hz: float = GP_CONTROL_HZ):
+        self._max_step_deg = CMD_SLEW_DEG_S / hz
+        self._max_step_thrust = THRUST_SLEW_PER_S / hz
+        self.reset()
+
+    def reset(self) -> None:
+        self._prev: tuple[float, float, float, float] | None = None
+
+    def apply(
+        self, roll: float, pitch: float, yaw: float, thrust: float
+    ) -> tuple[float, float, float, float]:
+        if self._prev is None:
+            self._prev = (roll, pitch, yaw, thrust)
+            return self._prev
+        pr, pp, py, pt = self._prev
+        m = self._max_step_deg
+        out = (
+            pr + float(np.clip(roll - pr, -m, m)),
+            pp + float(np.clip(pitch - pp, -m, m)),
+            py + float(np.clip(yaw - py, -m, m)),
+            pt
+            + float(
+                np.clip(thrust - pt, -self._max_step_thrust, self._max_step_thrust)
+            ),
+        )
+        self._prev = out
+        return out
 
 
 class GPPilot:
@@ -250,7 +395,14 @@ class GPPilot:
         self.phase = Phase.WAIT_FOR_DATA
         self.est = GPEstimation(data)
         self.vel_tracker = VisionVelocityTracker()
+        self.gate_smoother = GateEstimateSmoother()
+        self._cmd_slew = CommandSlew()
         self._hold = _fresh_hold_state()
+        self._backoff_start = 0.0
+        self._backoff_dist = 0.0
+        self._backoff_last_t = 0.0
+        self._flying_since: float | None = None
+        self._go_start_ms: int | None = None
         self._tick = 0
         self._est_started = False
         self._last_arm_attempt = 0.0
@@ -269,7 +421,7 @@ class GPPilot:
         controller.control_hz = GP_CONTROL_HZ
         controller.set_control_mode("attitude_quat")
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
-        print("[gp] AndurilGP controls pilot ready (make auto-gp)", flush=True)
+        print("[gp] AndurilGP controls pilot ready (make control-flight)", flush=True)
 
     @property
     def gates_passed(self) -> int:
@@ -288,7 +440,10 @@ class GPPilot:
         self.phase = Phase.WAIT_FOR_DATA
         self._hold = _fresh_hold_state()
         self.vel_tracker.reset()
+        self.gate_smoother.reset()
+        self._cmd_slew.reset()
         self.est.reset()
+        self.data.pop("collision", None)
         self._tick = 0
         self._last_arm_attempt = 0.0
         self._wait_start_sim_ms = None
@@ -297,6 +452,11 @@ class GPPilot:
         self._imu_ts_wall = 0.0
         self._frozen_noted = False
         self._disarm_since = None
+        self._backoff_start = 0.0
+        self._backoff_dist = 0.0
+        self._backoff_last_t = 0.0
+        self._flying_since = None
+        self._go_start_ms = None
         self._close_log()
 
     def _open_log(self) -> None:
@@ -308,7 +468,8 @@ class GPPilot:
             self._log_wr = csv.writer(self._log)
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
-                "thrust bx by bz blend d_lat d_vert vY vD".split()
+                "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
+                "pitch_des source".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -323,11 +484,14 @@ class GPPilot:
                 pass
         self._log, self._log_wr = None, None
 
-    def _log_tick(self, att, cmds, thrust, vY, vD, dbg) -> None:
+    def _log_tick(self, att, cmds, thrust, vY, vD, dbg, vX=float("nan")) -> None:
         if self._log_wr is None:
             return
         try:
             now = time.time()
+            vt = dbg.get("v_target", float("nan"))
+            pd = dbg.get("pitch_des_deg", float("nan"))
+            src = str(dbg.get("source", "") or "")
             self._log_wr.writerow(
                 [f"{now:.3f}"]
                 + [f"{v:.3f}" for v in att]
@@ -335,7 +499,7 @@ class GPPilot:
                 + [f"{thrust:.4f}"]
                 + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
                 + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
-                + [f"{vY:.3f}", f"{vD:.3f}"]
+                + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}", src]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -410,10 +574,6 @@ class GPPilot:
                     self._wait_start_sim_ms = sim_ms
                     print(f"[WAIT] Anchor set: sim_ms={sim_ms}", flush=True)
                 if sim_ms < self._wait_start_sim_ms - CLOCK_RESET_SLACK_MS:
-                    # Sim clock went backwards: the sim was reset (our request
-                    # below, or Restart Race in the UI). Restart the attempt so
-                    # WAIT_FOR_DATA re-arms and the anchor re-syncs to the new
-                    # clock epoch — the old anchor would gate GO off forever.
                     print(
                         f"[WAIT] Sim clock reset (sim_ms={sim_ms} < anchor="
                         f"{self._wait_start_sim_ms}) — re-arming for the new race.",
@@ -422,35 +582,23 @@ class GPPilot:
                     self._reset_state()
                     return
                 finish_ns = int(race.get("race_finish_time_ns", -1) or -1)
+                # Vendor-faithful GO: only a *fresh* countdown that has elapsed.
+                # No "already running → fly now" (that skipped the 3s hold after
+                # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                # finish_ns >= 0 means the race is OVER — the sim parks the
-                # drone and ignores attitude setpoints until a new race.
-                race_running = start_ms > 0 and sim_ms >= start_ms and finish_ns < 0
+                countdown_done = (
+                    race_fresh and sim_ms >= start_ms and finish_ns < 0
+                )
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
                         f"finish_ns={finish_ns} fresh={race_fresh} "
-                        f"go={race_fresh and race_running}",
+                        f"go={countdown_done and physics_live}",
                         flush=True,
                     )
-                if race_fresh and race_running and physics_live:
-                    print("Countdown complete! Flying!", flush=True)
-                    self.phase = Phase.FLYING
-                elif race_running and physics_live:
-                    # Race began before this client launched. It can never
-                    # pass the freshness gate, and the sim ignores MAVLink
-                    # reset requests here — so fly the running race (same
-                    # any-time semantics as make fly / the IBVS pilot).
-                    print(
-                        f"[WAIT] Race already running (started {start_ms}ms, "
-                        "before this client) — flying it now. Restart Race "
-                        "in FlightSim any time for a fresh clock.",
-                        flush=True,
-                    )
-                    self.phase = Phase.FLYING
+                if countdown_done and physics_live:
+                    self._enter_flying(start_ms)
                 elif start_ms > 0 and finish_ns >= 0 and not self._finish_noted:
-                    # Finished race: controls are dead until a new race, and
-                    # the sim ignores MAVLink resets — needs the UI button.
                     print(
                         "[WAIT] Race is FINISHED — click Restart Race in "
                         "FlightSim; this client will re-arm and fly the new "
@@ -462,12 +610,8 @@ class GPPilot:
                 print("[WAIT] No race_status yet — holding...", flush=True)
             return
 
-        # FLYING — Anduril guidance
+        # FLYING / BACKOFF — Anduril guidance (+ collision reverse)
         if not armed:
-            # Only a PERSISTENT disarm means the sim was reset (Restart Race
-            # in the UI). A single 1 Hz heartbeat blip must NOT trigger a
-            # mid-air reset (zero thrust + ramp-pitch re-seed = tip-over);
-            # keep flying the guidance through the confirmation window.
             now = time.time()
             if self._disarm_since is None:
                 self._disarm_since = now
@@ -477,6 +621,12 @@ class GPPilot:
                 return
         else:
             self._disarm_since = None
+
+        # Abort into WAIT if Restart Race / new countdown / finish while airborne.
+        if self.phase in (Phase.FLYING, Phase.BACKOFF) and race is not None:
+            if self._should_abort_flying(race):
+                return
+
         if not self._est_started and imu is not None:
             self.est.start()
             self._est_started = True
@@ -486,10 +636,27 @@ class GPPilot:
 
         snap = self.est.snapshot()
         roll_deg, pitch_deg, yaw_deg = snap["att_deg"]
+        vX = float(snap["vel_body"][0])
         vY = float(snap["vel_body"][1])
         vD = float(snap["vel_ned"][2])
+        dt = 1.0 / GP_CONTROL_HZ
+        flying_t = (
+            time.time() - self._flying_since
+            if self._flying_since is not None
+            else float("nan")
+        )
 
-        vision = vision_gate_estimate(self.data)
+        if self.phase == Phase.BACKOFF:
+            self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
+            return
+
+        # Enter backoff on a fresh MAVLink COLLISION (mavlink_rx writes the key).
+        if self.data.get("collision") is not None:
+            self._enter_backoff()
+            self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
+            return
+
+        vision = self.gate_smoother.update(self.data)
         vision_vel = self.vel_tracker.update(vision)
 
         active = int(self.data.get("active_gate_index", 0) or 0)
@@ -505,6 +672,12 @@ class GPPilot:
             vision=vision,
             vision_vel=vision_vel,
             state=self._hold,
+            vX=vX,
+            dt=dt,
+            flying_t=flying_t,
+        )
+        roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
+            roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
         # Degree commands on the attitude-quaternion wire (original encoding).
         self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
@@ -515,16 +688,164 @@ class GPPilot:
             vY,
             vD,
             dbg,
+            vX=vX,
         )
 
         if self._debug and self._tick % DEBUG_EVERY_N == 0:
+            vt = dbg.get("v_target", float("nan"))
+            src = dbg.get("source", "")
             print(
                 f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
-                f"blend={dbg['blend']:.2f} elev={dbg['elev_err']:+.2f} "
-                f"T={thrust:.3f}",
+                f"vX={vX:+.2f}/{vt:.2f} src={src} blend={dbg['blend']:.2f} "
+                f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
                 flush=True,
             )
+
+    def _resume_flying(self) -> None:
+        """Shared FLYING entry: re-arm lean ramp + full AHRS/vel reset."""
+        self.phase = Phase.FLYING
+        self._flying_since = time.time()
+        self.est.reset()
+        self._hold = _fresh_hold_state()
+        self.vel_tracker.reset()
+        self.gate_smoother.reset()
+        self._cmd_slew.reset()
+        self.data.pop("collision", None)
+
+    def _enter_flying(self, start_ms: int) -> None:
+        """Countdown complete → FLYING with clean speed state."""
+        print("Countdown complete! Flying!", flush=True)
+        self._go_start_ms = start_ms
+        self._finish_noted = False
+        self._resume_flying()
+
+    def _abort_to_wait(self, reason: str) -> None:
+        """Drop out of FLYING/BACKOFF and hold zero thrust for a fresh countdown."""
+        print(f"[gp] {reason} — holding for countdown", flush=True)
+        self.phase = Phase.WAIT_FOR_START
+        self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
+        self.est.reset()
+        self._hold = _fresh_hold_state()
+        self.vel_tracker.reset()
+        self.gate_smoother.reset()
+        self._cmd_slew.reset()
+        self._flying_since = None
+        self._go_start_ms = None
+        self._finish_noted = False
+        race = self.data.get("race_status")
+        if race is not None:
+            self._wait_start_sim_ms = int(race.get("sim_boot_time_ms", 0) or 0)
+            print(f"[WAIT] Anchor set: sim_ms={self._wait_start_sim_ms}", flush=True)
+        else:
+            self._wait_start_sim_ms = None
+
+    def _should_abort_flying(self, race: dict) -> bool:
+        """True if Restart Race / finish requires returning to WAIT (mutates state)."""
+        sim_ms = int(race.get("sim_boot_time_ms", 0) or 0)
+        start_ms = int(race.get("race_start_boot_time_ms", -1) or -1)
+        finish_ns = int(race.get("race_finish_time_ns", -1) or -1)
+        if (
+            self._wait_start_sim_ms is not None
+            and sim_ms < self._wait_start_sim_ms - CLOCK_RESET_SLACK_MS
+        ):
+            self._abort_to_wait("Sim clock reset mid-flight")
+            return True
+        # New countdown: race_start is in the future (3s hold not elapsed yet).
+        if start_ms > 0 and start_ms > sim_ms:
+            self._abort_to_wait("New race countdown")
+            return True
+        # New race_start after the one we launched on (Restart Race finished GO).
+        if (
+            start_ms > 0
+            and self._go_start_ms is not None
+            and start_ms > self._go_start_ms
+            and finish_ns < 0
+        ):
+            self._abort_to_wait("Restart Race — new race_start")
+            return True
+        if finish_ns >= 0:
+            self._abort_to_wait("Race finished")
+            return True
+        return False
+
+    def _enter_backoff(self) -> None:
+        now = time.time()
+        self.phase = Phase.BACKOFF
+        self._backoff_start = now
+        self._backoff_dist = 0.0
+        self._backoff_last_t = now
+        self.data.pop("collision", None)
+        # Drop vision D-terms so re-acquire after the reverse isn't polluted.
+        self._hold = _fresh_hold_state()
+        self.vel_tracker.reset()
+        self.gate_smoother.reset()
+        self._cmd_slew.reset()
+        print(
+            f"[gp] COLLISION — backing off ~{BACKOFF_DIST_M:.0f} m",
+            flush=True,
+        )
+
+    def _tick_backoff(
+        self,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        vX: float,
+        vY: float,
+        vD: float,
+        dt: float,
+    ) -> None:
+        now = time.time()
+        elapsed = now - self._backoff_start
+        # Integrate reverse travel from body-forward speed (negative = reverse).
+        step_dt = max(dt, now - self._backoff_last_t)
+        self._backoff_last_t = now
+        self._backoff_dist += max(0.0, -vX) * step_dt
+
+        # Regulate reverse speed — fixed nose-up used to hit 20–30 km/h.
+        rev = max(0.0, -vX)
+        if rev > BACKOFF_MAX_SPEED_MPS:
+            pitch_target = 0.0
+        elif rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
+            pitch_target = 0.3 * BACKOFF_PITCH_DEG
+        else:
+            pitch_target = BACKOFF_PITCH_DEG
+        pitch_cmd = (pitch_target - pitch_deg) * KP
+        roll_cmd = (0.0 - roll_deg) * KR
+        yaw_cmd = 0.0
+        thrust = HOVER_THRUST
+        roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
+            roll_cmd, pitch_cmd, yaw_cmd, thrust
+        )
+        self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
+        self._log_tick(
+            (roll_deg, pitch_deg, yaw_deg),
+            (roll_cmd, pitch_cmd, yaw_cmd),
+            thrust,
+            vY,
+            vD,
+            {
+                "bx": float("nan"),
+                "by": float("nan"),
+                "bz": float("nan"),
+                "blend": 0.0,
+                "d_lat": 0.0,
+                "d_vert": 0.0,
+                "source": "backoff",
+            },
+            vX=vX,
+        )
+
+        done_dist = self._backoff_dist >= BACKOFF_DIST_M and elapsed >= BACKOFF_MIN_S
+        done_time = elapsed >= BACKOFF_MAX_S
+        if done_dist or done_time:
+            print(
+                f"[gp] backoff done dist={self._backoff_dist:.1f}m "
+                f"t={elapsed:.1f}s — resuming chase",
+                flush=True,
+            )
+            self._resume_flying()
 
     def shutdown(self) -> None:
         self.est.stop()

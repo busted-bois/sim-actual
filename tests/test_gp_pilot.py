@@ -143,6 +143,176 @@ class GuidanceTests(unittest.TestCase):
         self.assertFalse(dbg["vision_valid"])
         self.assertAlmostEqual(thrust, HOVER_THRUST, places=3)
 
+    def test_speed_loop_pitches_down_when_too_slow(self):
+        from simulator.gp_pilot import CRUISE_SPEED_MPS, DESIRED_PITCH_DEG
+
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 10,
+            "body_x_m": 12.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "reliable": True,
+        }
+        # Trusted vX (above untrusted floor) but below cruise → nose down.
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=1.0,
+        )
+        self.assertAlmostEqual(dbg["v_target"], CRUISE_SPEED_MPS, places=2)
+        self.assertLess(dbg["pitch_des_deg"], DESIRED_PITCH_DEG)
+
+    def test_speed_loop_slows_near_gate(self):
+        from simulator.gp_pilot import THRU_SPEED_MPS
+
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 11,
+            "body_x_m": 1.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "reliable": True,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=-3.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=2.2,
+        )
+        self.assertLess(dbg["v_target"], 1.6)
+        self.assertGreaterEqual(dbg["v_target"], THRU_SPEED_MPS - 0.05)
+
+    def test_hard_brake_when_over_max_speed(self):
+        from simulator.gp_pilot import MAX_SPEED_MPS, PITCH_DES_MAX_DEG
+
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=MAX_SPEED_MPS * 1.2,  # ~12 km/h
+        )
+        self.assertAlmostEqual(dbg["pitch_des_deg"], PITCH_DES_MAX_DEG, places=3)
+
+    def test_no_vision_still_regulates_crawl(self):
+        from simulator.gp_pilot import BLIND_CRAWL_MPS, DESIRED_PITCH_DEG
+
+        state = _fresh_hold_state()
+        # Trusted crawl speed below target → mild nose-down, not free-dive.
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=0.6,
+        )
+        self.assertFalse(dbg["vision_valid"])
+        self.assertAlmostEqual(dbg["v_target"], BLIND_CRAWL_MPS, places=3)
+        self.assertLessEqual(dbg["pitch_des_deg"], DESIRED_PITCH_DEG)
+        self.assertGreaterEqual(dbg["pitch_des_deg"], -2.51)
+
+    def test_weak_detection_reduces_bank(self):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 12,
+            "body_x_m": 12.0,
+            "body_y_m": 0.8,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "reliable": False,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=1.0,
+        )
+        self.assertLess(abs(dbg["desired_roll"]), 8.0)
+        self.assertLess(dbg["blend"], 0.5)
+
+    def test_lean_ramp_blocks_min_dive_just_after_go(self):
+        from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG
+
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 12.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "reliable": True,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=0.0,
+            flying_t=0.2,
+        )
+        self.assertGreaterEqual(dbg["pitch_des_deg"], DESIRED_PITCH_DEG - 0.01)
+        self.assertGreaterEqual(dbg["pitch_des_deg"], PITCH_DES_MIN_DEG)
+
+    def test_untrusted_vx_blocks_dive_immediately(self):
+        """vX≈0 must not dive even past lean ramp (no delay before clamp)."""
+        from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG
+
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 12.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "reliable": True,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=0.0,
+            flying_t=5.0,  # past lean ramp
+        )
+        self.assertAlmostEqual(dbg["pitch_des_deg"], DESIRED_PITCH_DEG, places=2)
+        self.assertGreaterEqual(dbg["pitch_des_deg"], PITCH_DES_MIN_DEG)
+
 
 class VisionAdapterTests(unittest.TestCase):
     def test_pinhole_body_ahead(self):
@@ -162,6 +332,7 @@ class VisionAdapterTests(unittest.TestCase):
                         "pose": {
                             "gate_pos_body": np.array([8.0, -0.5, 0.2]),
                             "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.5,
                         },
                     }
                 ],
@@ -172,6 +343,92 @@ class VisionAdapterTests(unittest.TestCase):
         self.assertEqual(est["frame_id"], 7)
         self.assertAlmostEqual(est["body_x_m"], 8.0)
         self.assertTrue(est["pnp_ok"])
+        self.assertEqual(est["source"], "yolo")
+
+    def test_anduril_preferred_over_yolo(self):
+        data = {
+            "anduril_gate": {
+                "frame_id": 3,
+                "body_x_m": 7.0,
+                "body_y_m": 0.1,
+                "body_z_m": 0.0,
+                "pnp_ok": True,
+                "reliable": True,
+                "source": "anduril",
+                "normal_body": None,
+            },
+            "pose": {
+                "frame_id": 3,
+                "gates": [
+                    {
+                        "conf": 0.99,
+                        "pose": {
+                            "gate_pos_body": np.array([99.0, 0.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    }
+                ],
+            },
+        }
+        est = vision_gate_estimate(data)
+        self.assertEqual(est["source"], "anduril")
+        self.assertAlmostEqual(est["body_x_m"], 7.0)
+
+    def test_detect_gate_finds_red_square(self):
+        import cv2
+
+        from simulator.anduril_gate_detect import detect_gate
+
+        img = np.zeros((360, 640, 3), dtype=np.uint8)
+        # Saturated red square near image centre (HSV red near hue 0).
+        cv2.rectangle(img, (280, 120), (360, 240), (0, 0, 255), -1)
+        est, _mask, _cnts = detect_gate(img)
+        self.assertIsNotNone(est)
+        self.assertTrue(est["reliable"])
+        self.assertGreater(est["area"], 300)
+
+    def test_gate_smoother_emas_and_sticks_pnp(self):
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        data = {
+            "pose": {
+                "frame_id": 1,
+                "gates": [
+                    {
+                        "conf": 0.95,
+                        "pose": {
+                            "gate_pos_body": np.array([10.0, 0.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    }
+                ],
+            }
+        }
+        e1 = sm.update(data)
+        self.assertAlmostEqual(e1["body_x_m"], 10.0, places=3)
+        data["pose"]["frame_id"] = 2
+        data["pose"]["gates"][0]["pose"]["gate_pos_body"] = np.array([8.0, 0.0, 0.0])
+        e2 = sm.update(data)
+        # EMA blends toward the new measurement, not a hard jump.
+        self.assertLess(e2["body_x_m"], 10.0)
+        self.assertGreater(e2["body_x_m"], 8.0)
+        # Drop PnP; HSV-only must not replace a fresh PnP fix for a few frames.
+        data = {
+            "pose": {"frame_id": 3, "gates": []},
+            "gate_target": {
+                "detected": True,
+                "frame_id": 3,
+                "u_px": 320.0,
+                "v_px": 180.0,
+                "r_frac": 0.05,
+            },
+        }
+        e3 = sm.update(data)
+        self.assertTrue(e3["pnp_ok"])
+        self.assertAlmostEqual(e3["body_x_m"], e2["body_x_m"], places=5)
 
 
 class WiringTests(unittest.TestCase):
@@ -250,32 +507,37 @@ class GpRaceGateTests(unittest.TestCase):
         pilot._open_log = lambda: None  # keep unit tests out of rl/data
         return ctrl, data, pilot
 
+    def _go_flying(self, ctrl, data, pilot):
+        """Drive WAIT_FOR_START through a fresh countdown into FLYING."""
+        from simulator.gp_pilot import Phase
+
+        pilot.tick()  # armed + IMU -> WAIT_FOR_START
+        data["race_status"] = {
+            "sim_boot_time_ms": 1000,
+            "race_start_boot_time_ms": -1,
+            "race_finish_time_ns": -1,
+        }
+        pilot.tick()  # anchor
+        data["race_status"] = {
+            "sim_boot_time_ms": 5000,
+            "race_start_boot_time_ms": 4000,
+            "race_finish_time_ns": -1,
+        }
+        pilot.tick()
+        self.assertEqual(pilot.phase, Phase.FLYING)
+        return ctrl, data, pilot
+
     def test_flying_sends_degree_commands_on_quat_wire(self):
-        from simulator.gp_pilot import DESIRED_PITCH_DEG, Phase
+        from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
         try:
-            pilot.tick()
-            data["race_status"] = {
-                "sim_boot_time_ms": 1000,
-                "race_start_boot_time_ms": -1,
-            }
-            pilot.tick()
-            data["race_status"] = {
-                "sim_boot_time_ms": 5000,
-                "race_start_boot_time_ms": 4000,
-            }
-            pilot.tick()
-            self.assertEqual(pilot.phase, Phase.FLYING)
-            pilot.tick()  # one FLYING tick, no vision: pitch-trim + hover-ish
+            self._go_flying(ctrl, data, pilot)
+            pilot.tick()  # one FLYING tick, no vision: crawl speed loop
             roll_cmd, pitch_cmd, yaw_cmd, thrust = ctrl.set_attitude_quat_deg.call_args[
                 0
             ]
-            # Estimator seeded at the -17.8 deg ramp; desired -3 deg, KP=+1:
-            # the command is DEGREES (+14.8), not the rad/s 0.26 of the old
-            # rate wire — the unit reinterpretation that caused launch flips.
-            self.assertAlmostEqual(pitch_cmd, DESIRED_PITCH_DEG - (-17.8), delta=0.5)
-            self.assertGreater(abs(pitch_cmd), 5.0)  # clearly degrees
+            self.assertGreater(abs(pitch_cmd), 5.0)
             self.assertAlmostEqual(roll_cmd, 0.0, delta=0.5)
             self.assertGreater(thrust, 0.2)
             self.assertLess(thrust, 0.4)
@@ -303,21 +565,95 @@ class GpRaceGateTests(unittest.TestCase):
         finally:
             pilot.shutdown()
 
-    def test_already_running_race_flies_immediately(self):
+    def test_stale_race_does_not_fly_without_fresh_countdown(self):
+        """After anchor, a race_start *before* the anchor must NOT early-fly.
+
+        Manual Restart Race needs the full 3s countdown (fresh start_ms).
+        """
         from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
         try:
             pilot.tick()
-            # Race started 3.3 s after sim boot; client launched 7 min later.
-            # The sim ignores MAVLink resets, so the pilot must fly this race.
+            # Client anchors late; old race_start is stale vs anchor.
             data["race_status"] = {
                 "sim_boot_time_ms": 433289,
                 "race_start_boot_time_ms": 3307,
+                "race_finish_time_ns": -1,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            # Mid-countdown of a *fresh* restart: start in the future.
+            data["race_status"] = {
+                "sim_boot_time_ms": 433289,
+                "race_start_boot_time_ms": 436289,  # 3s ahead
+                "race_finish_time_ns": -1,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            # Countdown elapsed.
+            data["race_status"] = {
+                "sim_boot_time_ms": 436300,
+                "race_start_boot_time_ms": 436289,
+                "race_finish_time_ns": -1,
             }
             pilot.tick()
             self.assertEqual(pilot.phase, Phase.FLYING)
-            ctrl.send_sim_reset_command.assert_not_called()
+        finally:
+            pilot.shutdown()
+
+    def test_mid_countdown_stays_in_wait(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 1000,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 2000,
+                "race_start_boot_time_ms": 4000,  # GO still 2s away
+                "race_finish_time_ns": -1,
+            }
+            for _ in range(3):
+                pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            args = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertEqual(args, (0.0, 0.0, 0.0, 0.0))
+        finally:
+            pilot.shutdown()
+
+    def test_restart_race_while_flying_returns_to_wait(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 1000,
+                "race_start_boot_time_ms": -1,
+            }
+            pilot.tick()
+            data["race_status"] = {
+                "sim_boot_time_ms": 5000,
+                "race_start_boot_time_ms": 4000,
+                "race_finish_time_ns": -1,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            # Restart Race: new countdown (start in the future).
+            data["race_status"] = {
+                "sim_boot_time_ms": 8000,
+                "race_start_boot_time_ms": 11000,
+                "race_finish_time_ns": -1,
+            }
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            args = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertEqual(args, (0.0, 0.0, 0.0, 0.0))
         finally:
             pilot.shutdown()
 
@@ -360,13 +696,7 @@ class GpRaceGateTests(unittest.TestCase):
 
         ctrl, data, pilot = self._pilot()
         try:
-            pilot.tick()
-            data["race_status"] = {
-                "sim_boot_time_ms": 433289,
-                "race_start_boot_time_ms": 3307,
-                "race_finish_time_ns": -1,
-            }
-            pilot.tick()  # -> FLYING (clock live)
+            self._go_flying(ctrl, data, pilot)
             with patch.object(gp, "IMU_FROZEN_S", -1.0):
                 pilot.tick()  # same ts, past threshold -> idle note
             self.assertTrue(pilot._frozen_noted)
@@ -384,12 +714,15 @@ class GpRaceGateTests(unittest.TestCase):
         try:
             with patch.object(gp, "IMU_FROZEN_S", -1.0):
                 pilot.tick()  # -> WAIT_FOR_START
-                # Running race but the sim's physics are idle (frozen IMU
-                # clock): flying now would command a clamped drone and tip
-                # it over at release. Must hold.
                 data["race_status"] = {
-                    "sim_boot_time_ms": 433289,
-                    "race_start_boot_time_ms": 3307,
+                    "sim_boot_time_ms": 1000,
+                    "race_start_boot_time_ms": -1,
+                    "race_finish_time_ns": -1,
+                }
+                pilot.tick()
+                data["race_status"] = {
+                    "sim_boot_time_ms": 5000,
+                    "race_start_boot_time_ms": 4000,
                     "race_finish_time_ns": -1,
                 }
                 pilot.tick()
@@ -406,15 +739,7 @@ class GpRaceGateTests(unittest.TestCase):
 
         ctrl, data, pilot = self._pilot()
         try:
-            pilot.tick()
-            data["race_status"] = {
-                "sim_boot_time_ms": 433289,
-                "race_start_boot_time_ms": 3307,
-            }
-            pilot.tick()
-            self.assertEqual(pilot.phase, Phase.FLYING)
-            # One stale/blipped heartbeat must NOT zero-thrust + re-seed the
-            # estimator mid-air (the launch tip-over failure).
+            self._go_flying(ctrl, data, pilot)
             data["armed"] = False
             pilot.tick()
             self.assertEqual(pilot.phase, Phase.FLYING)
@@ -431,17 +756,11 @@ class GpRaceGateTests(unittest.TestCase):
 
         ctrl, data, pilot = self._pilot()
         try:
-            pilot.tick()
-            data["race_status"] = {
-                "sim_boot_time_ms": 433289,
-                "race_start_boot_time_ms": 3307,
-            }
-            pilot.tick()
-            self.assertEqual(pilot.phase, Phase.FLYING)
-            data["armed"] = False  # real sim reset: disarm persists
+            self._go_flying(ctrl, data, pilot)
+            data["armed"] = False
             with patch.object(gp, "DISARM_PERSIST_S", 0.0):
-                pilot.tick()  # starts the confirmation window
-                pilot.tick()  # window elapsed -> recycle
+                pilot.tick()
+                pilot.tick()
             self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
         finally:
             pilot.shutdown()
@@ -452,8 +771,6 @@ class GpRaceGateTests(unittest.TestCase):
         ctrl, data, pilot = self._pilot()
         try:
             pilot.tick()
-            # Finished race: the sim parks the drone and ignores setpoints,
-            # so flying it would be a silent dead-stick. Hold and instruct.
             data["race_status"] = {
                 "sim_boot_time_ms": 433289,
                 "race_start_boot_time_ms": 3307,
@@ -476,6 +793,161 @@ class GpRaceGateTests(unittest.TestCase):
             data["armed"] = False  # sim reset disarms the drone
             pilot.tick()
             self.assertEqual(pilot.phase, Phase.WAIT_FOR_DATA)
+        finally:
+            pilot.shutdown()
+
+    def test_collision_enters_backoff_then_resumes(self):
+        import simulator.gp_pilot as gp
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            with patch.object(gp, "BACKOFF_DIST_M", 100.0), patch.object(
+                gp, "BACKOFF_MAX_S", 100.0
+            ):
+                pilot.tick()
+                self.assertEqual(pilot.phase, Phase.BACKOFF)
+                self.assertIsNone(data.get("collision"))
+                _r, pitch_cmd, _y, thrust = ctrl.set_attitude_quat_deg.call_args[0]
+                self.assertGreater(pitch_cmd, 0.0)
+                self.assertGreater(thrust, 0.2)
+            with patch.object(gp, "BACKOFF_MIN_S", 0.0), patch.object(
+                gp, "BACKOFF_DIST_M", 0.0
+            ):
+                pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_levels_pitch_when_reverse_overspeed(self):
+        """Reverse > BACKOFF_MAX_SPEED must not keep commanding hard nose-up."""
+        from simulator.gp_pilot import BACKOFF_PITCH_DEG, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                vX=-3.0,  # ~11 km/h reverse
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLess(abs(pitch_cmd), 0.5)
+            self.assertLess(pitch_cmd, 0.5 * BACKOFF_PITCH_DEG)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_nose_up_when_reverse_slow(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                vX=0.0,
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertGreater(pitch_cmd, 0.0)
+            self.assertEqual(pilot.phase, Phase.BACKOFF)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_resume_rearms_lean_ramp_and_resets_est(self):
+        """Collision resume must match GO hygiene so vX≈0 cannot open-loop dive."""
+        import simulator.gp_pilot as gp
+        from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            flying_since_go = pilot._flying_since
+            # Age past lean ramp so a bare FLYING resume would skip it.
+            pilot._flying_since = time.time() - 5.0
+            pilot.est.vel_body[:] = 2.5
+            pilot.est.vel_ned[:] = 2.5
+
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            with patch.object(gp, "BACKOFF_DIST_M", 100.0), patch.object(
+                gp, "BACKOFF_MAX_S", 100.0
+            ):
+                pilot.tick()
+                self.assertEqual(pilot.phase, Phase.BACKOFF)
+
+            with (
+                patch.object(gp, "BACKOFF_MIN_S", 0.0),
+                patch.object(gp, "BACKOFF_DIST_M", 0.0),
+                patch.object(pilot.est, "reset", wraps=pilot.est.reset) as rst,
+            ):
+                pilot.tick()
+
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            rst.assert_called()
+            self.assertIsNotNone(pilot._flying_since)
+            self.assertGreater(pilot._flying_since, flying_since_go)
+            self.assertLess(time.time() - pilot._flying_since, 0.5)
+            snap = pilot.est.snapshot()
+            self.assertAlmostEqual(float(snap["vel_body"][0]), 0.0, places=5)
+
+            # Guidance with vX=0 just after resume must not saturate min dive.
+            from simulator.gp_pilot import _fresh_hold_state, compute_guidance
+
+            _rr, _pr, _yr, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=np.array([1.0, 0.0, 0.0, 0.0]),
+                vY=0.0,
+                vD=0.0,
+                vision={
+                    "frame_id": 1,
+                    "body_x_m": 12.0,
+                    "body_y_m": 0.0,
+                    "body_z_m": 0.0,
+                    "normal_body": None,
+                    "reliable": True,
+                },
+                vision_vel=None,
+                state=_fresh_hold_state(),
+                vX=0.0,
+                flying_t=time.time() - pilot._flying_since,
+            )
+            self.assertGreaterEqual(dbg["pitch_des_deg"], DESIRED_PITCH_DEG - 0.01)
+            self.assertGreater(dbg["pitch_des_deg"], PITCH_DES_MIN_DEG)
+        finally:
+            pilot.shutdown()
+
+    def test_abort_to_wait_resets_estimator(self):
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot.est.vel_body[:] = 3.0
+            with patch.object(pilot.est, "reset", wraps=pilot.est.reset) as rst:
+                data["race_status"] = {
+                    "sim_boot_time_ms": 5000,
+                    "race_start_boot_time_ms": 6000,  # future = new countdown
+                    "race_finish_time_ns": -1,
+                }
+                pilot.tick()
+            self.assertEqual(pilot.phase, Phase.WAIT_FOR_START)
+            rst.assert_called()
+            self.assertAlmostEqual(float(pilot.est.snapshot()["vel_body"][0]), 0.0)
         finally:
             pilot.shutdown()
 
