@@ -224,9 +224,6 @@ class Controller:
         self._vz = vz
         self._yaw_rate = yaw_rate
 
-    def disarm(self):
-        pass
-
     def update(self):
         self.pilot.tick()
 
@@ -279,6 +276,24 @@ class Controller:
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
             1,  # arm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    # -------------------------------
+    # Disarm the drone (used by manual auto-land on touchdown)
+    # -------------------------------
+    def disarm(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,  # disarm
             0,
             0,
             0,
