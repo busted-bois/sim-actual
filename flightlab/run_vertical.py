@@ -723,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_log(run_dir / "log.jsonl", log)
         _write_report(run_dir / "report.md", args.method, results, run_dir)
         _print_table(results)
-        print(f"\nreport → {run_dir / 'report.md'}", flush=True)
+        print(f"\nreport -> {run_dir / 'report.md'}", flush=True)
         bus.close()
 
     all_pass = all(r.passed for r in results) and len(results) > 0
