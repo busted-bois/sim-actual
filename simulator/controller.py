@@ -1,6 +1,9 @@
+import math
 import time
 
 from pymavlink import mavutil
+
+from simulator.gyro_ahrs import euler_to_quat
 
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
@@ -40,6 +43,10 @@ def update_motor_control(mavlink_conn, system_boot_ms):
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
 RATES_ATTITUDE_MASK = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+# AndurilGP wire form: ignore body roll/pitch/yaw RATES, use the attitude
+# quaternion. Their degree-valued commands ride the quaternion; body rates go
+# out as zero. This is the encoding that flew the course (their main.py).
+ATT_QUAT_TYPE_MASK = 0b00000111
 
 
 def _send_attitude_rates(
@@ -60,6 +67,33 @@ def _send_attitude_rates(
         roll_rate,
         pitch_rate,
         yaw_rate,
+        thrust,
+    )
+
+
+def _send_attitude_quat(
+    mavlink_conn,
+    system_boot_ms,
+    roll_deg=0.0,
+    pitch_deg=0.0,
+    yaw_deg=0.0,
+    thrust=0.0,
+):
+    now_ms = int(time.time() * 1000)
+    q = euler_to_quat(
+        math.radians(roll_deg),
+        math.radians(pitch_deg),
+        math.radians(yaw_deg),
+    )
+    mavlink_conn.mav.set_attitude_target_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        ATT_QUAT_TYPE_MASK,
+        q,
+        0.0,
+        0.0,
+        0.0,  # body rates ignored by the mask
         thrust,
     )
 
@@ -126,10 +160,16 @@ class Controller:
         self.data = data
         self.system_boot_ms = system_boot_ms
         self.control_mode = "motor"
+        # Per-pilot command rate: spec VADR-TS-003 4.4 caps it below 100 Hz.
+        # Default 90 (IBVS/others); GPPilot lowers it to the original 60.
+        self.control_hz = CONTROL_HZ
         self._roll_rate = 0.0
         self._pitch_rate = 0.0
         self._yaw_rate = 0.0
         self._thrust = 0.0
+        self._quat_roll_deg = 0.0
+        self._quat_pitch_deg = 0.0
+        self._quat_yaw_deg = 0.0
         self._vx = 0.0
         self._vy = 0.0
         self._vz = 0.0
@@ -141,11 +181,17 @@ class Controller:
 
         from simulator.auto_flight import auto_flight_enabled
 
+        # AUTO_PILOT=gp works outside overnight AUTO_FLIGHT (make auto-gp /
+        # Anduril-style single-shot main). Other AUTO_PILOT values only apply
+        # under make auto.
+        pilot = os.environ.get("AUTO_PILOT", "").strip().lower()
+        if pilot == "gp":
+            from simulator.gp_pilot import GPPilot
+
+            return GPPilot(self, self.data)
+
         if auto_flight_enabled():
-            # AUTO_PILOT selects the auto-flight brain. Default is the IBVS
-            # pixel servo (needs no position estimate; smoothest live flight
-            # so far). AUTO_PILOT=vnav selects the world-map vision navigator
-            # (NaN-proofed EKF pose).
+            # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
             if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
                 from simulator.vision_nav_pilot import VisionNavPilot
 
@@ -166,14 +212,17 @@ class Controller:
         self._yaw_rate = yaw_rate
         self._thrust = thrust
 
+    def set_attitude_quat_deg(self, roll_deg, pitch_deg, yaw_deg, thrust):
+        self._quat_roll_deg = roll_deg
+        self._quat_pitch_deg = pitch_deg
+        self._quat_yaw_deg = yaw_deg
+        self._thrust = thrust
+
     def set_velocity_ned(self, vx, vy, vz, yaw_rate):
         self._vx = vx
         self._vy = vy
         self._vz = vz
         self._yaw_rate = yaw_rate
-
-    def disarm(self):
-        pass
 
     def update(self):
         self.pilot.tick()
@@ -196,6 +245,15 @@ class Controller:
                 yaw_rate=self._yaw_rate,
                 thrust=self._thrust,
             )
+        elif self.control_mode == "attitude_quat":
+            _send_attitude_quat(
+                self.sim_conn,
+                self.system_boot_ms,
+                roll_deg=self._quat_roll_deg,
+                pitch_deg=self._quat_pitch_deg,
+                yaw_deg=self._quat_yaw_deg,
+                thrust=self._thrust,
+            )
         elif self.control_mode == "position":
             _send_velocity_ned(
                 self.sim_conn,
@@ -206,7 +264,7 @@ class Controller:
                 yaw_rate=self._yaw_rate,
             )
 
-        time.sleep(1.0 / CONTROL_HZ)
+        time.sleep(1.0 / self.control_hz)
 
     # -------------------------------
     # Arm the drone
@@ -218,6 +276,24 @@ class Controller:
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
             1,  # arm
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    # -------------------------------
+    # Disarm the drone (used by manual auto-land on touchdown)
+    # -------------------------------
+    def disarm(self):
+        self.sim_conn.mav.command_long_send(
+            self.sim_conn.target_system,
+            self.sim_conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,  # disarm
             0,
             0,
             0,

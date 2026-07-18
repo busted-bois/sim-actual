@@ -210,24 +210,71 @@ class SimInterface:
 
     # ---- gate map --------------------------------------------------------
     def capture_gate_map(
-        self, path: str = GATE_MAP_PATH, timeout_s: float = 20.0
+        self, path: str = GATE_MAP_PATH, timeout_s: float = 90.0
     ) -> list:
         """Wait for the track gate list over MAVLink, persist it to JSON.
 
-        The sim broadcasts gate poses (relative NED) via ENCAPSULATED_DATA;
-        we snapshot them once so downstream modules have a fixed gate map.
+        The sim broadcasts gate poses (relative NED) via ENCAPSULATED_DATA as
+        a short race-start burst. Missed / VQ2-nulled bursts fall back to a
+        previously saved ``path`` (same as ``make fly`` / fly2).
+
+        If ``path`` already exists, only wait ``min(timeout_s, 15)`` for a live
+        burst before falling back so ``make fly-policy`` can arm promptly.
         """
+        has_saved = os.path.isfile(path)
+        live_wait = min(timeout_s, 15.0) if has_saved else timeout_s
+        print(
+            "[sim] waiting for gate-map burst — click Race in FlightSim now "
+            f"(or restart Race) within {live_wait:.0f}s"
+            + (f"; will fall back to {path}" if has_saved else "")
+            + " ...",
+            flush=True,
+        )
         t0 = time.monotonic()
-        while time.monotonic() - t0 < timeout_s:
+        last_status = 0.0
+        while time.monotonic() - t0 < live_wait:
             gates = self.gate_list()
-            if gates:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w") as f:
-                    json.dump({"gates": gates}, f, indent=2)
-                print(f"[sim] gate map ({len(gates)} gates) -> {path}", flush=True)
-                return gates
+            # Skip VQ2-nulled bursts (all zeros) — fall through to saved JSON.
+            if gates and self.data.get("track_positions_valid") is not False:
+                usable = [
+                    g
+                    for g in gates
+                    if abs(g["pos"][0]) + abs(g["pos"][1]) + abs(g["pos"][2]) >= 0.01
+                ]
+                if usable:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w") as f:
+                        json.dump({"gates": usable}, f, indent=2)
+                    print(
+                        f"[sim] gate map ({len(usable)} gates) -> {path}",
+                        flush=True,
+                    )
+                    return usable
+            now = time.monotonic()
+            if now - last_status >= 5.0:
+                left = max(0.0, live_wait - (now - t0))
+                print(
+                    f"[sim] still waiting for gate map... {left:.0f}s left",
+                    flush=True,
+                )
+                last_status = now
             time.sleep(0.1)
-        print("[sim] WARNING: no gate map received from sim", flush=True)
+        if has_saved:
+            try:
+                saved = load_gate_map(path)
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                saved = []
+            if saved:
+                print(
+                    f"[sim] live burst missed; using saved {path} ({len(saved)} gates)",
+                    flush=True,
+                )
+                return saved
+        print(
+            "[sim] WARNING: no gate map — run `make capture-gates`, click Race "
+            "while it listens, then retry",
+            flush=True,
+        )
         return []
 
     # ---- actuation -------------------------------------------------------
