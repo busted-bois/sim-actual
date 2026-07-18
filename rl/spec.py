@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from rl.calibration import load_calibration
+
 # ----------------------------------------------------------------------------
 # Camera intrinsics (fixed, given). fx=fy=320, cx=320, cy=180 => 640x360 frame.
 # ----------------------------------------------------------------------------
@@ -64,12 +66,18 @@ GATE_CORNERS_LOCAL = np.array(
 # ----------------------------------------------------------------------------
 # Control / action space — attitude-rate + thrust.
 # ----------------------------------------------------------------------------
-MAX_ROLL_RATE = 4.0  # rad/s
-MAX_PITCH_RATE = 4.0
-MAX_YAW_RATE = 3.0
+# Match rl.deploy's LIVE_RATE_CLIP (±0.60 rad/s): the live FlightSim plant is
+# unstable well below the old ±4 caps, so training with them taught moves the
+# deploy clamp then cut off. Train inside the envelope the policy will fly in.
+MAX_ROLL_RATE = 0.6  # rad/s
+MAX_PITCH_RATE = 0.6
+MAX_YAW_RATE = 0.6
 THRUST_MIN = 0.0
 THRUST_MAX = 1.0
-HOVER_THRUST = 0.5
+# Measured by `make attitude-harness` (flightlab/calibration.json). Default is
+# the live-sim hover ~0.27 (GPPilot measured 0.264) — a policy trained around
+# a 0.5 hover double-thrusts live.
+HOVER_THRUST = float(load_calibration().get("hover_thrust", 0.27))
 
 # Policy emits 4 values in [-1, 1]; scale_action() maps to physical commands.
 ACTION_DIM = 4
@@ -182,3 +190,18 @@ def scale_action(a: np.ndarray) -> np.ndarray:
     yaw = a[2] * MAX_YAW_RATE
     thrust = (a[3] + 1.0) * 0.5  # [-1,1] -> [0,1]
     return np.array([roll, pitch, yaw, thrust], dtype=np.float64)
+
+
+def unscale_action(cmd: np.ndarray) -> np.ndarray:
+    """Inverse of scale_action: physical (rates rad/s, thrust [0,1]) -> [-1,1]^4."""
+    cmd = np.asarray(cmd, dtype=np.float64)
+    a = np.array(
+        [
+            cmd[0] / MAX_ROLL_RATE,
+            cmd[1] / MAX_PITCH_RATE,
+            cmd[2] / MAX_YAW_RATE,
+            2.0 * cmd[3] - 1.0,
+        ],
+        dtype=np.float64,
+    )
+    return np.clip(a, -1.0, 1.0)

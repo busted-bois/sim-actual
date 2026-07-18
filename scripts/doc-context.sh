@@ -12,7 +12,8 @@ MAIN_DATE="$(git log -1 --format='%ci' "$MAIN_SHA" | cut -d' ' -f1)"
 
 PREV_SHA=""
 if [[ -f "$DOC" ]]; then
-  PREV_SHA="$(grep -E '^\| \*\*Main commit\*\*' "$DOC" | sed -n 's/.*`\([0-9a-f]\{7,40\}\)`.*/\1/p' | head -1)"
+  # No match is expected (new or reseeded doc); pipefail would otherwise abort here.
+  PREV_SHA="$(grep -E '^\| \*\*Main commit\*\*' "$DOC" | sed -n 's/.*`\([0-9a-f]\{7,40\}\)`.*/\1/p' | head -1 || true)"
 fi
 
 echo "=== MAIN_SHA ==="

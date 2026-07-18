@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics vertical capture dataset train-gatenet train-ppo fly-policy rl-test
+.PHONY: i install check test sim view auto auto-gp control-flight manual free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics vertical capture dataset train-gatenet train-ppo fly-policy rl-test log-demos train-bc
 
 i install:
 	uv sync
@@ -19,14 +19,27 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector -v
 
 sim:
 	uv run main.py
 
+# Manual keyboard flight — WASD move, Q/E turn, R/F up/down, C level, L auto-land.
+manual:
+	uv run manual.py
+
 # Auto flight — continuous overnight retry; Ctrl+C stops
 auto:
 	uv run auto.py
+
+# Smooth GP control flight — YOLO/PnP vision -> GPPilot guidance (~8 km/h
+# cruise speed loop, collision backoff). Single-shot: arm + WAIT_FOR_* inside
+# the pilot. Not overnight `make auto`.
+control-flight:
+	uv run auto_gp.py
+
+# Back-compat alias for the original AndurilGP-style entry name.
+auto-gp: control-flight
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
@@ -95,6 +108,16 @@ dataset:
 # Module 3: train GateNet U-Net -> rl/data/gatenet.pt
 train-gatenet:
 	uv run -m rl.gatenet
+
+# GP expert demos: AndurilGP guidance rollouts in the internal env
+# -> rl/data/gp_demos.npz (offline, no live sim).
+log-demos:
+	uv run -m rl.log_demos
+
+# BC pretrain on GP demos -> rl/data/policy_bc.pt (train-ppo warm-starts
+# from it automatically when present).
+train-bc:
+	uv run -m rl.train_bc
 
 # Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
 train-ppo:
