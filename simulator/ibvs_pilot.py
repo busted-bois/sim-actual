@@ -1,26 +1,13 @@
 """IBVS auto-flight pilot: fly the gate the camera SEES, in image space.
 
-No position estimate anywhere. Measured 2026-07-02 (nav_log_auto_*.csv): the
-VQ2 EKF pose was non-finite from the FIRST tick of every attempt, so any
-world/map-based guidance never acquired a target and every run was 100% SCAN.
-This pilot's only inputs are things that cannot go NaN-blind the same way:
+No position estimate. Inputs: YOLO pixels + HIGHRES_IMU (tilt CF + pressure).
 
-  * YOLO detections (raw pixels: box + 8 corner keypoints) at ~30 Hz, and
-  * HIGHRES_IMU (accel+gyro, 100 Hz) for a complementary-filter attitude (the
-    sim has no auto-leveling; roll/pitch must be actively regulated) and a
-    pressure-altitude hold (the only altitude reference we allow ourselves).
-
-Control (image-based visual servoing; per fresh inference frame):
-  yaw     <- bearing to the opening centre, atan((u-cx)/fx) (steering)
-  thrust  <- vertical pixel error, offset for the 20 deg camera up-tilt
-             (a gate at our own altitude sits BELOW the image centre), plus a
-             pressure-alt-rate damper
-  fwd     <- apparent gate size: small in frame -> lean forward, near -> coast
-  COMMIT  <- gate wide enough + centred (or it just vanished at point-blank
-             range while centred) -> timed blind dash straight through, count
-             the pass, brake, scan for the next gate. Detection ALWAYS dies at
-             point-blank range, so the last metres are flown blind on attitude
-             hold alone.
+Control (image-based visual servoing) on the 7d04af1 attitude_quat wire
+(degree setpoints, not body rates — rates backflipped at GO):
+  yaw     <- bearing to opening centre (deg)
+  thrust  <- vertical pixel error vs AIM_V (20 deg cam) + pressure hold
+  fwd     <- soft nose-down lean from apparent size (deg, GP-style clamps)
+  COMMIT  <- timed blind dash when spread + centred
 """
 
 from __future__ import annotations
@@ -32,16 +19,22 @@ import time
 
 import numpy as np
 
-from rl.fly2_course import (
-    HOVER_T,
-    K_ATT,
-    K_YAW,
-    RATE_CLIP,
-    SIGN_PITCH,
-    SIGN_ROLL,
-    SIGN_YAW,
-    YAW_CLIP,
-)
+# Wire encoding from commit 7d04af1 GPPilot: degree attitude on the
+# attitude-quaternion path. Body-rate SET_ATTITUDE_TARGET backflipped at GO.
+HOVER_THRUST = 0.264
+IBVS_CONTROL_HZ = 60
+KP, KR, KY = 1.0, -1.0, -1.0  # same signs as GPPilot compute_guidance
+PITCH_WIRE_MAX_DEG = 12.0
+MAX_BANK_DEG = 10.0
+YAW_WIRE_MAX_DEG = 12.0
+CMD_SLEW_DEG_S = 90.0
+THRUST_SLEW_PER_S = 1.0
+LEAN_RAMP_S = 2.5  # after SETTLE: no dive past cruise pitch
+CRUISE_PITCH_DEG = -2.0  # light nose-down (GP DESIRED_PITCH_DEG)
+COMMIT_PITCH_DEG = -4.0
+BRAKE_PITCH_DEG = 3.0
+SCAN_YAW_DEG = 8.0
+RIGHT_THRUST = 0.20
 
 IMG_W, IMG_H = 640.0, 360.0
 CX, CY, FX = 320.0, 180.0, 320.0
@@ -54,10 +47,35 @@ AIM_V = CY + FX * math.tan(CAM_TILT_RAD)
 KP_CONF = 0.7  # keypoint confidence for "corner is real"
 STATUS_LOG_INTERVAL_S = 1.0
 NAV_LOG_INTERVAL_S = 0.1
-K_RIGHT = 1.5  # self-righting P gain (rad/s per rad of estimated tilt)
-RIGHT_CLIP = 1.0  # self-righting rate authority (rad/s; > RATE_CLIP on purpose)
-RIGHT_THRUST = 0.20  # low thrust while righting: hover thrust while inverted
-#                      powers the drone into the ground
+
+
+class _CmdSlew:
+    """Rate-limit attitude/thrust on the quat wire (same idea as GP CommandSlew)."""
+
+    def __init__(self, hz: float = IBVS_CONTROL_HZ):
+        self._max_deg = CMD_SLEW_DEG_S / hz
+        self._max_thrust = THRUST_SLEW_PER_S / hz
+        self._prev: tuple[float, float, float, float] | None = None
+
+    def reset(self) -> None:
+        self._prev = None
+
+    def apply(
+        self, roll: float, pitch: float, yaw: float, thrust: float
+    ) -> tuple[float, float, float, float]:
+        if self._prev is None:
+            self._prev = (roll, pitch, yaw, thrust)
+            return self._prev
+        pr, pp, py, pt = self._prev
+        m = self._max_deg
+        out = (
+            pr + float(np.clip(roll - pr, -m, m)),
+            pp + float(np.clip(pitch - pp, -m, m)),
+            py + float(np.clip(yaw - py, -m, m)),
+            pt + float(np.clip(thrust - pt, -self._max_thrust, self._max_thrust)),
+        )
+        self._prev = out
+        return out
 
 
 def _wrap(a: float) -> float:
@@ -133,33 +151,33 @@ class IBVSPilot:
             min_box_w=14.0,  # ignore boxes narrower than this (px, background)
             match_px=140.0,  # held-target update must be this close (px)
             lost_hold_t=0.5,  # keep servoing on the frozen error this long (s)
-            k_yaw_ex=1.0,  # yaw_err = k * atan(ex) (bearing to the opening)
+            k_yaw_ex=1.0,  # yaw_err_deg = k * deg(atan(ex))
             k_th_ey=0.10,  # thrust per unit normalized vertical error
             k_pa=0.020,  # thrust per metre of pressure-alt error (holds)
             k_pad=0.015,  # thrust per m/s of pressure-alt rate (damping)
             th_clip=0.035,  # thrust authority around hover (+/-)
-            k_size=0.10,  # forward lean at S=0 (far gate), tapering to coast
+            # Soft degree leans (7d04af1 GP wire). Former rad leans backflipped.
+            k_size_deg=5.0,  # forward lean at S=0 (far), tapering to coast
             s_near=200.0,  # inner-corner spread (px) where lean tapers out
-            lean_coast=0.02,  # residual forward lean when near
+            lean_coast_deg=2.0,  # residual nose-down when near
             s_commit=260.0,  # spread (px, ~1.85 m) to trigger the blind dash
             s_drop_commit=190.0,  # spread at last sight for a dropout-commit
             ex_commit=0.08,  # |ex| gate to commit (normalized)
             ey_commit=0.14,  # |ey| gate to commit (normalized)
-            commit_lean=0.08,  # forward lean during the blind dash
-            t_commit=2.2,  # blind dash duration (s, ~2.6+ m)
-            commit_trim=0.15,  # yaw-only trim clip while the gate is still
-            # visible during COMMIT (guided commit -- translation stays blind)
+            commit_lean_deg=4.0,  # nose-down during blind dash
+            t_commit=2.2,  # blind dash duration (s)
+            commit_trim_deg=8.0,  # yaw trim while gate still visible in COMMIT
             t_brake=1.2,  # reverse-lean brake after the dash (s)
-            brake_lean=0.05,  # backward tilt while braking
-            scan_yaw=0.35,  # yaw error injected while scanning
-            t_settle_min=2.0,  # post-reset SETTLE: orient + see before flying
-            t_settle_max=5.0,  # ...but never sit longer than this
-            settle_climb=1.5,  # gentle climb (m of pressure alt) off the ramp
-            settle_att_tol=0.1,  # filter-vs-accel agreement to leave SETTLE (rad)
-            settle_frames=5,  # fresh YOLO frames of the NEW world required
-            quasi_pa=0.3,  # |pressure-alt rate| below this = quasi-static (m/s)
-            down_cos=-0.3,  # accel cos(roll)cos(pitch) below this = inverted
-            down_t=1.0,  # ...sustained this long while static -> GROUNDED
+            brake_lean_deg=3.0,  # nose-up while braking
+            scan_yaw_deg=SCAN_YAW_DEG,  # yaw sweep while scanning
+            t_settle_min=2.0,  # post-reset SETTLE: level + see before flying
+            t_settle_max=5.0,
+            settle_climb=0.4,  # gentle climb (m) — was 1.5, blew pad early
+            settle_att_tol=0.1,
+            settle_frames=5,
+            quasi_pa=0.3,
+            down_cos=-0.3,
+            down_t=1.0,
         )
         self.n_passed = 0
         self.phase = "SETTLE"  # never fly blind: orient + see, then chase
@@ -169,6 +187,8 @@ class IBVSPilot:
         self._down_since = None
         self._down_logged = False
         self.tilt = _TiltFilter()
+        self._cmd_slew = _CmdSlew()
+        self._fly_since = None  # lean-ramp clock after SETTLE
         self._ctr = None  # (u, v) of the held gate centre
         self._ex = 0.0
         self._ey = 0.0
@@ -182,16 +202,17 @@ class IBVSPilot:
         self._pa_prev_t = None
         self._last_frame_id = None
         self._unsafe_ticks = 0
-        self._last_tgt_pitch = 0.0
+        self._last_tgt_pitch_deg = 0.0
         self._scan_dir = 1.0
         self._scan_since = None
         self._last_status_log = 0.0
         self._nav_log = None
         self._nav_wr = None
         self._last_nav_log = 0.0
-        controller.set_control_mode("attitude")
-        controller.set_attitude_rates(0, 0, 0, HOVER_T)
-        print("[ibvs] pixel-servo pilot ready (no position estimate)", flush=True)
+        controller.control_hz = IBVS_CONTROL_HZ
+        controller.set_control_mode("attitude_quat")
+        controller.set_attitude_quat_deg(0.0, 0.0, 0.0, HOVER_THRUST)
+        print("[ibvs] pixel-servo pilot ready (attitude_quat wire)", flush=True)
 
     @property
     def gates_passed(self) -> int:
@@ -206,7 +227,12 @@ class IBVSPilot:
         self._down_since = None
         self._down_logged = False
         self.tilt.reset()
+        self._cmd_slew.reset()
+        self._fly_since = None
         self._ctr = None
+        self._ex = 0.0
+        self._ey = 0.0
+        self._spread = 0.0
         self._last_seen = None
         self._commit_until = 0.0
         self._brake_until = 0.0
@@ -216,20 +242,22 @@ class IBVSPilot:
         self._pa_prev_t = None
         self._last_frame_id = None
         self._unsafe_ticks = 0
-        self._last_tgt_pitch = 0.0
+        self._last_tgt_pitch_deg = 0.0
         self._scan_dir = 1.0
         self._scan_since = None
 
     def on_attempt_start(self) -> None:
         self._reset_state()
         self._open_nav_log()
+        self.controller.set_control_mode("attitude_quat")
+        self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, HOVER_THRUST)
 
     def reset_for_attempt(self) -> None:
         self._reset_state()
         self._close_nav_log()
         self.data.pop("pose", None)
-        self.controller.set_control_mode("attitude")
-        self.controller.set_attitude_rates(0, 0, 0, HOVER_T)
+        self.controller.set_control_mode("attitude_quat")
+        self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, HOVER_THRUST)
 
     # --- telemetry --------------------------------------------------------
     def _open_nav_log(self) -> None:
@@ -351,7 +379,7 @@ class IBVSPilot:
 
     def _thrust(self, pa: float | None, pixel_ey: float | None) -> float:
         p = self.p
-        t = HOVER_T
+        t = HOVER_THRUST
         if pixel_ey is not None:
             # gate below the aim line (ey>0) -> we are high -> descend
             t -= p["k_th_ey"] * pixel_ey
@@ -359,42 +387,37 @@ class IBVSPilot:
             t += p["k_pa"] * (self._pa_hold - pa)
         if pa is not None:
             t -= p["k_pad"] * self._pa_rate  # damp vertical rate
-        return float(np.clip(t, HOVER_T - p["th_clip"], HOVER_T + p["th_clip"]))
+        return float(
+            np.clip(t, HOVER_THRUST - p["th_clip"], HOVER_THRUST + p["th_clip"])
+        )
 
     # --- main loop ----------------------------------------------------------
     def tick(self) -> None:
         p = self.p
         now = time.monotonic()
         imu = self.data.get("imu")
-        quasi = abs(self._pa_rate) < p["quasi_pa"]  # not moving vertically
+        quasi = abs(self._pa_rate) < p["quasi_pa"]
         if imu:
-            # Gyro-only while accelerating hard: the accel blend would read
-            # the commanded forward lean as a backward-pitch error. Blend
-            # HARD only while we KNOW we are static: SETTLE/DOWN, no vertical
-            # rate AND a silent gyro (rotation = airborne/leveling, where the
-            # accel measures the thrust axis, not gravity -- boosting there
-            # erased the captured ramp tilt / shortened the dash in sim).
-            hard_accel = self.phase == "COMMIT" or abs(self._last_tgt_pitch) > 0.05
+            hard_accel = (
+                self.phase == "COMMIT" or abs(self._last_tgt_pitch_deg) > 2.0
+            )
             static_now = (
                 self.phase in ("SETTLE", "DOWN") and quasi and self.tilt.gyro_mag < 0.05
             )
-            # During SETTLE: blend ONLY while static (on the ramp the accel is
-            # gravity-true); once lifting/leveling go pure gyro so the truth
-            # captured by the sync is not eroded before flight begins.
             allow = (not hard_accel) and (self.phase != "SETTLE" or static_now)
             self.tilt.update(imu, allow_accel=allow, boost=static_now)
         pa = self._update_pressure(imu, now)
         self._ingest(now)
 
-        # Wrapped: after a tumble the integrated angles can be wound past
-        # +/-pi (roll hit 9.7 rad live); the P loop must see the short arc.
         roll, pitch = _wrap(self.tilt.roll), _wrap(self.tilt.pitch)
-        tgt_roll, tgt_pitch, yaw_err = 0.0, 0.0, 0.0
+        roll_deg = math.degrees(roll)
+        pitch_deg = math.degrees(pitch)
+        # Desired absolute attitude (deg). Wire = GP-style error * KP/KR/KY.
+        pitch_des_deg = 0.0
+        roll_des_deg = 0.0
+        yaw_err_deg = 0.0
         pixel_ey = None
 
-        # --- GROUNDED inverted: static and the accel (gravity, since we are
-        # not moving) says upside down. Flying commands only thrash the wreck
-        # -- go limp and let the race-monitor countdown reset the attempt.
         inverted_acc = (
             self.tilt.f_ok
             and quasi
@@ -412,25 +435,22 @@ class IBVSPilot:
                     print("[ibvs] GROUNDED inverted -- waiting for reset", flush=True)
         else:
             self._down_since = None
-            if self.phase == "DOWN":  # bounced/rolled upright: re-orient
+            if self.phase == "DOWN":
                 self.phase = "SETTLE"
                 self._settle_t0 = None
                 self._settle_synced = False
+                self._fly_since = None
         down = self.phase == "DOWN"
 
-        # --- SETTLE: orient + SEE the new environment before flying. Live
-        # logs 2026-07-04: the drone spawns ~18 deg nose-down (pitch_acc
-        # -0.311 from row 1) while the fresh filter reads level, and TRACK
-        # engaged 0.3 s after reset -- it darted off un-oriented every time.
+        # SETTLE: level quat + soft climb. No rate fighting the spawn tilt.
         settling = self.phase == "SETTLE"
         if settling:
             if self._settle_t0 is None:
                 self._settle_t0 = now
                 self._frames_seen = 0
-                if pa is not None:  # gentle climb clear of the spawn ramp
+                if pa is not None:
                     self._pa_hold = pa + p["settle_climb"]
             if not self._settle_synced:
-                # Static at GO: one accel sample IS the true attitude.
                 self._settle_synced = self.tilt.sync_to_accel()
             dt_settle = now - self._settle_t0
             converged = (
@@ -447,29 +467,30 @@ class IBVSPilot:
                 print(
                     f"[ibvs] SETTLE done in {dt_settle:.1f}s "
                     f"(frames={self._frames_seen} "
-                    f"pitch={math.degrees(pitch):+.0f}deg)",
+                    f"pitch={pitch_deg:+.0f}deg)",
                     flush=True,
                 )
                 self.phase = "SCAN"
                 settling = False
+                self._fly_since = now
                 if pa is not None:
-                    self._pa_hold = pa  # hold the altitude we reached
-            # while settling: targets stay level, thrust holds the climb;
-            # detections are ingested (target may be pre-held) but not acted on
-            roll, pitch = _wrap(self.tilt.roll), _wrap(self.tilt.pitch)
+                    self._pa_hold = pa
+            pitch_des_deg = 0.0
+            roll_des_deg = 0.0
+            yaw_err_deg = 0.0
 
         if not settling and not down and now < self._commit_until:
             self.phase = "COMMIT"
-            tgt_pitch = -p["commit_lean"]
-            # Guided commit: while the gate is STILL visible, keep trimming
-            # heading onto it (translation stays blind) -- fully blind dashes
-            # crossed up to 0.57 m off-centre in the closed-loop sim.
+            pitch_des_deg = -p["commit_lean_deg"]
             if self._last_seen is not None and now - self._last_seen < 0.3:
-                yaw_err = float(
-                    np.clip(math.atan(self._ex), -p["commit_trim"], p["commit_trim"])
+                yaw_err_deg = float(
+                    np.clip(
+                        math.degrees(math.atan(self._ex)),
+                        -p["commit_trim_deg"],
+                        p["commit_trim_deg"],
+                    )
                 )
         elif self.phase == "COMMIT":
-            # dash finished this tick: book the pass, start the brake
             self.n_passed += 1
             print(f"[ibvs] PASSED g{self.n_passed} (timed dash)", flush=True)
             self.phase = "BRAKE"
@@ -480,7 +501,7 @@ class IBVSPilot:
 
         if self.phase == "BRAKE":
             if now < self._brake_until:
-                tgt_pitch = p["brake_lean"]
+                pitch_des_deg = p["brake_lean_deg"]
             else:
                 self.phase = "SCAN"
 
@@ -501,90 +522,101 @@ class IBVSPilot:
                 if (
                     self._spread >= p["s_commit"] and centred and fresh
                 ) or dropped_close:
-                    # Blind dash: detection dies at point-blank range; fly the
-                    # last metres on attitude + pressure hold alone.
                     self.phase = "COMMIT"
                     self._commit_until = now + p["t_commit"]
                     self._pa_hold = self._pa_prev
-                    tgt_pitch = -p["commit_lean"]
+                    pitch_des_deg = -p["commit_lean_deg"]
                     print(
                         f"[ibvs] COMMIT S={self._spread:.0f} ex={self._ex:+.2f}",
                         flush=True,
                     )
                 else:
-                    yaw_err = float(
-                        np.clip(p["k_yaw_ex"] * math.atan(self._ex), -0.5, 0.5)
+                    yaw_err_deg = float(
+                        np.clip(
+                            p["k_yaw_ex"] * math.degrees(math.atan(self._ex)),
+                            -YAW_WIRE_MAX_DEG,
+                            YAW_WIRE_MAX_DEG,
+                        )
                     )
-                    lean = p["k_size"] * max(0.0, 1.0 - self._spread / p["s_near"])
-                    tgt_pitch = -max(lean, p["lean_coast"])
+                    lean = p["k_size_deg"] * max(
+                        0.0, 1.0 - self._spread / p["s_near"]
+                    )
+                    pitch_des_deg = -max(lean, p["lean_coast_deg"])
                     pixel_ey = self._ey
             else:
                 if self._last_seen is not None:
-                    self._ctr = None  # stale: release the track
+                    self._ctr = None
                 self.phase = "SCAN"
-                # Alternate the sweep direction: a one-way scan spiralled the
-                # drone away from the course in the first live run.
                 if self._scan_since is None:
                     self._scan_since = now
                 elif now - self._scan_since > 6.0:
                     self._scan_dir = -self._scan_dir
                     self._scan_since = now
-                yaw_err = self._scan_dir * p["scan_yaw"]
+                yaw_err_deg = self._scan_dir * p["scan_yaw_deg"]
+                pitch_des_deg = CRUISE_PITCH_DEG
                 self._pa_hold = self._pa_hold if self._pa_hold is not None else pa
 
-        thrust = self._thrust(pa, pixel_ey)
-        # ODOMETRY sign convention. EST_SIGNS was tried live 2026-07-02 and
-        # the drone flew INVERTED -- the accel-anchored complementary filter
-        # reports truth-convention angles, so the odometry signs (the config
-        # of the smoothest run so far) are correct here.
-        roll_cmd = float(
-            np.clip(SIGN_ROLL * K_ATT * (tgt_roll - roll), -RATE_CLIP, RATE_CLIP)
-        )
-        pitch_cmd = float(
-            np.clip(SIGN_PITCH * K_ATT * (tgt_pitch - pitch), -RATE_CLIP, RATE_CLIP)
-        )
-        yaw_cmd = float(np.clip(SIGN_YAW * K_YAW * yaw_err, -YAW_CLIP, YAW_CLIP))
+        # Soft launch: no dive past cruise for LEAN_RAMP_S after SETTLE.
+        if (
+            self._fly_since is not None
+            and not settling
+            and not down
+            and (now - self._fly_since) < LEAN_RAMP_S
+            and pitch_des_deg < CRUISE_PITCH_DEG
+        ):
+            pitch_des_deg = CRUISE_PITCH_DEG
 
-        # Safety: flipped. The old freeze-at-hover cutoff recovered only
-        # "half the time" (observed live) -- and hover thrust while inverted
-        # powers the drone into the ground. Actively right instead, driving
-        # the FILTER attitude (which tracked the flip through the gyro) back
-        # to level via the shortest arc, thrust cut low. Note the accel tilt
-        # is useless here: in flight the accelerometer measures the THRUST
-        # axis, not gravity -- it reads near-level even upside down.
+        thrust = self._thrust(pa, pixel_ey)
+        # 7d04af1 GP wire: degree error * KP/KR/KY on attitude_quat.
+        pitch_cmd = float(
+            np.clip(
+                (pitch_des_deg - pitch_deg) * KP,
+                -PITCH_WIRE_MAX_DEG,
+                PITCH_WIRE_MAX_DEG,
+            )
+        )
+        roll_cmd = float(
+            np.clip((roll_des_deg - roll_deg) * KR, -MAX_BANK_DEG, MAX_BANK_DEG)
+        )
+        yaw_cmd = float(
+            np.clip(yaw_err_deg * KY, -YAW_WIRE_MAX_DEG, YAW_WIRE_MAX_DEG)
+        )
+
         unsafe = math.cos(roll) * math.cos(pitch) < 0.1
         if unsafe:
             self._unsafe_ticks += 1
         else:
             self._unsafe_ticks = 0
+
         if down:
-            # Limp on the ground: zero rates, minimum thrust, wait for reset.
-            self.controller.set_attitude_rates(0.0, 0.0, 0.0, 0.18)
+            self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.18)
         elif self._unsafe_ticks >= 5:
-            self._commit_until = 0.0  # a tumble voids any pending commit
+            self._commit_until = 0.0
             self.phase = "RIGHT"
-            r_w, p_w = _wrap(roll), _wrap(pitch)
-            self.controller.set_attitude_rates(
-                float(
-                    np.clip(SIGN_ROLL * K_RIGHT * (0.0 - r_w), -RIGHT_CLIP, RIGHT_CLIP)
-                ),
-                float(
-                    np.clip(SIGN_PITCH * K_RIGHT * (0.0 - p_w), -RIGHT_CLIP, RIGHT_CLIP)
-                ),
-                0.0,
-                RIGHT_THRUST,
+            # Level quat setpoint; low thrust (rate righting backflipped).
+            r_cmd = float(np.clip((0.0 - roll_deg) * KR, -MAX_BANK_DEG, MAX_BANK_DEG))
+            p_cmd = float(
+                np.clip((0.0 - pitch_deg) * KP, -PITCH_WIRE_MAX_DEG, PITCH_WIRE_MAX_DEG)
             )
+            self.controller.set_attitude_quat_deg(r_cmd, p_cmd, 0.0, RIGHT_THRUST)
         else:
-            self.controller.set_attitude_rates(roll_cmd, pitch_cmd, yaw_cmd, thrust)
+            roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
+                roll_cmd, pitch_cmd, yaw_cmd, thrust
+            )
+            self.controller.set_attitude_quat_deg(
+                roll_cmd, pitch_cmd, yaw_cmd, thrust
+            )
+
         if self.phase != "SCAN":
             self._scan_since = None
-        self._last_tgt_pitch = tgt_pitch
+        self._last_tgt_pitch_deg = pitch_des_deg
 
         if now - self._last_status_log >= STATUS_LOG_INTERVAL_S:
             self._last_status_log = now
             print(
                 f"[ibvs] {self.phase} ex={self._ex:+.2f} ey={self._ey:+.2f} "
-                f"S={self._spread:.0f} passed={self.n_passed}",
+                f"S={self._spread:.0f} passed={self.n_passed} "
+                f"pd={pitch_des_deg:+.1f}",
                 flush=True,
             )
         if self._nav_wr is not None and now - self._last_nav_log >= NAV_LOG_INTERVAL_S:
