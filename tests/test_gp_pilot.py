@@ -8,10 +8,18 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from simulator.gp_pilot import (
+    BACKOFF_BRAKE_PITCH_DEG,
+    BACKOFF_BRAKE_S,
+    BACKOFF_COAST_S,
+    BACKOFF_MAX_S,
+    BACKOFF_PITCH_DEG,
+    BACKOFF_PITCH_WIRE_MAX_DEG,
+    BACKOFF_PUSH_S,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
     PERP_BLEND_DIST,
+    _backoff_pitch_target,
     _fresh_hold_state,
     compute_guidance,
 )
@@ -495,6 +503,65 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(args[8], 0.3)
 
 
+class BackoffScheduleTests(unittest.TestCase):
+    """The time-scheduled reverse lean, isolated from the pilot and the clock."""
+
+    def test_windows_sum_to_max(self):
+        """Guarantees the timeout can never fire mid-push: a brake always runs."""
+        self.assertAlmostEqual(
+            BACKOFF_PUSH_S + BACKOFF_COAST_S + BACKOFF_BRAKE_S, BACKOFF_MAX_S, places=6
+        )
+
+    def test_decays_to_brake_with_broken_rev(self):
+        """THE runaway regression test.
+
+        rev stuck at 0.0 is exactly what a post-impact strapdown reports when
+        it is still holding pre-collision forward speed. The lean must still
+        decay and reverse on elapsed time alone — a broken speed estimate can
+        no longer hold the nose up until the timeout.
+        """
+        self.assertGreater(_backoff_pitch_target(0.1, 0.0, False), 0.0)
+        self.assertAlmostEqual(
+            _backoff_pitch_target(BACKOFF_PUSH_S + BACKOFF_COAST_S, 0.0, False),
+            BACKOFF_BRAKE_PITCH_DEG,
+            places=6,
+        )
+        t = BACKOFF_PUSH_S + BACKOFF_COAST_S
+        while t <= BACKOFF_MAX_S:
+            self.assertLess(_backoff_pitch_target(t, 0.0, False), 0.0)
+            t += 0.1
+
+    def test_lean_decays_monotonically_through_coast(self):
+        prev = _backoff_pitch_target(BACKOFF_PUSH_S, 0.0, False)
+        t = BACKOFF_PUSH_S
+        while t <= BACKOFF_PUSH_S + BACKOFF_COAST_S:
+            cur = _backoff_pitch_target(t, 0.0, False)
+            self.assertLessEqual(cur, prev + 1e-9)
+            prev = cur
+            t += 0.05
+
+    def test_never_exceeds_push_pitch(self):
+        t = 0.0
+        while t <= BACKOFF_MAX_S + 1.0:
+            rev = 0.0
+            while rev <= 5.0:
+                target = _backoff_pitch_target(t, rev, False)
+                self.assertLessEqual(target, BACKOFF_PITCH_DEG + 1e-9)
+                self.assertGreaterEqual(target, BACKOFF_BRAKE_PITCH_DEG - 1e-9)
+                rev += 0.25
+            t += 0.1
+
+    def test_overspeed_brakes_immediately(self):
+        self.assertAlmostEqual(
+            _backoff_pitch_target(0.0, 5.0, False), BACKOFF_BRAKE_PITCH_DEG, places=6
+        )
+
+    def test_brake_latch_overrides_push_window(self):
+        self.assertAlmostEqual(
+            _backoff_pitch_target(0.0, 0.0, True), BACKOFF_BRAKE_PITCH_DEG, places=6
+        )
+
+
 class GpRaceGateTests(unittest.TestCase):
     """WAIT_FOR_START must fly fresh countdowns AND recover stale/reset races."""
 
@@ -803,27 +870,23 @@ class GpRaceGateTests(unittest.TestCase):
         try:
             self._go_flying(ctrl, data, pilot)
             data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
-            with patch.object(gp, "BACKOFF_DIST_M", 100.0), patch.object(
-                gp, "BACKOFF_MAX_S", 100.0
-            ):
+            with patch.object(gp, "BACKOFF_DIST_M", 100.0):
                 pilot.tick()
                 self.assertEqual(pilot.phase, Phase.BACKOFF)
                 self.assertIsNone(data.get("collision"))
                 _r, pitch_cmd, _y, thrust = ctrl.set_attitude_quat_deg.call_args[0]
                 self.assertGreater(pitch_cmd, 0.0)
                 self.assertGreater(thrust, 0.2)
-            with patch.object(gp, "BACKOFF_MIN_S", 0.0), patch.object(
-                gp, "BACKOFF_DIST_M", 0.0
-            ):
-                pilot.tick()
+            # Age past the whole push/coast/brake schedule; the timeout is the
+            # unconditional ceiling on the maneuver.
+            pilot._backoff_start = time.time() - (BACKOFF_MAX_S + 0.1)
+            pilot.tick()
             self.assertEqual(pilot.phase, Phase.FLYING)
         finally:
             pilot.shutdown()
 
-    def test_backoff_levels_pitch_when_reverse_overspeed(self):
-        """Reverse > BACKOFF_MAX_SPEED must not keep commanding hard nose-up."""
-        from simulator.gp_pilot import BACKOFF_PITCH_DEG
-
+    def test_backoff_brakes_when_reverse_overspeed(self):
+        """Reverse > BACKOFF_MAX_SPEED must brake (nose-down), not just level."""
         ctrl, data, pilot = self._pilot()
         try:
             self._go_flying(ctrl, data, pilot)
@@ -839,8 +902,309 @@ class GpRaceGateTests(unittest.TestCase):
                 dt=1.0 / 60.0,
             )
             _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
-            self.assertLess(abs(pitch_cmd), 0.5)
+            self.assertLess(pitch_cmd, 0.0)
             self.assertLess(pitch_cmd, 0.5 * BACKOFF_PITCH_DEG)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_pitch_cmd_clamped_with_biased_attitude(self):
+        """A biased AHRS must not turn the backoff lean into a 20+ deg dive.
+
+        This is the runaway: (BACKOFF_PITCH_DEG - (-17.8)) * KP shipped ~22 deg
+        of nose-up on the attitude wire, worth ~28 km/h in reverse.
+        """
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=-17.8,  # AHRS reseeded to launch pitch mid-air
+                yaw_deg=0.0,
+                vX=0.0,  # and a velocity estimate that sees no reverse
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLessEqual(abs(pitch_cmd), BACKOFF_PITCH_WIRE_MAX_DEG + 1e-9)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_biased_attitude_cannot_invert_the_brake(self):
+        """A biased AHRS must not turn a braking schedule into more nose-up.
+
+        The command is (target - measured), so a -17.8 deg bias makes the raw
+        value at target=-4 come out at +8.8 — nose-UP — and simply pin to the
+        magnitude clamp. The schedule has to outrank the estimate.
+        """
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            # Force the brake window, then report a heavily biased attitude.
+            pilot._backoff_brake_since = time.time()
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=-17.8,
+                yaw_deg=0.0,
+                vX=0.0,
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLess(pitch_cmd, 0.0, "brake inverted into nose-up")
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_roll_cmd_clamped(self):
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=40.0,
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                vX=0.0,
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            roll_cmd, _p, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLessEqual(abs(roll_cmd), MAX_BANK_DEG + 1e-9)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_zero_velocity_on_entry(self):
+        """Entry must clear pre-impact FORWARD speed, or rev reads 0 and the
+        regulator commands maximum nose-up all the way to the timeout."""
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot.est.vel_body[:] = 2.5
+            pilot.est.vel_ned[:] = 2.5
+            pilot._enter_backoff()
+            self.assertEqual(pilot.est.snapshot()["vel_body"][0], 0.0)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_brakes_before_resume(self):
+        """Past push+coast the schedule must be braking and still in BACKOFF."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            pilot._backoff_start = time.time() - (
+                BACKOFF_PUSH_S + BACKOFF_COAST_S + 0.1
+            )
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                vX=-0.5,
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLess(pitch_cmd, 0.0)
+            self.assertEqual(pilot.phase, Phase.BACKOFF)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_thrust_increases_when_sinking(self):
+        """vD damping must add thrust to arrest a sink (bare HOVER_THRUST did not).
+
+        Two pilots, one tick each: CommandSlew caps thrust change per tick, so
+        ticking one pilot twice would measure the slew limiter instead.
+        """
+
+        def one_tick(vD):
+            ctrl, data, pilot = self._pilot()
+            try:
+                self._go_flying(ctrl, data, pilot)
+                pilot._enter_backoff()
+                ctrl.set_attitude_quat_deg.reset_mock()
+                pilot._tick_backoff(
+                    roll_deg=0.0,
+                    pitch_deg=0.0,
+                    yaw_deg=0.0,
+                    vX=0.0,
+                    vY=0.0,
+                    vD=vD,
+                    dt=1.0 / 60.0,
+                )
+                return ctrl.set_attitude_quat_deg.call_args[0][3]
+            finally:
+                pilot.shutdown()
+
+        self.assertGreater(one_tick(2.0), one_tick(0.0))  # +vD = descending
+
+    def test_collision_cooldown_suppresses_reentry(self):
+        """A collision inside the cooldown must be consumed, not left to re-fire."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._last_backoff_end = time.time()
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            # Popped even though entry was suppressed — a stale key would
+            # re-trigger every tick and lock the pilot out permanently.
+            self.assertIsNone(data.get("collision"))
+        finally:
+            pilot.shutdown()
+
+    @staticmethod
+    def _gate(frame_id, bx, reliable=True):
+        return {
+            "anduril_gate": {
+                "frame_id": frame_id,
+                "body_x_m": bx,
+                "body_y_m": 0.0,
+                "body_z_m": 0.0,
+                "pnp_ok": True,
+                "reliable": reliable,
+                "source": "anduril",
+                "normal_body": None,
+            }
+        }
+
+    def _backoff_tick(self, pilot, vX=-0.2):
+        pilot._tick_backoff(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            yaw_deg=0.0,
+            vX=vX,
+            vY=0.0,
+            vD=0.0,
+            dt=1.0 / 60.0,
+        )
+
+    def test_backoff_early_exit_on_reacquire(self):
+        """Seeing the gate again at usable range must cut the reverse short."""
+        from simulator.gp_pilot import BACKOFF_REACQ_MIN_BX_M, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            # Past BACKOFF_MIN_S but well inside push/coast: without a
+            # re-acquire this would keep reversing for seconds yet.
+            pilot._backoff_start = time.time() - 0.7
+            data.update(self._gate(10, BACKOFF_REACQ_MIN_BX_M + 2.0))
+            self._backoff_tick(pilot)
+            self.assertIsNone(pilot._backoff_brake_since)  # hold not met yet
+            pilot._backoff_reacq_since = time.time() - 0.5  # sustain the lock
+            data.update(self._gate(11, BACKOFF_REACQ_MIN_BX_M + 2.0))
+            self._backoff_tick(pilot)
+            self.assertIsNotNone(pilot._backoff_brake_since)
+            self.assertTrue(pilot._backoff_exit_reacq)
+            self.assertEqual(pilot.phase, Phase.BACKOFF)  # brakes first
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_no_early_exit_when_gate_too_close(self):
+        """A gate still in our face is not a re-acquire — keep backing off."""
+        from simulator.gp_pilot import BACKOFF_REACQ_MIN_BX_M
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            pilot._backoff_start = time.time() - 0.7
+            for fid in (10, 11, 12):
+                data.update(self._gate(fid, BACKOFF_REACQ_MIN_BX_M - 2.0))
+                pilot._backoff_reacq_since = time.time() - 0.5
+                self._backoff_tick(pilot)
+            self.assertIsNone(pilot._backoff_brake_since)
+            self.assertFalse(pilot._backoff_exit_reacq)
+        finally:
+            pilot.shutdown()
+
+    def _run_backoff_to_exit(self, exit_reacq):
+        """Drive one backoff to its exit with a live gate lock. Returns pilot."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        self._go_flying(ctrl, data, pilot)
+        pilot._enter_backoff()
+        data.update(self._gate(20, 9.0))
+        self._backoff_tick(pilot, vX=0.0)
+        self.assertIsNotNone(pilot.gate_smoother._last_out)  # lock established
+        pilot._backoff_exit_reacq = exit_reacq
+        pilot._backoff_start = time.time() - (BACKOFF_MAX_S + 0.1)
+        pilot._backoff_brake_since = time.time() - (BACKOFF_BRAKE_S + 0.1)
+        data.update(self._gate(21, 9.0))
+        self._backoff_tick(pilot, vX=0.0)
+        self.assertEqual(pilot.phase, Phase.FLYING)
+        return pilot
+
+    def test_backoff_resume_keeps_gate_lock_on_reacquire(self):
+        """A re-acquire exit must not throw the lock away and crawl blind."""
+        pilot = self._run_backoff_to_exit(exit_reacq=True)
+        try:
+            self.assertIsNotNone(pilot.gate_smoother._last_out)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_resume_drops_gate_lock_on_timeout(self):
+        """A distance/timeout exit has no trusted lock — resume clean."""
+        pilot = self._run_backoff_to_exit(exit_reacq=False)
+        try:
+            self.assertIsNone(pilot.gate_smoother._last_out)
+        finally:
+            pilot.shutdown()
+
+    def test_backoff_vision_reverse_speed_cuts_authority(self):
+        """Vision range-rate alone must cut lean when the IMU reads no reverse."""
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            # IMU says stationary (the post-impact failure mode); vision says
+            # we are reversing well over the cap.
+            pilot._backoff_rev_vis = 5.0
+            pilot._backoff_rev_vis_t = time.time()
+            self.assertGreater(pilot._backoff_rev(0.0), 1.0)
+            ctrl.set_attitude_quat_deg.reset_mock()
+            self._backoff_tick(pilot, vX=0.0)
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLess(pitch_cmd, 0.0)
+        finally:
+            pilot.shutdown()
+
+    def test_collision_during_backoff_brakes(self):
+        """Hitting something behind us must brake, not reverse harder."""
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            pilot._enter_backoff()
+            pilot._backoff_start = time.time() - 0.5  # past the grace window
+            data["collision"] = {"id": 2, "threat_level": 1, "delta": 0.0}
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot._tick_backoff(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                vX=-0.2,
+                vY=0.0,
+                vD=0.0,
+                dt=1.0 / 60.0,
+            )
+            self.assertIsNotNone(pilot._backoff_brake_since)
+            _r, pitch_cmd, _y, _t = ctrl.set_attitude_quat_deg.call_args[0]
+            self.assertLess(pitch_cmd, 0.0)
         finally:
             pilot.shutdown()
 
@@ -867,9 +1231,13 @@ class GpRaceGateTests(unittest.TestCase):
         finally:
             pilot.shutdown()
 
-    def test_backoff_resume_rearms_lean_ramp_and_resets_est(self):
-        """Collision resume must match GO hygiene so vX≈0 cannot open-loop dive."""
-        import simulator.gp_pilot as gp
+    def test_backoff_resume_rearms_lean_ramp_and_keeps_attitude(self):
+        """Collision resume clears speed but must NOT reseed launch pitch.
+
+        GyroAHRS is pure gyro integration with no accel correction, so a
+        mid-air reseed to LAUNCH_PITCH_DEG is a permanent bias for the rest of
+        the flight — and it is what turned the next backoff into a ~22 deg dive.
+        """
         from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG, Phase
 
         ctrl, data, pilot = self._pilot()
@@ -880,23 +1248,30 @@ class GpRaceGateTests(unittest.TestCase):
             pilot._flying_since = time.time() - 5.0
             pilot.est.vel_body[:] = 2.5
             pilot.est.vel_ned[:] = 2.5
+            # Mid-air attitude: level, NOT the launch-ramp pitch. snapshot()
+            # serves the cached _att_deg tuple, so seed that too — the
+            # estimation thread never runs in these tests.
+            pilot.est.ahrs = GyroAHRS(initial_pitch_deg=0.0)
+            pilot.est._att_deg = (0.0, 0.0, 0.0)
 
             data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
-            with patch.object(gp, "BACKOFF_DIST_M", 100.0), patch.object(
-                gp, "BACKOFF_MAX_S", 100.0
-            ):
-                pilot.tick()
-                self.assertEqual(pilot.phase, Phase.BACKOFF)
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.BACKOFF)
 
+            pilot._backoff_start = time.time() - (BACKOFF_MAX_S + 0.1)
             with (
-                patch.object(gp, "BACKOFF_MIN_S", 0.0),
-                patch.object(gp, "BACKOFF_DIST_M", 0.0),
                 patch.object(pilot.est, "reset", wraps=pilot.est.reset) as rst,
+                patch.object(
+                    pilot.est, "zero_velocity", wraps=pilot.est.zero_velocity
+                ) as zv,
             ):
                 pilot.tick()
 
             self.assertEqual(pilot.phase, Phase.FLYING)
-            rst.assert_called()
+            zv.assert_called()
+            rst.assert_not_called()
+            # The drone was level; resume must not stamp -17.8 deg onto it.
+            self.assertLess(abs(pilot.est.snapshot()["att_deg"][1]), 1.0)
             self.assertIsNotNone(pilot._flying_since)
             self.assertGreater(pilot._flying_since, flying_since_go)
             self.assertLess(time.time() - pilot._flying_since, 0.5)

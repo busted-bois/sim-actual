@@ -70,12 +70,34 @@ PITCH_WIRE_MAX_DEG = 18.0  # clamp on attitude-quat pitch command
 CMD_SLEW_DEG_S = 90.0
 THRUST_SLEW_PER_S = 1.0
 
-# Collision backoff: reverse a few meters then re-acquire.
-BACKOFF_DIST_M = 3.0
-BACKOFF_PITCH_DEG = 4.0  # mild nose-up while reversing
-BACKOFF_MAX_SPEED_MPS = 1.5  # ~5.4 km/h reverse cap
+# Collision backoff: reverse only as far as needed to re-acquire the gate.
+#
+# The reverse lean is TIME-SCHEDULED (push → coast → brake), not purely
+# regulated on vX: the IMU strapdown is dead-reckoning only, so vX is
+# untrustworthy right after an impact. The schedule bounds reverse speed even
+# when vX is stuck at zero and the AHRS is biased — the failure mode that used
+# to reverse at 20–30 km/h.
+BACKOFF_MAX_SPEED_MPS = 0.8  # ~2.9 km/h regulated target
+BACKOFF_PITCH_DEG = 4.0  # push-off nose-up lean
+BACKOFF_BRAKE_PITCH_DEG = -4.0  # nose-down, arrest reverse before FLYING
+BACKOFF_PITCH_WIRE_MAX_DEG = 5.0  # hard clamp on the attitude-quat command
+BACKOFF_PITCH_AUTH_DEG = 1.0  # how far the AHRS may trim the scheduled lean
+BACKOFF_PUSH_S = 1.2  # full lean window
+BACKOFF_COAST_S = 1.6  # lean decays linearly to zero
+BACKOFF_BRAKE_S = 1.2  # brake window
+BACKOFF_MAX_S = 4.0  # == PUSH + COAST + BRAKE (load-bearing invariant)
+BACKOFF_DIST_M = 2.0  # fallback exit; vision re-acquire normally exits first
 BACKOFF_MIN_S = 0.6
-BACKOFF_MAX_S = 4.0
+BACKOFF_EXIT_REV_MPS = 0.3  # reverse considered arrested
+BACKOFF_COOLDOWN_S = 1.5  # re-entry lockout after a backoff ends
+BACKOFF_COLLISION_GRACE_S = 0.3  # ignore repeats of the originating impact
+# Gate re-acquisition during the reverse: stop backing off as soon as the gate
+# is usefully in view again, rather than always running the full distance.
+BACKOFF_REACQ_MIN_BX_M = 4.0  # > MIN_BX_FOR_ELEV, leaves room to re-accelerate
+BACKOFF_REACQ_HOLD_S = 0.2  # ~6 camera frames; rejects single-frame flicker
+BACKOFF_VIS_VEL_HOLD_S = 0.25  # 30 Hz camera vs 60 Hz control
+BACKOFF_YAW_MAX_DEG = 6.0  # half of FLYING's +/-12 bearing clip
+BACKOFF_YAW_DECAY_S = 1.5  # stale bearing decays out rather than spinning us
 WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 
 # Post-GO speed safety: IMU vX is often ~0 right after reset, which otherwise
@@ -327,6 +349,30 @@ def compute_guidance(
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
 
+def _backoff_pitch_target(elapsed: float, rev: float, braking: bool) -> float:
+    """Time-scheduled reverse lean (degrees, +nose-up). Mutates nothing.
+
+    push → coast → brake, driven by `elapsed`. `rev` (measured reverse speed,
+    m/s) may only REDUCE authority, never extend it: with rev stuck at 0.0 —
+    the exact post-impact failure mode — the lean still decays to zero and then
+    goes negative purely on elapsed time, so a broken speed estimate can no
+    longer hold the nose up all the way to the timeout.
+    """
+    if braking or elapsed >= BACKOFF_PUSH_S + BACKOFF_COAST_S:
+        return BACKOFF_BRAKE_PITCH_DEG
+    if rev > BACKOFF_MAX_SPEED_MPS:
+        return BACKOFF_BRAKE_PITCH_DEG  # overspeed: brake, not merely level
+    if elapsed >= BACKOFF_PUSH_S:
+        frac = 1.0 - (elapsed - BACKOFF_PUSH_S) / BACKOFF_COAST_S
+        decayed = BACKOFF_PITCH_DEG * max(0.0, frac)
+        if rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
+            return min(decayed, 0.3 * BACKOFF_PITCH_DEG)
+        return decayed
+    if rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
+        return 0.3 * BACKOFF_PITCH_DEG
+    return BACKOFF_PITCH_DEG
+
+
 def _fresh_hold_state() -> dict:
     return {
         "last_elev_err": 0.0,
@@ -401,6 +447,13 @@ class GPPilot:
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
+        self._backoff_brake_since: float | None = None
+        self._backoff_reacq_since: float | None = None
+        self._backoff_rev_vis = 0.0
+        self._backoff_rev_vis_t = 0.0
+        self._backoff_exit_reacq = False
+        self._last_backoff_end = 0.0
+        self._last_gate_bearing_deg: float | None = None
         self._flying_since: float | None = None
         self._go_start_ms: int | None = None
         self._tick = 0
@@ -455,6 +508,13 @@ class GPPilot:
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
+        self._backoff_brake_since = None
+        self._backoff_reacq_since = None
+        self._backoff_rev_vis = 0.0
+        self._backoff_rev_vis_t = 0.0
+        self._backoff_exit_reacq = False
+        self._last_backoff_end = 0.0
+        self._last_gate_bearing_deg = None
         self._flying_since = None
         self._go_start_ms = None
         self._close_log()
@@ -586,9 +646,7 @@ class GPPilot:
                 # No "already running → fly now" (that skipped the 3s hold after
                 # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                countdown_done = (
-                    race_fresh and sim_ms >= start_ms and finish_ns < 0
-                )
+                countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
@@ -652,9 +710,14 @@ class GPPilot:
 
         # Enter backoff on a fresh MAVLink COLLISION (mavlink_rx writes the key).
         if self.data.get("collision") is not None:
-            self._enter_backoff()
-            self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
-            return
+            # Pop unconditionally: suppressing entry without popping leaves a
+            # stale key that re-fires every tick, turning the cooldown into a
+            # permanent lockout.
+            self.data.pop("collision", None)
+            if time.time() - self._last_backoff_end >= BACKOFF_COOLDOWN_S:
+                self._enter_backoff()
+                self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
+                return
 
         vision = self.gate_smoother.update(self.data)
         vision_vel = self.vel_tracker.update(vision)
@@ -676,6 +739,11 @@ class GPPilot:
             dt=dt,
             flying_t=flying_t,
         )
+        # Latch the live bearing so a backoff can steer back toward the gate
+        # after it leaves the camera FOV. Cheap, and _enter_backoff can't
+        # recover it afterwards.
+        if dbg.get("vision_valid"):
+            self._last_gate_bearing_deg = float(dbg.get("bearing_deg", 0.0))
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
@@ -702,14 +770,30 @@ class GPPilot:
                 flush=True,
             )
 
-    def _resume_flying(self) -> None:
-        """Shared FLYING entry: re-arm lean ramp + full AHRS/vel reset."""
+    def _resume_flying(
+        self, *, reseed_attitude: bool, preserve_vision: bool = False
+    ) -> None:
+        """Shared FLYING entry: re-arm lean ramp + clear dead-reckoned speed.
+
+        `reseed_attitude` re-seeds the AHRS to the launch-ramp pitch. That is
+        correct on the pad and WRONG mid-air: GyroAHRS is pure gyro
+        integration with no accel correction, so a bad seed is a permanent
+        bias for the rest of the flight — it never washes out. A mid-air
+        resume clears velocity only.
+
+        `preserve_vision` keeps the gate lock when the caller already has one,
+        so a re-acquire exit doesn't drop straight back to BLIND_CRAWL_MPS.
+        """
         self.phase = Phase.FLYING
         self._flying_since = time.time()
-        self.est.reset()
+        if reseed_attitude:
+            self.est.reset()
+        else:
+            self.est.zero_velocity()
         self._hold = _fresh_hold_state()
         self.vel_tracker.reset()
-        self.gate_smoother.reset()
+        if not preserve_vision:
+            self.gate_smoother.reset()
         self._cmd_slew.reset()
         self.data.pop("collision", None)
 
@@ -718,7 +802,8 @@ class GPPilot:
         print("Countdown complete! Flying!", flush=True)
         self._go_start_ms = start_ms
         self._finish_noted = False
-        self._resume_flying()
+        # On the pad: the drone really is sitting at LAUNCH_PITCH_DEG.
+        self._resume_flying(reseed_attitude=True)
 
     def _abort_to_wait(self, reason: str) -> None:
         """Drop out of FLYING/BACKOFF and hold zero thrust for a fresh countdown."""
@@ -775,16 +860,42 @@ class GPPilot:
         self._backoff_start = now
         self._backoff_dist = 0.0
         self._backoff_last_t = now
+        self._backoff_brake_since = None
+        self._backoff_reacq_since = None
+        self._backoff_rev_vis = 0.0
+        self._backoff_rev_vis_t = 0.0
+        self._backoff_exit_reacq = False
         self.data.pop("collision", None)
         # Drop vision D-terms so re-acquire after the reverse isn't polluted.
+        # NOTE: gate_smoother is deliberately NOT reset — _tick_backoff tracks
+        # the gate through the reverse so it can stop as soon as it's back in
+        # view, and _last_gate_bearing_deg survives to steer the reverse.
         self._hold = _fresh_hold_state()
         self.vel_tracker.reset()
-        self.gate_smoother.reset()
         self._cmd_slew.reset()
+        # Impact leaves the strapdown holding pre-collision FORWARD speed. Left
+        # stale, rev = max(0, -vX) reads 0 and the regulator commands maximum
+        # nose-up all the way to the timeout. Clear velocity but NOT attitude
+        # (zero_velocity, not reset — reset reseeds the launch-ramp pitch).
+        self.est.zero_velocity()
         print(
-            f"[gp] COLLISION — backing off ~{BACKOFF_DIST_M:.0f} m",
+            f"[gp] COLLISION — backing off up to {BACKOFF_DIST_M:.0f} m",
             flush=True,
         )
+
+    def _backoff_rev(self, vX: float) -> float:
+        """Reverse speed (m/s, >=0), IMU fused with vision range-rate.
+
+        `max`, not a weighted blend: this is a one-sided safety limiter and
+        both sources fail TOWARD zero (IMU when stale after impact, vision
+        when the lock drops). Taking the max means either source seeing speed
+        is enough to cut authority; a blend would let a zero-reading source
+        mask a live one, which is the failure being fixed here.
+        """
+        rev_imu = max(0.0, -vX)
+        if time.time() - self._backoff_rev_vis_t <= BACKOFF_VIS_VEL_HOLD_S:
+            return max(rev_imu, self._backoff_rev_vis)
+        return rev_imu
 
     def _tick_backoff(
         self,
@@ -803,18 +914,103 @@ class GPPilot:
         self._backoff_last_t = now
         self._backoff_dist += max(0.0, -vX) * step_dt
 
-        # Regulate reverse speed — fixed nose-up used to hit 20–30 km/h.
-        rev = max(0.0, -vX)
-        if rev > BACKOFF_MAX_SPEED_MPS:
-            pitch_target = 0.0
-        elif rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
-            pitch_target = 0.3 * BACKOFF_PITCH_DEG
+        # Keep watching for the gate through the reverse — the whole point is
+        # to back off only as far as it takes to see it again.
+        vision = self.gate_smoother.update(self.data)
+        vision_vel = self.vel_tracker.update(vision)
+        if vision_vel is not None:
+            # Reversing grows the gate range, so vx_body_mps (approach-positive)
+            # goes negative. Same convention as rev_imu, directly comparable.
+            self._backoff_rev_vis = max(0.0, -float(vision_vel["vx_body_mps"]))
+            self._backoff_rev_vis_t = now
+        bx = float(vision["body_x_m"]) if vision is not None else float("nan")
+
+        reacquired = (
+            vision is not None
+            and bool(vision.get("reliable"))
+            and not math.isnan(bx)
+            and bx >= BACKOFF_REACQ_MIN_BX_M
+        )
+        if reacquired:
+            if self._backoff_reacq_since is None:
+                self._backoff_reacq_since = now
         else:
-            pitch_target = BACKOFF_PITCH_DEG
-        pitch_cmd = (pitch_target - pitch_deg) * KP
-        roll_cmd = (0.0 - roll_deg) * KR
-        yaw_cmd = 0.0
-        thrust = HOVER_THRUST
+            self._backoff_reacq_since = None
+        if (
+            self._backoff_reacq_since is not None
+            and now - self._backoff_reacq_since >= BACKOFF_REACQ_HOLD_S
+            and elapsed >= BACKOFF_MIN_S
+            and self._backoff_brake_since is None
+        ):
+            # Latch the brake rather than exiting outright — every exit hands
+            # FLYING a drone whose reverse has been arrested.
+            self._backoff_brake_since = now
+            self._backoff_exit_reacq = True
+            print(f"[gp] gate re-acquired at {bx:.1f} m — braking out", flush=True)
+
+        # We hit something BEHIND us — reversing harder is exactly wrong. The
+        # grace window ignores repeat messages from the originating impact
+        # (ground contact can fire hundreds of times per second).
+        if (
+            self.data.get("collision") is not None
+            and elapsed >= BACKOFF_COLLISION_GRACE_S
+        ):
+            self.data.pop("collision", None)
+            if self._backoff_brake_since is None:
+                self._backoff_brake_since = now
+                print("[gp] COLLISION during backoff — braking out", flush=True)
+
+        # Time-scheduled lean; rev can only cut authority, never extend it.
+        rev = self._backoff_rev(vX)
+        braking = self._backoff_brake_since is not None
+        pitch_target = _backoff_pitch_target(elapsed, rev, braking)
+        # These commands ARE the attitude setpoint on the quaternion wire, so
+        # the P-on-error form needs an explicit magnitude bound — FLYING has
+        # one (PITCH_WIRE_MAX_DEG), this path used to have none. With a biased
+        # AHRS, (4.0 - (-17.8)) shipped 21.8 deg of lean: ~28 km/h in reverse.
+        #
+        # The magnitude bound alone is not enough. Because the command is
+        # (target - measured), a biased `pitch_deg` inverts the brake: at
+        # target=-4 with a -17.8 bias the raw command is +8.8, i.e. MORE
+        # nose-up, and it just pins to the clamp. So bound nose-up relative to
+        # what the schedule actually asked for — the estimate may trim within
+        # BACKOFF_PITCH_AUTH_DEG of the target, never override its sign. The
+        # schedule outranks the estimate, which is the only one of the two
+        # that is observable after an impact.
+        raw_pitch = (pitch_target - pitch_deg) * KP
+        pitch_cmd = float(
+            np.clip(
+                min(raw_pitch, pitch_target + BACKOFF_PITCH_AUTH_DEG),
+                -BACKOFF_PITCH_WIRE_MAX_DEG,
+                BACKOFF_PITCH_WIRE_MAX_DEG,
+            )
+        )
+        roll_cmd = float(np.clip((0.0 - roll_deg) * KR, -MAX_BANK_DEG, MAX_BANK_DEG))
+        # Steer the reverse back toward the gate: a straight-line retreat only
+        # helps if the gate was dead ahead, and after a glancing strike it
+        # rarely is. Kept small — yaw rotates the body-X axis that rev and
+        # _backoff_dist are both measured in.
+        if vision is not None and not math.isnan(float(vision["body_y_m"])):
+            bearing = math.degrees(math.atan2(float(vision["body_y_m"]), max(bx, 0.5)))
+        elif self._last_gate_bearing_deg is not None:
+            # Stale bearing decays out over BACKOFF_YAW_DECAY_S rather than
+            # steering on an ever-older measurement.
+            decay = max(0.0, 1.0 - elapsed / BACKOFF_YAW_DECAY_S)
+            bearing = self._last_gate_bearing_deg * decay
+        else:
+            bearing = 0.0
+        yaw_cmd = (
+            float(np.clip(bearing, -BACKOFF_YAW_MAX_DEG, BACKOFF_YAW_MAX_DEG)) * KY
+        )
+        # A bare HOVER_THRUST constant sinks through the whole reverse: no
+        # vertical damping at all. Reuse FLYING's form minus the proportional
+        # term — there's no trustworthy gate elevation during backoff. vD is
+        # NED-down (positive = descending), so +K_D*vD arrests a sink.
+        tilt = max(
+            0.01,
+            math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
+        )
+        thrust = float(np.clip((HOVER_THRUST + K_D_THRUST * vD) / tilt, 0.0, 1.0))
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
@@ -826,26 +1022,43 @@ class GPPilot:
             vY,
             vD,
             {
-                "bx": float("nan"),
-                "by": float("nan"),
-                "bz": float("nan"),
+                "bx": bx,
+                "by": float(vision["body_y_m"]) if vision is not None else float("nan"),
+                "bz": float(vision["body_z_m"]) if vision is not None else float("nan"),
                 "blend": 0.0,
                 "d_lat": 0.0,
                 "d_vert": 0.0,
-                "source": "backoff",
+                "source": "backoff-brake" if braking else "backoff",
             },
             vX=vX,
         )
 
-        done_dist = self._backoff_dist >= BACKOFF_DIST_M and elapsed >= BACKOFF_MIN_S
-        done_time = elapsed >= BACKOFF_MAX_S
-        if done_dist or done_time:
-            print(
-                f"[gp] backoff done dist={self._backoff_dist:.1f}m "
-                f"t={elapsed:.1f}s — resuming chase",
-                flush=True,
-            )
-            self._resume_flying()
+        # Distance no longer exits directly — it latches the brake, and the
+        # brake exits. Every exit path therefore hands FLYING a drone that has
+        # had its reverse velocity arrested, instead of one at peak speed.
+        if self._backoff_brake_since is None:
+            # The schedule is already braking past PUSH+COAST, so latch there
+            # unconditionally — otherwise a vX too broken to ever reach
+            # BACKOFF_DIST_M would leave the brake unlatched and strand the
+            # pilot in BACKOFF with no exit check running at all.
+            if elapsed >= BACKOFF_PUSH_S + BACKOFF_COAST_S or (
+                self._backoff_dist >= BACKOFF_DIST_M and elapsed >= BACKOFF_MIN_S
+            ):
+                self._backoff_brake_since = now
+        if self._backoff_brake_since is not None:
+            brake_done = now - self._backoff_brake_since >= BACKOFF_BRAKE_S
+            if (brake_done and rev <= BACKOFF_EXIT_REV_MPS) or elapsed >= BACKOFF_MAX_S:
+                why = "reacquired" if self._backoff_exit_reacq else "distance/time"
+                print(
+                    f"[gp] backoff done ({why}) dist={self._backoff_dist:.1f}m "
+                    f"t={elapsed:.1f}s rev={rev:.2f}m/s — resuming chase",
+                    flush=True,
+                )
+                self._last_backoff_end = now
+                self._resume_flying(
+                    reseed_attitude=False,
+                    preserve_vision=self._backoff_exit_reacq,
+                )
 
     def shutdown(self) -> None:
         self.est.stop()
