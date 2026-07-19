@@ -84,17 +84,30 @@ def detect(img):
                 "keypoints": kxy,
                 "keypoint_conf": kconf,
                 "pose": pose,
+                "cv_corners": None,
             }
         )
     annotated = res.plot(line_width=2)
-    if _CV_REFINE and gates:
-        _cv_refine_best(img, gates, annotated)
+    if _CV_REFINE:
+        if gates:
+            _cv_refine_best(img, gates, annotated)
+        else:
+            _cv_only_gate(img, gates, annotated)
     return gates, annotated
 
 
+def _attach_cv_corners(gate, corners, annotated):
+    """Publish hole quad + green draw; PnP refine is best-effort only."""
+    gate["cv_corners"] = corners
+    pose = estimate_gate_pose_from_corners(corners)
+    if pose is not None:
+        gate["pose"] = pose
+    cv2.polylines(annotated, [corners.astype(np.int32)], True, (0, 255, 0), 2)
+
+
 def _cv_refine_best(img, gates, annotated):
-    """Replace the best-conf gate's pose with a CV-corner PnP solve when the
-    contour extractor finds the inner opening inside that gate's YOLO box."""
+    """Attach CV inner-opening corners to the best YOLO gate when the hole
+    centroid sits inside that box. Corners publish even if PnP fails."""
     best = max(gates, key=lambda g: g["conf"])
     corners = find_gate_inner_corners(img)
     if corners is None:
@@ -105,11 +118,26 @@ def _cv_refine_best(img, gates, annotated):
     my = (b[3] - b[1]) * _CV_BOX_MARGIN
     if not (b[0] - mx <= ctr[0] <= b[2] + mx and b[1] - my <= ctr[1] <= b[3] + my):
         return  # CV found a different gate than YOLO's best -- don't mix
-    pose = estimate_gate_pose_from_corners(corners)
-    if pose is None:
-        return  # keep the YOLO-keypoint pose
-    best["pose"] = pose
-    cv2.polylines(annotated, [corners.astype(np.int32)], True, (0, 255, 0), 2)
+    _attach_cv_corners(best, corners, annotated)
+
+
+def _cv_only_gate(img, gates, annotated):
+    """YOLO-free path: HSV hole alone is enough for IBVS/GP pixel aim."""
+    corners = find_gate_inner_corners(img)
+    if corners is None:
+        return
+    xs, ys = corners[:, 0], corners[:, 1]
+    box = np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float64)
+    gate = {
+        "box": box,
+        "conf": 1.0,
+        "keypoints": None,
+        "keypoint_conf": None,
+        "pose": None,
+        "cv_corners": None,
+    }
+    _attach_cv_corners(gate, corners, annotated)
+    gates.append(gate)
 
 
 class GatePoseRunner:

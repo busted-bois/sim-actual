@@ -15,6 +15,7 @@ from simulator.gp_pilot import (
     BACKOFF_PITCH_DEG,
     BACKOFF_PITCH_WIRE_MAX_DEG,
     BACKOFF_PUSH_S,
+    COMMIT_SPREAD_PX,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
@@ -22,8 +23,9 @@ from simulator.gp_pilot import (
     _backoff_pitch_target,
     _fresh_hold_state,
     compute_guidance,
+    should_commit,
 )
-from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
+from simulator.gp_vision import AIM_V, CX, gate_body_from_pinhole, vision_gate_estimate
 from simulator.gyro_ahrs import GyroAHRS, euler_to_quat
 
 
@@ -1366,6 +1368,206 @@ class EstimatorResilienceTests(unittest.TestCase):
                 self.assertGreater(abs(yaw), 0.5)
             finally:
                 est.stop()
+
+
+class ClassicalHoleGuidanceTests(unittest.TestCase):
+    """Try 2: pixel IBVS aim + COMMIT on CV hole spread."""
+
+    def _level_quat(self):
+        return euler_to_quat(0.0, 0.0, 0.0)
+
+    def test_flying_uses_pixel_not_body_lateral(self):
+        state = _fresh_hold_state()
+        # Body says gate far right (by=+2); pixels say centred → bearing ~0.
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": -1.0,
+            "u_px": CX,
+            "v_px": AIM_V,
+            "inner_spread_px": 120.0,
+            "source": "cv",
+            "opening_ok": True,
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["bearing_deg"], 0.0, places=3)
+        self.assertAlmostEqual(dbg["elev_err"], 0.0, places=3)
+        body_bearing = math.degrees(math.atan2(2.0, 8.0))
+        self.assertGreater(abs(body_bearing), 5.0)
+
+    def test_pixel_elev_overrides_biased_bz(self):
+        state = _fresh_hold_state()
+        # Biased body bz=-1.5 would climb; pixels on AIM_V → elev_err ~0.
+        vision = {
+            "frame_id": 2,
+            "body_x_m": 6.0,
+            "body_y_m": 0.0,
+            "body_z_m": -1.5,
+            "u_px": CX,
+            "v_px": AIM_V,
+            "source": "cv",
+            "opening_ok": True,
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["elev_err"], 0.0, places=3)
+        self.assertAlmostEqual(thrust, HOVER_THRUST, places=2)
+
+    def test_should_commit_cv_spread(self):
+        vision = {
+            "body_x_m": 4.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "u_px": CX,
+            "v_px": AIM_V,
+            "inner_spread_px": COMMIT_SPREAD_PX,
+            "source": "cv",
+            "opening_ok": True,
+        }
+        self.assertTrue(
+            should_commit(
+                vision, centered=True, last_centered=False, last_bx=None
+            )
+        )
+
+    def test_should_commit_yolo_spread(self):
+        vision = {
+            "body_x_m": 4.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "u_px": CX,
+            "v_px": AIM_V,
+            "inner_spread_px": COMMIT_SPREAD_PX,
+            "source": "yolo",
+            "opening_ok": True,
+        }
+        self.assertTrue(
+            should_commit(
+                vision, centered=True, last_centered=False, last_bx=None
+            )
+        )
+
+    def test_should_commit_rejects_anduril(self):
+        vision = {
+            "body_x_m": 1.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "u_px": CX,
+            "v_px": AIM_V,
+            "inner_spread_px": 300.0,
+            "source": "anduril",
+            "opening_ok": False,
+        }
+        self.assertFalse(
+            should_commit(
+                vision, centered=True, last_centered=False, last_bx=None
+            )
+        )
+
+
+class GatePoseCvPublishTests(unittest.TestCase):
+    def test_cv_only_gate_publishes_corners_without_pnp(self):
+        import cv2
+
+        from simulator.gate_pose import _cv_only_gate
+
+        img = np.full((360, 640, 3), 30, np.uint8)
+        # GATE_HEX orange-ish BGR matching gate_detector
+        color = (15, 57, 243)
+        cx, cy, oh, ih = 320, 180, 70, 40
+        cv2.rectangle(img, (cx - oh, cy - oh), (cx + oh, cy + oh), color, -1)
+        cv2.rectangle(img, (cx - ih, cy - ih), (cx + ih, cy + ih), (30, 30, 30), -1)
+        gates = []
+        annotated = img.copy()
+        _cv_only_gate(img, gates, annotated)
+        self.assertEqual(len(gates), 1)
+        self.assertIsNotNone(gates[0]["cv_corners"])
+        self.assertEqual(gates[0]["cv_corners"].shape, (4, 2))
+
+    def test_attach_publishes_corners_even_if_pnp_fails(self):
+        from unittest.mock import patch
+
+        from simulator.gate_pose import _attach_cv_corners
+
+        corners = np.array(
+            [[270.0, 140.0], [370.0, 140.0], [370.0, 220.0], [270.0, 220.0]]
+        )
+        gate = {"pose": {"gate_pos_body": np.array([9.0, 0.0, 0.0])}}
+        annotated = np.zeros((360, 640, 3), np.uint8)
+        with patch(
+            "simulator.gate_pose.estimate_gate_pose_from_corners", return_value=None
+        ):
+            _attach_cv_corners(gate, corners, annotated)
+        self.assertIsNotNone(gate["cv_corners"])
+        np.testing.assert_array_equal(gate["cv_corners"], corners)
+        # YOLO pose kept when CV PnP fails
+        self.assertAlmostEqual(gate["pose"]["gate_pos_body"][0], 9.0)
+
+    def test_refine_publishes_when_pnp_fails(self):
+        import cv2
+        from unittest.mock import patch
+
+        from simulator.gate_pose import _cv_refine_best
+
+        img = np.full((360, 640, 3), 30, np.uint8)
+        color = (15, 57, 243)
+        cx, cy, oh, ih = 320, 180, 70, 40
+        cv2.rectangle(img, (cx - oh, cy - oh), (cx + oh, cy + oh), color, -1)
+        cv2.rectangle(img, (cx - ih, cy - ih), (cx + ih, cy + ih), (30, 30, 30), -1)
+        gates = [
+            {
+                "box": np.array([250.0, 110.0, 390.0, 250.0]),
+                "conf": 0.95,
+                "pose": {"gate_pos_body": np.array([8.0, 0.0, 0.0])},
+                "cv_corners": None,
+            }
+        ]
+        annotated = img.copy()
+        with patch(
+            "simulator.gate_pose.estimate_gate_pose_from_corners", return_value=None
+        ):
+            _cv_refine_best(img, gates, annotated)
+        self.assertIsNotNone(gates[0]["cv_corners"])
+
+
+class IbvsCvPixelsTests(unittest.TestCase):
+    def test_gate_pixels_prefer_cv_corners(self):
+        from simulator.ibvs_pilot import IBVSPilot
+
+        pilot = IBVSPilot.__new__(IBVSPilot)
+        corners = np.array(
+            [[270.0, 140.0], [370.0, 140.0], [370.0, 220.0], [270.0, 220.0]]
+        )
+        g = {
+            "box": [200.0, 80.0, 440.0, 280.0],
+            "cv_corners": corners,
+            "keypoints": np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]),
+            "keypoint_conf": np.ones(8),
+        }
+        u, v, s = IBVSPilot._gate_pixels(pilot, g)
+        self.assertAlmostEqual(u, 320.0, places=3)
+        self.assertAlmostEqual(v, 180.0, places=3)
+        self.assertAlmostEqual(s, 100.0, places=3)
 
 
 if __name__ == "__main__":

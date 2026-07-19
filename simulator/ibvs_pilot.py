@@ -288,7 +288,15 @@ class IBVSPilot:
     # --- vision -----------------------------------------------------------
     def _gate_pixels(self, g):
         """(centre_u, centre_v, inner_spread_px) of one detection, from the
-        confident INNER corners (the opening) when possible, else the box."""
+        CV hole quad when present, else INNER YOLO corners, else the box."""
+        cv_c = g.get("cv_corners")
+        if cv_c is not None:
+            pts = np.asarray(cv_c, float).reshape(-1, 2)
+            if pts.shape[0] >= 4 and np.isfinite(pts).all():
+                ctr = pts.mean(axis=0)
+                spread = float(pts[:, 0].max() - pts[:, 0].min())
+                if spread >= 1.0:
+                    return float(ctr[0]), float(ctr[1]), spread
         box = np.asarray(g.get("box"), float).reshape(-1)
         kxy = g.get("keypoints")
         kcf = g.get("keypoint_conf")

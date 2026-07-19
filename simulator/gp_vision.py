@@ -1,8 +1,7 @@
 """Vision adapter → AndurilGP-style vision_gate_estimate fields.
 
-GPPilot (make control-flight) prefers Anduril HSV-red detection published as
-data["anduril_gate"]. YOLO/PnP and HSV gate_target remain as fallbacks for
-tools that do not run the Anduril tracker.
+Try 2 (classical hole): prefer HSV/CV inner-opening (u,v)+width over YOLO
+PnP body pose. Anduril / YOLO / HSV gate_target remain fallbacks.
 """
 
 from __future__ import annotations
@@ -12,18 +11,21 @@ import math
 import numpy as np
 
 GATE_OUTER_W_M = 2.7
+GATE_INNER_W_M = 1.5  # hole width for CV pinhole range
 FX = 320.0
 CX = 320.0
 CY = 180.0
 CAM_TILT_DEG = 20.0
 MIN_BOX_CONF = 0.5
 MAX_REPROJ_PX = 10.0
+KP_CONF = 0.7
+AIM_V = CY + FX * math.tan(math.radians(CAM_TILT_DEG))  # IBVS aim line
 
 
 def gate_body_from_pinhole(
     u_px: float, v_px: float, box_w_px: float, gate_w_m: float = GATE_OUTER_W_M
 ) -> tuple[float, float, float] | None:
-    """Pinhole range from outer width + cam-tilt → body FRD (bx, by, bz)."""
+    """Pinhole range from apparent width + cam-tilt → body FRD (bx, by, bz)."""
     if box_w_px < 1.0:
         return None
     z_cam = (gate_w_m * FX) / box_w_px
@@ -35,6 +37,71 @@ def gate_body_from_pinhole(
     by = x_cam
     bz = -s * z_cam + c * y_cam
     return float(bx), float(by), float(bz)
+
+
+def cv_opening_pixels(gate: dict) -> tuple[float, float, float] | None:
+    """(u, v, inner_spread_px) from CV hole corners, or None."""
+    cv_c = gate.get("cv_corners")
+    if cv_c is None:
+        return None
+    pts = np.asarray(cv_c, float).reshape(-1, 2)
+    if pts.shape[0] < 4 or not np.isfinite(pts).all():
+        return None
+    ctr = pts.mean(axis=0)
+    spread = float(pts[:, 0].max() - pts[:, 0].min())
+    if spread < 1.0:
+        return None
+    return float(ctr[0]), float(ctr[1]), spread
+
+
+def yolo_opening_pixels(gate: dict) -> tuple[float, float, float] | None:
+    """(u, v, inner_spread_px) from CV corners, else INNER KPs, else box."""
+    pix = cv_opening_pixels(gate)
+    if pix is not None:
+        return pix
+    box = gate.get("box")
+    kxy = gate.get("keypoints")
+    kcf = gate.get("keypoint_conf")
+    if kxy is not None and kcf is not None:
+        kxy = np.asarray(kxy, float)
+        kcf = np.asarray(kcf, float)
+        if kxy.shape[0] >= 4 and kcf.shape[0] >= 4:
+            inner = kxy[:4]
+            ok = kcf[:4] > KP_CONF
+            if ok.sum() >= 2 and np.isfinite(inner[ok]).all():
+                pts = inner[ok]
+                ctr = pts.mean(axis=0)
+                spread = float(pts[:, 0].max() - pts[:, 0].min())
+                if ok.sum() < 3 and box is not None:
+                    b = np.asarray(box, float).reshape(-1)
+                    if b.size >= 4 and np.isfinite(b).all():
+                        spread = max(spread, float(b[2] - b[0]) * 0.55)
+                return float(ctr[0]), float(ctr[1]), spread
+    if box is None:
+        return None
+    b = np.asarray(box, float).reshape(-1)
+    if b.size < 4 or not np.isfinite(b).all():
+        return None
+    return (
+        float((b[0] + b[2]) / 2.0),
+        float((b[1] + b[3]) / 2.0),
+        float(b[2] - b[0]) * 0.55,
+    )
+
+
+def best_cv_hole_gate(data: dict) -> dict | None:
+    """Best gate that carries CV inner-opening corners."""
+    pose_pkt = data.get("pose") or {}
+    best = None
+    best_conf = -1.0
+    for g in pose_pkt.get("gates") or []:
+        if cv_opening_pixels(g) is None:
+            continue
+        conf = float(g.get("conf", 0.0))
+        if conf > best_conf:
+            best_conf = conf
+            best = g
+    return best
 
 
 def best_pose_gate(data: dict) -> dict | None:
@@ -59,45 +126,87 @@ def best_pose_gate(data: dict) -> dict | None:
     return best
 
 
-def vision_gate_estimate(data: dict) -> dict | None:
-    """Build Anduril-compatible vision estimate.
+def _cv_hole_estimate(data: dict) -> dict | None:
+    """Classical hole: centroid + spread → pinhole body (inner 1.5 m)."""
+    pose_pkt = data.get("pose") or {}
+    frame_id = pose_pkt.get("frame_id")
+    g = best_cv_hole_gate(data)
+    if g is None:
+        return None
+    pix = cv_opening_pixels(g)
+    if pix is None:
+        return None
+    u_px, v_px, spread = pix
+    body = gate_body_from_pinhole(u_px, v_px, spread, gate_w_m=GATE_INNER_W_M)
+    if body is None:
+        return None
+    bx, by, bz = body
+    return {
+        "frame_id": frame_id,
+        "body_x_m": bx,
+        "body_y_m": by,
+        "body_z_m": bz,
+        "pnp_ok": False,
+        "pnp_rvec": None,
+        "normal_body": None,
+        "u_px": u_px,
+        "v_px": v_px,
+        "inner_spread_px": spread,
+        "reliable": True,
+        "source": "cv",
+        "method": "hsv-hole",
+        "opening_ok": True,
+    }
 
-    Preference order for GPPilot:
-      1. data["anduril_gate"] — HSV-red detect_gate + PnP/pinhole
-      2. YOLO pose packet
-      3. HSV gate_target rays / pinhole
-    """
-    anduril = data.get("anduril_gate")
-    if anduril is not None and anduril.get("body_x_m") is not None:
-        bx = float(anduril["body_x_m"])
-        by = float(anduril["body_y_m"])
-        bz = float(anduril["body_z_m"])
-        if not any(math.isnan(v) for v in (bx, by, bz)):
-            out = dict(anduril)
-            out.setdefault("source", "anduril")
-            out.setdefault("reliable", True)
-            return out
 
+def _yolo_estimate(data: dict) -> dict | None:
     pose_pkt = data.get("pose") or {}
     frame_id = pose_pkt.get("frame_id")
     g = best_pose_gate(data)
-    if g is not None:
-        p = g["pose"]
-        gb = np.asarray(p["gate_pos_body"], dtype=np.float64).reshape(3)
-        return {
-            "frame_id": frame_id,
-            "body_x_m": float(gb[0]),
-            "body_y_m": float(gb[1]),
-            "body_z_m": float(gb[2]),
-            "pnp_ok": True,
-            "pnp_rvec": None,
-            "normal_body": np.asarray(p["normal_body"], dtype=np.float64).reshape(3),
-            "u_px": None,
-            "v_px": None,
-            "reliable": True,
-            "source": "yolo",
-        }
+    if g is None:
+        return None
+    p = g["pose"]
+    gb = np.asarray(p["gate_pos_body"], dtype=np.float64).reshape(3)
+    u_px = v_px = inner_spread_px = None
+    pix = yolo_opening_pixels(g)
+    if pix is not None:
+        u_px, v_px, inner_spread_px = pix
+    return {
+        "frame_id": frame_id,
+        "body_x_m": float(gb[0]),
+        "body_y_m": float(gb[1]),
+        "body_z_m": float(gb[2]),
+        "pnp_ok": True,
+        "pnp_rvec": None,
+        "normal_body": np.asarray(p["normal_body"], dtype=np.float64).reshape(3),
+        "u_px": u_px,
+        "v_px": v_px,
+        "inner_spread_px": inner_spread_px,
+        "reliable": True,
+        "source": "yolo",
+        "method": p.get("method", "ippe-yolo8"),
+        "opening_ok": True,
+    }
 
+
+def _anduril_estimate(data: dict) -> dict | None:
+    anduril = data.get("anduril_gate")
+    if anduril is None or anduril.get("body_x_m") is None:
+        return None
+    bx = float(anduril["body_x_m"])
+    by = float(anduril["body_y_m"])
+    bz = float(anduril["body_z_m"])
+    if any(math.isnan(v) for v in (bx, by, bz)):
+        return None
+    out = dict(anduril)
+    out.setdefault("source", "anduril")
+    out.setdefault("reliable", True)
+    out.setdefault("inner_spread_px", None)
+    out["opening_ok"] = False
+    return out
+
+
+def _hsv_estimate(data: dict, frame_id=None) -> dict | None:
     gt = data.get("gate_target") or {}
     if not gt.get("detected"):
         return None
@@ -125,8 +234,10 @@ def vision_gate_estimate(data: dict) -> dict | None:
             "normal_body": None,
             "u_px": u,
             "v_px": v,
+            "inner_spread_px": None,
             "reliable": False,
             "source": "hsv",
+            "opening_ok": False,
         }
 
     if u is None or v is None:
@@ -147,9 +258,36 @@ def vision_gate_estimate(data: dict) -> dict | None:
         "normal_body": None,
         "u_px": float(u),
         "v_px": float(v),
+        "inner_spread_px": None,
         "reliable": False,
         "source": "hsv",
+        "opening_ok": False,
     }
+
+
+def vision_gate_estimate(data: dict) -> dict | None:
+    """Build Anduril-compatible vision estimate.
+
+    Preference order (Try 2 — classical hole first):
+      1. CV HSV hole (u,v)+spread → pinhole (ignore YOLO PnP body)
+      2. data["anduril_gate"]
+      3. YOLO pose packet
+      4. HSV gate_target rays / pinhole
+    """
+    cv = _cv_hole_estimate(data)
+    if cv is not None:
+        return cv
+
+    anduril = _anduril_estimate(data)
+    if anduril is not None:
+        return anduril
+
+    yolo = _yolo_estimate(data)
+    if yolo is not None:
+        return yolo
+
+    pose_pkt = data.get("pose") or {}
+    return _hsv_estimate(data, frame_id=pose_pkt.get("frame_id"))
 
 
 def gate_tilt_deg_from_normal(normal_body: np.ndarray) -> float:
@@ -188,9 +326,9 @@ class GateEstimateSmoother:
             fid is not None
             and self._last_pnp_fid is not None
             and 0 < fid - self._last_pnp_fid <= PNP_STICKY_FRAMES
-            and est.get("source") != "anduril"
+            and est.get("source") not in ("anduril", "cv")
         ):
-            # Sticky YOLO only — Anduril already has its own EMA/pass-suppress.
+            # Sticky YOLO only — Anduril/CV already have fresh opening estimates.
             return self._last_out
         if fid is not None and self._ema is not None:
             prev_fid, pbx, pby, pbz = self._ema
