@@ -22,9 +22,15 @@ os.environ["MAVLINK20"] = "1"
 
 from flightlab.bus import CONTROL_HZ, HOVER_THRUST, Bus
 from flightlab.controllers import list_methods, make_controller
-from flightlab.gates import first_gate_pass_z
+from flightlab.gates import first_gate_pass_z, gate_geometry, resolve_course
 from flightlab import metrics as M
-from flightlab.maneuvers import Schedule, Segment, altitude_steps, lean_hold
+from flightlab.maneuvers import (
+    Schedule,
+    Segment,
+    WaypointTracker,
+    altitude_steps,
+    lean_hold,
+)
 from flightlab.protocol import Controller, Target
 from flightlab.safety import SafetyMonitor
 from flightlab.state import State
@@ -60,6 +66,7 @@ class TickLog:
     vz_tgt: float | None
     label: str
     test: str
+    dist_wp: float = 0.0
 
 
 @dataclass
@@ -155,6 +162,83 @@ def _run_loop(
             return True, "stop_fn"
 
         # Pace to CONTROL_HZ
+        spent = time.monotonic() - loop_start
+        sleep = DT - spent
+        if sleep > 0:
+            time.sleep(sleep)
+
+
+def _run_waypoint_loop(
+    bus: Bus,
+    ctrl: Controller,
+    safety: SafetyMonitor,
+    tracker: WaypointTracker,
+    test_name: str,
+    log: list[TickLog],
+    on_tick=None,
+) -> tuple[bool, str]:
+    """Closed-loop toward tracker.wp until reached, timeout, or safety trip.
+
+    Targets are recomputed per tick (position feedback) — a timed Schedule
+    can't express this. Returns (ok, reason); ok=False only on blowup.
+    """
+    t0 = time.monotonic()
+    last = t0
+    s = bus.drain()
+    ctrl.reset(s)
+
+    while True:
+        loop_start = time.monotonic()
+        elapsed = loop_start - t0
+        if elapsed >= tracker.timeout_s:
+            return True, "wp_timeout"
+
+        s = bus.drain()
+        sr = safety.check(s)
+        if sr.tripped:
+            safety.handle_trip(bus, sr.reason)
+            return False, f"blowup:{sr.reason}"
+
+        tgt = tracker.target_at(s)
+        dt = loop_start - last
+        last = loop_start
+        cmd = ctrl.update(s, tgt, dt)
+        bus.send(cmd.roll_rate, cmd.pitch_rate, cmd.yaw_rate, cmd.thrust)
+
+        log.append(
+            TickLog(
+                t=elapsed,
+                n=s.pos[0],
+                e=s.pos[1],
+                z=s.pos[2],
+                vn=s.vel[0],
+                ve=s.vel[1],
+                vz=s.vel[2],
+                zhat=s.zhat,
+                vzhat=s.vzhat,
+                vz_cmd=float(getattr(ctrl, "last_vz_cmd", 0.0)),
+                tilt_comp=float(getattr(ctrl, "last_tilt_comp", 1.0)),
+                baro_ok=s.baro_ok,
+                roll=s.roll,
+                pitch=s.pitch,
+                yaw=s.yaw,
+                thrust=cmd.thrust,
+                roll_rate=cmd.roll_rate,
+                pitch_rate=cmd.pitch_rate,
+                yaw_rate=cmd.yaw_rate,
+                z_tgt=tgt.z,
+                vz_tgt=tgt.vz,
+                label=tracker.label,
+                test=test_name,
+                dist_wp=tracker.last_dist,
+            )
+        )
+
+        if on_tick is not None:
+            on_tick(s)
+        if tracker.reached(s):
+            return True, "wp_reached"
+
         spent = time.monotonic() - loop_start
         sleep = DT - spent
         if sleep > 0:
@@ -578,12 +662,172 @@ def test_tilt_check(
     )
 
 
+def _fly_one_gate(
+    bus: Bus,
+    ctrl: Controller,
+    safety: SafetyMonitor,
+    log: list[TickLog],
+    name: str,
+    geo: dict,
+    wp_z: float,
+    idx: int,
+) -> tuple[dict, bool, str]:
+    """Approach leg + through leg for one gate. Returns (gate_metrics, ok, reason)."""
+    p_gate = geo["p_gate"]
+    n_hat = geo["n_hat"]
+    p_appr = geo["p_approach"]
+    p_thru = geo["p_through"]
+    print(
+        f"[gate{idx}] n_hat=({n_hat[0]:+.2f},{n_hat[1]:+.2f},{n_hat[2]:+.2f}) "
+        f"appr=({p_appr[0]:.1f},{p_appr[1]:.1f}) "
+        f"thru=({p_thru[0]:.1f},{p_thru[1]:.1f}) z={wp_z:.1f}",
+        flush=True,
+    )
+
+    wp1 = WaypointTracker(
+        (float(p_appr[0]), float(p_appr[1]), wp_z),
+        label=f"approach_g{idx}",
+        timeout_s=45.0,
+    )
+    ok, reason = _run_waypoint_loop(bus, ctrl, safety, wp1, name, log)
+    gm: dict = {
+        "gate": idx,
+        "n_hat": [round(float(v), 4) for v in n_hat],
+        "reached_approach": ok and reason == "wp_reached",
+    }
+    if not ok:
+        return gm, False, reason
+    if reason != "wp_reached":
+        return gm, True, "approach_timeout"
+
+    crossing: dict = {}
+
+    def watch(st: State) -> None:
+        if crossing:
+            return
+        rn = st.pos[0] - p_gate[0]
+        re_ = st.pos[1] - p_gate[1]
+        rz = st.pos[2] - p_gate[2]
+        a = rn * n_hat[0] + re_ * n_hat[1] + rz * n_hat[2]
+        if a > 0.0:
+            return
+        pn = rn - a * n_hat[0]
+        pe = re_ - a * n_hat[1]
+        pz = rz - a * n_hat[2]
+        speed = math.hypot(st.vel[0], st.vel[1])
+        angle = None
+        if speed > 0.2:
+            along = -(st.vel[0] * n_hat[0] + st.vel[1] * n_hat[1]) / speed
+            angle = math.degrees(math.acos(max(-1.0, min(1.0, along))))
+        crossing.update(
+            lat_m=math.hypot(pn, pe),
+            vert_m=pz,
+            angle_deg=angle,
+            speed=speed,
+        )
+
+    wp2 = WaypointTracker(
+        (float(p_thru[0]), float(p_thru[1]), wp_z),
+        label=f"through_g{idx}",
+        timeout_s=25.0,
+    )
+    ok, reason = _run_waypoint_loop(bus, ctrl, safety, wp2, name, log, on_tick=watch)
+    lat = crossing.get("lat_m")
+    gm.update(
+        crossed_plane=bool(crossing),
+        lat_offset_m=lat,
+        vert_offset_m=crossing.get("vert_m"),
+        approach_angle_deg=crossing.get("angle_deg"),
+        cross_speed_mps=crossing.get("speed"),
+        clean=bool(crossing) and lat is not None and lat < geo["half_w"],
+    )
+    if not ok:
+        return gm, False, reason
+    if not crossing:
+        return gm, True, "plane_not_crossed"
+    return gm, True, "gate_done"
+
+
+def test_gate_approach(
+    bus: Bus, ctrl: Controller, safety: SafetyMonitor, log: list[TickLog]
+) -> TestResult:
+    """Normal-vector approach, sequenced over the whole course.
+
+    Per gate: p_appr = p_gate + 5*n_hat -> track -> p_gate - 2*n_hat.
+    Keeps going until a leg times out / misses, counting gates passed.
+    PASS: gate 0 crossed cleanly (lat < w/2, < 15 deg off normal).
+    """
+    name = "GATE"
+    if not _prep(bus, ctrl, safety):
+        return TestResult(name, False, "arm_failed")
+
+    z_hold = _hold_z_for_gate(bus)
+    ok, reason = _takeoff_to(bus, ctrl, safety, z_hold, log, name)
+    if not ok:
+        return TestResult(name, False, reason, blowup=reason.startswith("blowup"))
+
+    gm_list, flipz = resolve_course(bus.tracker.data)
+    if not gm_list:
+        return TestResult(name, False, "no_gate_map")
+
+    per_gate: list[dict] = []
+    gates_passed = 0
+    stop_reason = "course_done"
+    blowup = False
+
+    for idx, gate in enumerate(gm_list):
+        s = bus.drain()
+        geo = gate_geometry(gate, s.pos, flipz)
+        # Gate 0: validated spawn-based hold z; later gates: 1 m above
+        # centre (fly2-proven zoff on this course).
+        wp_z = z_hold if idx == 0 else float(geo["p_gate"][2]) - 1.0
+        g_metrics, ok, reason = _fly_one_gate(
+            bus, ctrl, safety, log, name, geo, wp_z, idx
+        )
+        per_gate.append(g_metrics)
+        if not ok:
+            stop_reason = reason
+            blowup = True
+            break
+        if reason != "gate_done":
+            stop_reason = f"g{idx}:{reason}"
+            break
+        if g_metrics.get("clean"):
+            gates_passed += 1
+            print(f"[gate{idx}] PASSED (total {gates_passed})", flush=True)
+        else:
+            stop_reason = f"g{idx}:clipped"
+            break
+
+    sim_active = bus.tracker.data.get("active_gate_index")
+    g0 = per_gate[0] if per_gate else {}
+    angle0 = g0.get("approach_angle_deg")
+    m = {
+        "gates_passed": gates_passed,
+        "n_gates": len(gm_list),
+        "sim_active_gate_index": sim_active,
+        "stop_reason": stop_reason,
+        "d_offset_m": 5.0,
+        "per_gate": per_gate,
+    }
+    passed = not blowup and bool(g0.get("clean")) and (angle0 is None or angle0 < 15.0)
+    reason_txt = f"gates={gates_passed}/{len(gm_list)};{stop_reason}"
+    return TestResult(
+        name,
+        passed,
+        ("PASS:" if passed else "FAIL:") + reason_txt,
+        metrics=m,
+        blowup=blowup,
+    )
+
+
 TESTS = {
     "V1": test_v1,
     "V2": test_v2,
     "V3": test_v3,
     "V4": test_v4,
     "TILT": test_tilt_check,
+    "GATE": test_gate_approach,
 }
 
 
@@ -700,6 +944,8 @@ def main(argv: list[str] | None = None) -> int:
             args.method.startswith("pid_tilt") or args.method == "baro_hold"
         ):
             to_run.append("TILT")
+        if args.method == "baro_hold":
+            to_run.append("GATE")
 
     results: list[TestResult] = []
     try:
