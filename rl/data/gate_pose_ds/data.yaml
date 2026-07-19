@@ -1,0 +1,9 @@
+# Gate pose — 1 class, 8 keypoints (inner then outer).
+# Inner KPs are the opening (flight target); outer are scale helpers.
+path: C:/Users/trung/Downloads/Real Drone Sim/rl/data/gate_pose_ds
+train: images/train
+val: images/val
+names:
+  0: gate
+kpt_shape: [8, 3]
+flip_idx: [1, 0, 3, 2, 5, 4, 7, 6]
