@@ -1,31 +1,40 @@
-param([int]$Port = 14550)
+param(
+    # MAVLink + FPV camera (stale listeners on 5600 block IBVS vision_rx bind).
+    [int[]]$Ports = @(14550, 5600)
+)
 
 $ErrorActionPreference = "Stop"
 
-$procIds = @()
-try {
-    $procIds = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction Stop |
-        Select-Object -ExpandProperty OwningProcess -Unique
-} catch {
-    $procIds = netstat -ano -p UDP |
-        Select-String ":$Port\s" |
-        ForEach-Object { ($_ -split '\s+')[-1] } |
-        Sort-Object -Unique
-}
-
-$procIds = $procIds | Where-Object { $_ -and $_ -ne 0 }
-
-if (-not $procIds) {
-    Write-Host "UDP $Port is free."
-    exit 0
-}
-
-foreach ($procId in $procIds) {
+function Get-UdpHolders([int]$Port) {
+    $ids = @()
     try {
-        $p = Get-Process -Id $procId -ErrorAction Stop
-        Stop-Process -Id $procId -Force
-        Write-Host "Killed $($p.ProcessName) (PID $procId) holding UDP $Port."
+        $ids = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique
     } catch {
-        Write-Host "Could not kill PID ${procId}: $_"
+        $ids = netstat -ano -p UDP |
+            Select-String ":$Port\s" |
+            ForEach-Object { ($_ -split '\s+')[-1] } |
+            Sort-Object -Unique
+    }
+    return @($ids | Where-Object { $_ -and $_ -ne 0 })
+}
+
+$any = $false
+foreach ($Port in $Ports) {
+    $procIds = Get-UdpHolders $Port
+    if (-not $procIds) {
+        Write-Host "UDP $Port is free."
+        continue
+    }
+    $any = $true
+    foreach ($procId in $procIds) {
+        try {
+            $p = Get-Process -Id $procId -ErrorAction Stop
+            Stop-Process -Id $procId -Force
+            Write-Host "Killed $($p.ProcessName) (PID $procId) holding UDP $Port."
+        } catch {
+            Write-Host "Could not kill PID ${procId}: $_"
+        }
     }
 }
+if (-not $any) { exit 0 }

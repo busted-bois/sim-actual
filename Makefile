@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc diagnose-ibvs
 
 i install:
 	uv sync
@@ -6,6 +6,10 @@ i install:
 check:
 	uv run ruff check --fix .
 	uv run ruff format .
+
+# Summarize latest IBVS nav log (COMMIT ex/ey + n_passed).
+diagnose-ibvs:
+	pwsh -File scripts/diagnose_ibvs_log.ps1
 
 # --- Documentation (auto-sync on push to main; local: CURSOR_API_KEY required) ----
 doc-context:
