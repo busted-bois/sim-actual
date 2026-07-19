@@ -22,6 +22,9 @@ import numpy as np
 
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
+    AIM_V,
+    CX,
+    FX,
     GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
@@ -105,12 +108,70 @@ WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
 UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
 
+# GateNet-style COMMIT: large centred hole (spread) or close range.
+COMMIT_SPREAD_PX = 260.0
+COMMIT_BX_M = 2.5
+COMMIT_BEARING_DEG = 3.0
+COMMIT_BZ_M = 0.25
+DROPOUT_COMMIT_BX_M = 2.0
+
 
 class Phase(Enum):
     WAIT_FOR_DATA = auto()
     WAIT_FOR_START = auto()
     FLYING = auto()
     BACKOFF = auto()
+
+
+def gate_centered(vision: dict, *, strict: bool = False) -> bool:
+    """True when hole aim is on-axis (bearing + body-z)."""
+    bx = float(vision.get("body_x_m", float("nan")))
+    by = float(vision.get("body_y_m", float("nan")))
+    bz = float(vision.get("body_z_m", float("nan")))
+    if any(math.isnan(v) for v in (bx, by, bz)) or bx <= 0.1:
+        return False
+    u_px, v_px = vision.get("u_px"), vision.get("v_px")
+    if u_px is not None and v_px is not None:
+        bearing = abs(math.degrees(math.atan((float(u_px) - CX) / FX)))
+        ey = abs((float(v_px) - AIM_V) / FX) * max(bx, 0.5)
+        lim_b = COMMIT_BEARING_DEG if strict else 5.0
+        lim_z = COMMIT_BZ_M if strict else 0.40
+        return bearing <= lim_b and ey <= lim_z
+    bearing = abs(math.degrees(math.atan2(by, bx)))
+    lim_b = COMMIT_BEARING_DEG if strict else 5.0
+    lim_z = COMMIT_BZ_M if strict else 0.40
+    return bearing <= lim_b and abs(bz) <= lim_z
+
+
+def should_commit(
+    vision: dict | None,
+    *,
+    centered: bool,
+    last_centered: bool,
+    last_bx: float | None,
+) -> bool:
+    """Centered + close/spread on opening source (cv/yolo), or dropout-commit."""
+    del centered  # callers may pass loose centre; COMMIT uses strict gate_centered
+    if vision is None:
+        return bool(
+            last_centered
+            and last_bx is not None
+            and last_bx <= DROPOUT_COMMIT_BX_M
+        )
+    # Outer-frame Anduril/HSV — never blind-dash on them.
+    if vision.get("source") not in ("cv", "yolo") or not vision.get(
+        "opening_ok", True
+    ):
+        return False
+    if not gate_centered(vision, strict=True):
+        return False
+    bx = float(vision.get("body_x_m", float("nan")))
+    if math.isnan(bx):
+        return False
+    spread = vision.get("inner_spread_px")
+    if spread is not None and float(spread) >= COMMIT_SPREAD_PX:
+        return True
+    return bx <= COMMIT_BX_M
 
 
 def compute_guidance(
@@ -207,6 +268,21 @@ def compute_guidance(
         if not reliable:
             # Weak Anduril hint: servo descend/yaw only — don't bank hard.
             blend *= WEAK_BLEND_SCALE
+
+        # Prefer image opening centre (IBVS) over PnP body bearing/elev whenever
+        # CV/HSV pixels are present — hole, not outer YOLO bar.
+        u_px = vision.get("u_px")
+        v_px = vision.get("v_px")
+        if u_px is not None and v_px is not None:
+            bearing_body = float(
+                np.clip(
+                    math.degrees(math.atan((float(u_px) - CX) / FX)),
+                    -25.0,
+                    25.0,
+                )
+            )
+            ey = (float(v_px) - AIM_V) / FX
+            state["last_elev_err"] = ey * max(bx, 0.5)
 
         prev_bf = state.get("prev_bearing_frame_id")
         if (
