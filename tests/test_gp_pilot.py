@@ -105,6 +105,150 @@ class GuidanceTests(unittest.TestCase):
         # Positive elev → reduce thrust below hover
         self.assertLess(thrust, HOVER_THRUST)
 
+    def test_elev_integral_trims_persistent_low_offset(self):
+        # Drone stuck 0.5 m below gate centre (hover-trim mismatch): the I-term
+        # must keep raising thrust over time where P-only plateaued.
+        state = _fresh_hold_state()
+
+        def tick(fid):
+            vision = {
+                "frame_id": fid,
+                "body_x_m": 8.0,
+                "body_y_m": 0.0,
+                "body_z_m": -0.5,  # gate above → climb
+                "normal_body": None,
+            }
+            _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+            )
+            return thrust
+
+        t_first = tick(1)
+        for fid in range(2, 121):  # ~2 s at 60 Hz
+            t_last = tick(fid)
+        self.assertGreater(state["elev_i"], 0.003)
+        self.assertGreater(t_last, t_first + 0.002)
+        # Clamp: integral can never run away.
+        for fid in range(121, 2000):
+            tick(fid)
+        from simulator.gp_pilot import ELEV_I_CLAMP
+
+        self.assertLessEqual(state["elev_i"], ELEV_I_CLAMP + 1e-9)
+
+    def test_elev_i_does_not_wind_up_on_large_error(self):
+        # Gate-1 climb-out: metres of elev error for seconds must NOT charge
+        # the integrator (it hit the clamp and ballooned over the gate).
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 8.0,
+            "body_y_m": 0.0,
+            "body_z_m": -2.5,  # far above — transient, not trim
+            "normal_body": None,
+        }
+        for fid in range(1, 121):
+            vision = dict(vision, frame_id=fid)
+            compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+            )
+        self.assertAlmostEqual(state["elev_i"], 0.0, places=9)
+
+    def test_track_break_clears_derivative_state(self):
+        # A gate switch must not inject phantom bearing/elev rates.
+        state = _fresh_hold_state()
+        v1 = {
+            "frame_id": 1,
+            "body_x_m": 6.0,
+            "body_y_m": -0.5,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=v1,
+            vision_vel=None,
+            state=state,
+        )
+        v2 = dict(v1, frame_id=2, body_y_m=1.5, track_break=True)
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=v2,
+            vision_vel=None,
+            state=state,
+        )
+        # Without the clear, the 2 m by-jump reads ~570 deg/s bearing rate
+        # and pins a phantom d_lat; with it, the D-term starts fresh.
+        self.assertAlmostEqual(dbg["d_lat"], 0.0, places=6)
+
+    def test_blind_sideslip_null_banks_against_drift(self):
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.5,  # drifting right while blind
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["desired_roll"], -4.0, places=3)  # bank left
+
+    def test_blind_elev_err_decays(self):
+        state = _fresh_hold_state()
+        state["last_elev_err"] = 1.0
+        compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(state["last_elev_err"], 0.97, places=4)
+
+    def test_gate_tilt_head_on_reads_zero(self):
+        from simulator.gp_vision import gate_tilt_deg_from_normal
+
+        # Detector convention (normal points back at drone): head-on = (-1,0,0).
+        # Regression: used to read ±180 → clip to a sign-flapping ±30 dither.
+        self.assertAlmostEqual(
+            gate_tilt_deg_from_normal(np.array([-1.0, 0.0, 0.0])), 0.0, places=6
+        )
+        # rl.gp_expert convention (normal points forward): also ~0 head-on.
+        self.assertAlmostEqual(
+            gate_tilt_deg_from_normal(np.array([1.0, 0.0, 0.0])), 0.0, places=6
+        )
+        # Fly-through axis 10° to the RIGHT → +10 (yaw right), both facings.
+        th = math.radians(10.0)
+        f = np.array([math.cos(th), math.sin(th), 0.0])
+        self.assertAlmostEqual(gate_tilt_deg_from_normal(-f), 10.0, places=4)
+        self.assertAlmostEqual(gate_tilt_deg_from_normal(f), 10.0, places=4)
+
     def test_blend_zero_at_gate_plane(self):
         state = _fresh_hold_state()
         vision = {
@@ -345,7 +489,8 @@ class VisionAdapterTests(unittest.TestCase):
         self.assertTrue(est["pnp_ok"])
         self.assertEqual(est["source"], "yolo")
 
-    def test_anduril_preferred_over_yolo(self):
+    @staticmethod
+    def _anduril_plus_yolo(pose_fid=3, latest_fid=None):
         data = {
             "anduril_gate": {
                 "frame_id": 3,
@@ -358,12 +503,12 @@ class VisionAdapterTests(unittest.TestCase):
                 "normal_body": None,
             },
             "pose": {
-                "frame_id": 3,
+                "frame_id": pose_fid,
                 "gates": [
                     {
                         "conf": 0.99,
                         "pose": {
-                            "gate_pos_body": np.array([99.0, 0.0, 0.0]),
+                            "gate_pos_body": np.array([9.0, 0.0, 0.0]),
                             "normal_body": np.array([-1.0, 0.0, 0.0]),
                             "reproj_px": 1.0,
                         },
@@ -371,9 +516,97 @@ class VisionAdapterTests(unittest.TestCase):
                 ],
             },
         }
+        if latest_fid is not None:
+            data["frame"] = {"frame_id": latest_fid}
+        return data
+
+    def test_fresh_yolo_preferred_over_anduril(self):
+        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=4)
+        est = vision_gate_estimate(data)
+        self.assertEqual(est["source"], "yolo")
+        self.assertAlmostEqual(est["body_x_m"], 9.0)
+
+    def test_stale_yolo_falls_back_to_anduril(self):
+        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=10)
         est = vision_gate_estimate(data)
         self.assertEqual(est["source"], "anduril")
         self.assertAlmostEqual(est["body_x_m"], 7.0)
+
+    def test_best_pose_gate_picks_nearest_ahead(self):
+        from simulator.gp_vision import best_pose_gate
+
+        # Far gate dead ahead with HIGHER conf vs near gate slightly off-axis:
+        # handoff must chase the near one.
+        data = {
+            "pose": {
+                "frame_id": 1,
+                "gates": [
+                    {
+                        "conf": 0.99,
+                        "pose": {
+                            "gate_pos_body": np.array([15.0, 0.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    },
+                    {
+                        "conf": 0.6,
+                        "pose": {
+                            "gate_pos_body": np.array([6.0, 2.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    },
+                ],
+            }
+        }
+        g = best_pose_gate(data)
+        self.assertAlmostEqual(float(g["pose"]["gate_pos_body"][0]), 6.0)
+
+    def test_yolo_tracker_suppresses_near_gate_and_cools_down(self):
+        from simulator.gp_vision import YOLO_PASS_COOLDOWN_FR, YoloGateTracker
+
+        def pose_data(fid, bx):
+            return {
+                "frame_id": fid,
+                "gates": [
+                    {
+                        "conf": 0.9,
+                        "pose": {
+                            "gate_pos_body": np.array([bx, 0.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    }
+                ],
+            }
+
+        tr = YoloGateTracker()
+        # Approaching: normal estimate.
+        est, sup = tr.update({"pose": pose_data(1, 8.0), "frame": {"frame_id": 1}})
+        self.assertFalse(sup)
+        self.assertEqual(est["source"], "yolo")
+        # Threading the gate: blind, and suppression blocks ALL sources.
+        est, sup = tr.update({"pose": pose_data(2, 1.0), "frame": {"frame_id": 2}})
+        self.assertIsNone(est)
+        self.assertTrue(sup)
+        data = {"pose": pose_data(3, 1.2), "frame": {"frame_id": 3}}
+        data["anduril_gate"] = {
+            "frame_id": 3,
+            "body_x_m": 1.2,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+        }
+        self.assertIsNone(vision_gate_estimate(data, tr))
+        # Past the gate (next gate far ahead): cooldown holds for a while.
+        est, sup = tr.update({"pose": pose_data(4, 12.0), "frame": {"frame_id": 4}})
+        self.assertIsNone(est)
+        self.assertTrue(sup)
+        # After the cooldown expires, re-acquire the next gate.
+        fid = 4 + YOLO_PASS_COOLDOWN_FR
+        est, sup = tr.update({"pose": pose_data(fid, 12.0), "frame": {"frame_id": fid}})
+        self.assertFalse(sup)
+        self.assertAlmostEqual(est["body_x_m"], 12.0)
 
     def test_detect_gate_finds_red_square(self):
         import cv2
@@ -431,7 +664,121 @@ class VisionAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(e3["body_x_m"], e2["body_x_m"], places=5)
 
 
+def _pose_data(fid, bx, by=0.0, bz=0.0):
+    """YOLO pose packet + matching camera frame id."""
+    return {
+        "pose": {
+            "frame_id": fid,
+            "gates": [
+                {
+                    "conf": 0.9,
+                    "pose": {
+                        "gate_pos_body": np.array([bx, by, bz]),
+                        "normal_body": np.array([-1.0, 0.0, 0.0]),
+                        "reproj_px": 1.0,
+                    },
+                }
+            ],
+        },
+        "frame": {"frame_id": fid},
+    }
+
+
+class SmootherIdentityTests(unittest.TestCase):
+    def test_cooldown_survives_suppression(self):
+        # Regression: smoother.reset() on every None estimate wiped the
+        # tracker's in-gate state, so the post-pass cooldown never armed.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        self.assertIsNotNone(sm.update(_pose_data(1, 8.0)))
+        self.assertIsNone(sm.update(_pose_data(2, 1.0)))  # threading: blind
+        # Past the gate: cooldown must hold even though est went None between.
+        self.assertIsNone(sm.update(_pose_data(3, 12.0)))
+        self.assertIsNone(sm.update(_pose_data(12, 12.0)))
+        est = sm.update(_pose_data(13, 12.0))  # 3 + 10-frame cooldown elapsed
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est["body_x_m"], 12.0)
+
+    def test_identity_break_holds_then_snaps(self):
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        sm.update(_pose_data(1, 10.0))
+        e2 = sm.update(_pose_data(2, 9.8))
+        self.assertLess(e2["body_x_m"], 10.0)
+        # A far challenger appears: hold the incumbent for 2 frames...
+        e3 = sm.update(_pose_data(3, 25.0, by=5.0))
+        self.assertLess(e3["body_x_m"], 11.0)  # still the incumbent
+        self.assertNotIn("track_break", e3)
+        e4 = sm.update(_pose_data(4, 25.0, by=5.0))
+        self.assertLess(e4["body_x_m"], 11.0)
+        # ...then SNAP to it (no EMA blend across identities) with the flag.
+        e5 = sm.update(_pose_data(5, 25.0, by=5.0))
+        self.assertAlmostEqual(e5["body_x_m"], 25.0)
+        self.assertTrue(e5.get("track_break"))
+
+    def test_near_far_handoff_goes_blind(self):
+        # Incumbent tracked down to ~2.7 m, then only a far gate is reported:
+        # that's a gate pass — blind cooldown, not an instant retarget.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        fid = 0
+        for bx in (8.0, 6.0, 4.5, 3.2, 2.5, 2.5, 2.5, 2.5, 2.5):
+            fid += 1
+            self.assertIsNotNone(sm.update(_pose_data(fid, bx)))
+        for _ in range(3):  # challenger must persist BREAK_CONFIRM_N frames
+            fid += 1
+            out = sm.update(_pose_data(fid, 15.0))
+        self.assertIsNone(out)  # handoff accepted → blind
+        self.assertIsNone(sm.update(_pose_data(fid + 1, 15.0)))  # cooldown holds
+        est = sm.update(_pose_data(fid + 10, 15.0))
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est["body_x_m"], 15.0)
+
+    def test_fid_regression_still_emas(self):
+        # yolo carries the OLDER pose fid while anduril carries the camera
+        # fid; raw fids regress on the flip, which used to bypass the EMA.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        data1 = {
+            "anduril_gate": {
+                "frame_id": 10,
+                "body_x_m": 8.0,
+                "body_y_m": 0.0,
+                "body_z_m": 0.0,
+                "pnp_ok": False,
+                "reliable": True,
+                "source": "anduril",
+                "normal_body": None,
+            },
+            "frame": {"frame_id": 10},
+        }
+        e1 = sm.update(data1)
+        self.assertEqual(e1["frame_id"], 10)
+        data2 = _pose_data(8, 7.0, by=0.3)
+        data2["frame"] = {"frame_id": 11}  # pose fid 8 < anduril's 10
+        e2 = sm.update(data2)
+        self.assertEqual(e2["frame_id"], 11)  # monotonic camera clock
+        # EMA applied (0.35*7 + 0.65*8 = 7.65), not raw pass-through.
+        self.assertAlmostEqual(e2["body_x_m"], 7.65, places=2)
+
+
 class WiringTests(unittest.TestCase):
+    def test_elev_i_persists_across_backoff_only(self):
+        from simulator.gp_pilot import GPPilot
+
+        pilot = GPPilot(MagicMock(), {})
+        pilot._hold["elev_i"] = 0.012
+        pilot._enter_backoff()
+        self.assertAlmostEqual(pilot._hold["elev_i"], 0.012)
+        pilot._resume_flying()
+        self.assertAlmostEqual(pilot._hold["elev_i"], 0.012)
+        pilot._reset_state()  # new race: trim starts clean
+        self.assertAlmostEqual(pilot._hold["elev_i"], 0.0)
+
     def test_controller_uses_gp_pilot(self):
         with patch.dict("os.environ", {"AUTO_PILOT": "gp"}, clear=False):
             from simulator.controller import Controller

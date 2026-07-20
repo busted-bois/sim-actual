@@ -143,26 +143,32 @@ def estimate_gate_pose(keypoints, confs, box=None):
     independent of any keypoint-label (L/R) ambiguity in the PnP correspondence,
     which otherwise mirrors the gate to the wrong side.
 
-    Centre pixel = centroid of the 4 INNER keypoints (the opening corners) when
-    >=2 are confident. That targets the HOLE we must fly through -- immune to the
-    AI-GP box on TOP of the gate, which biases the bounding-box / all-keypoint
-    centre upward and made the drone clip the top or duck under the opening.
-    Falls back to the bbox centre, then any confident keypoints."""
+    Centre pixel = centroid of the visible INNER keypoints (the opening) — but
+    ONLY when that set is vertically+horizontally balanced (all 4, or a
+    diagonal pair). The 20-deg-up camera pushes the BOTTOM corners out of
+    frame inside ~4.5 m on a centred approach, and the centroid of what's
+    left is the TOP EDGE of the opening, 0.75 m above centre — the drone flew
+    to it and clipped the top bar. For one-sided visibility, project the
+    PnP-solved opening centre instead (== tvec through the pinhole): the
+    solve knows the gate geometry, so its centre stays centred no matter
+    which corners survived the crop."""
     pose = estimate_pose(keypoints, confs)
     if pose is None:
         return None
     kp = np.asarray(keypoints, np.float64)
     cf = np.asarray(confs, np.float64)
-    inner = kp[:4]
-    inner_vis = cf[:4] > KEYPOINT_CONF_THRESHOLD
-    if inner_vis.sum() >= 2:
-        ctr = inner[inner_vis].mean(axis=0)  # opening centre (the hole)
-    elif box is not None:
-        b = np.asarray(box, np.float64).reshape(-1)
-        ctr = np.array([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0])
+    vis4 = _visible_mask(kp, cf)[:4]  # slots TL,TR,BL,BR (top pair, bottom pair)
+    n4 = int(vis4.sum())
+    balanced = n4 == 4 or (
+        n4 == 2 and ((vis4[0] and vis4[3]) or (vis4[1] and vis4[2]))
+    )
+    if balanced and n4 >= 2:
+        ctr = kp[:4][vis4].mean(axis=0)  # opening centre (the hole)
     else:
-        vis = _visible_mask(kp, cf)
-        ctr = kp[vis].mean(axis=0) if vis.any() else kp.mean(axis=0)
+        proj, _ = cv2.projectPoints(
+            np.zeros((1, 3), np.float32), pose["rvec"], pose["tvec"], _K, _DIST
+        )
+        ctr = proj.reshape(2)
     return _finalize_pose(pose, ctr)
 
 

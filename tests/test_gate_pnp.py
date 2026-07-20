@@ -74,6 +74,52 @@ class CornerPnPTests(unittest.TestCase):
         self.assertIsNone(estimate_gate_pose_from_corners(corners))
 
 
+class OneSidedVisibilityTests(unittest.TestCase):
+    def test_center_unbiased_when_bottom_corners_clipped(self):
+        # The 20-deg-up camera pushes the BOTTOM corners out of frame inside
+        # ~4.5 m. The aim point must stay the opening CENTRE (from the PnP
+        # solve), not the centroid of the surviving top corners (+0.75 m up —
+        # the drone flew to that and clipped the top bar).
+        # Object +y projects DOWNWARD in the image, so the image-bottom
+        # corners (the ones the tilt crops first) are slots {0,1} inner and
+        # {4,5} outer.
+        t_true = np.array([0.1, 0.85, 3.0])
+        kp = _project(_GATE_PTS_3D, np.zeros(3), t_true)
+        confs = np.ones(8)
+        confs[[0, 1, 4, 5]] = 0.0  # image-bottom inner + outer "out of frame"
+        est = estimate_gate_pose(kp, confs)
+        self.assertIsNotNone(est)
+        np.testing.assert_allclose(est["gate_pos_cam"], t_true, atol=0.05)
+
+    def test_center_unbiased_when_side_corners_clipped(self):
+        # Same defense laterally (gate half out of frame while banking):
+        # drop one x-column of corners (slots {1,3} inner, {5,7} outer).
+        t_true = np.array([-0.9, 0.1, 3.0])
+        kp = _project(_GATE_PTS_3D, np.zeros(3), t_true)
+        confs = np.ones(8)
+        confs[[1, 3, 5, 7]] = 0.0
+        est = estimate_gate_pose(kp, confs)
+        self.assertIsNotNone(est)
+        np.testing.assert_allclose(est["gate_pos_cam"], t_true, atol=0.05)
+
+    def test_balanced_corners_keep_centroid_path(self):
+        # Full visibility must keep the original centroid behavior exactly.
+        t_true = np.array([0.3, -0.2, 6.0])
+        kp = _project(_GATE_PTS_3D, np.zeros(3), t_true)
+        est = estimate_gate_pose(kp, np.ones(8))
+        self.assertIsNotNone(est)
+        np.testing.assert_allclose(est["gate_pos_cam"], t_true, atol=0.05)
+
+    def test_diagonal_pair_is_balanced(self):
+        t_true = np.array([0.0, 0.2, 4.0])
+        kp = _project(_GATE_PTS_3D, np.zeros(3), t_true)
+        confs = np.ones(8)
+        confs[[1, 2]] = 0.0  # keep TL+BR inner: diagonal pair, still centred
+        est = estimate_gate_pose(kp, confs)
+        self.assertIsNotNone(est)
+        np.testing.assert_allclose(est["gate_pos_cam"], t_true, atol=0.05)
+
+
 class ReprojRejectTests(unittest.TestCase):
     def test_scrambled_keypoints_rejected(self):
         # Wrong correspondence on the over-determined 8-point solve must blow
