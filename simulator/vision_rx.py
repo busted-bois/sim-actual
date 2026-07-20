@@ -18,6 +18,37 @@ _GATE_COLOR = (0, 200, 0)
 _OBSTACLE_COLOR = (0, 0, 255)
 
 
+def _hole_fields(img, w, h):
+    """Classical inner-opening (gate hole) centre + pixel spread, or None.
+
+    Reuses find_gate_inner_corners (simulator/gate_corners_cv): the CCOMP hole
+    of the largest gate frame, with clipped/edge gates rejected. This is what a
+    racer flies THROUGH — the opening — not the orange body blob detect_gate
+    reports. Published on gate_target so the classical Pilot aims at the hole.
+    """
+    try:
+        from simulator.gate_corners_cv import find_gate_inner_corners
+
+        corners = find_gate_inner_corners(img)
+    except Exception:
+        return None
+    if corners is None:
+        return None
+    u = float(corners[:, 0].mean())
+    v = float(corners[:, 1].mean())
+    spread = float(corners[:, 0].max() - corners[:, 0].min())
+    if spread < 1.0:
+        return None
+    return {
+        "has_hole": True,
+        "hole_u": u,
+        "hole_v": v,
+        "spread_px": spread,
+        "hole_nx": (u - w / 2.0) / (w / 2.0),
+        "hole_ny": (v - h / 2.0) / (h / 2.0),
+    }
+
+
 def _annotate(img, detection, obstacle_px):
     """Return a copy of img with gate and obstacle overlays for live display."""
     out = img.copy()
@@ -149,6 +180,7 @@ class VisionRX:
             h, w = img.shape[:2]
 
             detection = detect_gate(img, frame_id, sim_time_ns)
+            hole = _hole_fields(img, w, h)
 
             self.data["camera"] = {"received_at": _time.monotonic()}
             # Raw BGR frame for dataset generation (Module 2) / GateNet inference.
@@ -181,7 +213,10 @@ class VisionRX:
                     "r_frac": r_frac,
                     "u_px": detection.centroid_x_px,
                     "v_px": detection.centroid_y_px,
+                    "w_px": detection.width_px,
                 }
+                if hole is not None:
+                    gate_target.update(hole)
                 estimate = self._estimate_geometry(detection, w, h)
                 if estimate is not None:
                     gate_target["bearing_rad"] = estimate.bearing_rad
@@ -198,6 +233,31 @@ class VisionRX:
                     nx,
                     ny,
                     estimate.range_m if estimate else None,
+                )
+                self._no_gate_frames = 0
+            elif hole is not None:
+                # HSV blob rejected but the opening solved -- promote the hole to
+                # a detection so the Pilot can still aim at (and fly through) it.
+                gate_target = {
+                    "detected": True,
+                    "frame_id": frame_id,
+                    "nx": hole["hole_nx"],
+                    "ny": hole["hole_ny"],
+                    "r_frac": (hole["spread_px"] ** 2) / (w * h),
+                    "u_px": hole["hole_u"],
+                    "v_px": hole["hole_v"],
+                    "w_px": hole["spread_px"] / 0.55,
+                }
+                gate_target.update(hole)
+                self.data["gate_target"] = gate_target
+                self._log_gate_detected(
+                    True,
+                    hole["hole_u"],
+                    hole["hole_v"],
+                    gate_target["r_frac"] * w * h,
+                    hole["hole_nx"],
+                    hole["hole_ny"],
+                    None,
                 )
                 self._no_gate_frames = 0
             else:
