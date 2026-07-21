@@ -39,20 +39,55 @@ K_LAT_D = 5.0
 MAX_BANK_DEG = 14.0
 PERP_BLEND_DIST = 6.0
 TILT_EMA_ALPHA = 0.25
-K_P_THRUST = 0.014
-K_D_THRUST = 0.0175
+# Elevation PD retuned 2026-07-20 (bottom-bar strike forensics): at the old
+# 0.014/0.0175 the loop's bandwidth was ~0.72 rad/s, zeta 0.45 — a ~3 m
+# inter-gate descent could not converge in the ~3.4 s between re-acquire and
+# the bx<=MIN_BX_FOR_ELEV cutoff at cruise, so every descending approach
+# reached the cutoff still ~0.8 m off with ~0.5 m/s of sink. 0.03/0.045 puts
+# it at ~1.06 rad/s, zeta ~0.78 (settle ~4 s).
+K_P_THRUST = 0.03
+K_D_THRUST = 0.045
+ELEV_ERR_CLAMP_M = 2.0  # bound the P authority against far-range PnP swings
 # Slow integral trim on the elevation loop. P-only left a steady-state offset
 # equal to the hover-trim mismatch (0.264 const vs ~0.27 measured): logs show
 # the drone riding ~0.5 m BELOW gate centre on every approach. Integrates only
 # while a gate is actively ranged (bx > MIN_BX_FOR_ELEV), held elsewhere.
 K_I_THRUST = 0.006  # thrust per m of elev error per second
 ELEV_I_CLAMP = 0.03  # ~11% of hover — enough for trim, can't run away
+# Seed at the measured hover deficit (~0.270 actual vs the byte-faithful
+# 0.264 const): un-seeded, every blind window flew slightly BELOW true hover
+# (log-verified mean 0.2639 while sinking at 0.7 m/s into gate 2's bottom
+# bar) until the slow I-term charged, which it never did on early gates.
+ELEV_I_SEED = 0.006
 # Anti-windup: integrate only in the small-error trim regime. The gate-1
 # climb-out holds a multi-meter elev error for seconds, which wound the
 # integrator to the clamp and ballooned the drone over the gate.
 ELEV_I_ERR_GATE_M = 1.0
 BEARING_RATE_CLAMP_DEG_S = 60.0
-ELEV_RATE_CLAMP_M_S = 5.0
+# 2.0 (was 5.0): no sane approach needs >2 m/s of commanded vertical rate at
+# <=10 km/h, but post-target-switch PnP refinement produced ±5 m/s phantom
+# elev rates that cut thrust to 0.23 for ~0.5 s while 1.8 m LOW (log rows
+# 217-221 of gp_log_20260720_171348). With K_D tripled the clamp must shrink.
+ELEV_RATE_CLAMP_M_S = 2.0
+# Vertical-speed null when no fresh elevation measurement exists (blind OR
+# inside MIN_BX_FOR_ELEV): d_vert = clip(vD) so the K_D term arrests residual
+# sink/climb instead of integrating it open-loop through the gate. Exact
+# vertical analog of the K_BLIND_VY_DEG sideslip null; clamped because vD is
+# IMU dead-reckoning (bound the damage, like BLIND_BANK_DEG does laterally).
+BLIND_VD_CLAMP_MPS = 1.5
+# Descent-rate cap. Overshoot into gate 2's bottom bar came from building more
+# sink than the (slow) elevation loop could arrest before the near-gate blind
+# window. Once descending faster than this, thrust is not allowed below the
+# hover trim (no further cut), so gravity alone can't push the sink much past
+# the cap and the loop gets to converge on centre instead of diving through it.
+MAX_DESCENT_RATE_MPS = 0.8
+# Floor safety net for the flat arena floor. The drone starts on the pad and
+# the descending course keeps every gate above that floor, so GO-time NED z is
+# a valid ground reference. Below this clearance above it, blend climb thrust
+# in; suppressed while a fresh gate still sits below us (that descent is
+# intended). Inert without position telemetry (alt blocked / offline harness).
+FLOOR_CLEARANCE_M = 0.8
+FLOOR_CLIMB_THRUST = 0.06
 # 2.5 (was 3.0): take the frozen elevation sample as late as the 20°-tilted
 # camera geometry allows, so the through-gate thrust servo runs on fresher data.
 MIN_BX_FOR_ELEV = 2.5
@@ -83,6 +118,11 @@ CRUISE_SPEED_MPS = 2.2
 THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
 BLIND_CRAWL_MPS = 1.0  # no gate in view
 SLOWDOWN_START_M = 5.0
+# Don't cruise into a gate that isn't vertically converged: scale the cruise
+# margin down as |elev_err| grows so the (slow) elevation loop gets more time
+# per metre. Full cruise at <=0.25 m of error, pure THRU crawl at >=1.25 m.
+VERT_SETTLED_ERR_M = 0.25
+VERT_SLOW_ERR_M = 1.25
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -128,6 +168,7 @@ def compute_guidance(
     vX: float = float("nan"),
     dt: float = 1.0 / GP_CONTROL_HZ,
     flying_t: float = float("nan"),
+    floor_clearance_m: float = float("nan"),
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -170,7 +211,8 @@ def compute_guidance(
         state["gate_tilt_ema"] = None
 
     elev_rate = 0.0
-    if vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None:
+    elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
+    if elev_fresh:
         qw, qx, qy, qz = quat
         gate_pD = (
             2 * (qx * qz - qw * qy) * bx
@@ -193,12 +235,16 @@ def compute_guidance(
                     ELEV_I_CLAMP,
                 )
             )
-    elif not vision_valid:
+    else:
+        # No fresh elevation measurement: fully blind OR vision valid but
+        # inside MIN_BX_FOR_ELEV (the valid-but-close case used to HOLD the
+        # frozen error un-decayed and keep a stale below-hover command alive
+        # into the gate — log-verified on the gate-2 bottom-bar strike).
         state["prev_gate_pD"] = None
         state["prev_elev_frame_id"] = None
-        # Decay (don't hold) the frozen elev error while blind: if the last
-        # sample came from a blended/wrong target, holding it locks a vertical
-        # impulse in open-loop all the way through the gate.
+        # Decay (don't hold) the frozen elev error: if the last sample came
+        # from a blended/wrong target, holding it locks a vertical impulse in
+        # open-loop all the way through the gate.
         state["last_elev_err"] = float(state.get("last_elev_err", 0.0)) * (
             ELEV_BLIND_DECAY
         )
@@ -297,6 +343,15 @@ def compute_guidance(
         d_lat = vY - state["vY_at_vision"]
         d_vert = vD - state["vD_at_vision"]
 
+    if not elev_fresh and not math.isnan(vD):
+        # Vertical analog of the blind sideslip null: with no fresh elevation
+        # measurement the vision D-term reads ~0 exactly when it matters (log:
+        # d_vert 0.01 vs vD 0.70 inside bx<2.5, 0.000 while blind) and 0.5 m/s
+        # of residual sink drops ~0.8-1.0 m across the blind span — 60%+ of
+        # the half-gate. Null the measured vertical speed instead; the
+        # existing +d_vert*K_D_THRUST term turns it into arresting thrust.
+        d_vert = float(np.clip(vD, -BLIND_VD_CLAMP_MPS, BLIND_VD_CLAMP_MPS))
+
     if math.isnan(vX):
         # RL expert / offline harnesses: original fixed lean.
         pitch_des_deg = DESIRED_PITCH_DEG
@@ -305,7 +360,17 @@ def compute_guidance(
     else:
         if vision_valid and reliable:
             ease = float(np.clip(bx / SLOWDOWN_START_M, 0.0, 1.0))
-            v_target = THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease
+            vert_ok = float(
+                np.clip(
+                    (VERT_SLOW_ERR_M - abs(float(state.get("last_elev_err", 0.0))))
+                    / (VERT_SLOW_ERR_M - VERT_SETTLED_ERR_M),
+                    0.0,
+                    1.0,
+                )
+            )
+            v_target = THRU_SPEED_MPS + (
+                CRUISE_SPEED_MPS - THRU_SPEED_MPS
+            ) * ease * vert_ok
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
         else:
@@ -363,12 +428,40 @@ def compute_guidance(
         math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
     )
     elev_err = float(state.get("last_elev_err", 0.0))
+    elev_err_c = float(np.clip(elev_err, -ELEV_ERR_CLAMP_M, ELEV_ERR_CLAMP_M))
     thrust = (
         hover_thrust
         + float(state.get("elev_i", 0.0))
-        - elev_err * K_P_THRUST
+        - elev_err_c * K_P_THRUST
         + d_vert * K_D_THRUST
     ) / tilt
+    # Descent-rate cap: sinking faster than MAX_DESCENT_RATE_MPS => don't let
+    # the command sit below the hover trim (that keeps accelerating the sink).
+    # Bounds the descent so it settles near the cap instead of diving through
+    # a low gate's bottom bar.
+    if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
+        hover_floor = (hover_thrust + float(state.get("elev_i", 0.0))) / tilt
+        thrust = max(thrust, hover_floor)
+    # Floor safety net: below FLOOR_CLEARANCE_M above the arena floor, blend in
+    # climb thrust so an overshoot below a low gate (or an open-loop blind sink)
+    # can't touch the ground. Suppressed while a fresh gate still sits below us
+    # (>0.3 m): that descent is the intended course, not a fall.
+    if not math.isnan(floor_clearance_m) and floor_clearance_m < FLOOR_CLEARANCE_M:
+        gate_below = elev_fresh and float(state.get("last_elev_err", 0.0)) > 0.3
+        if not gate_below:
+            floor_frac = float(
+                np.clip(
+                    (FLOOR_CLEARANCE_M - floor_clearance_m) / FLOOR_CLEARANCE_M,
+                    0.0,
+                    1.0,
+                )
+            )
+            climb_t = (
+                hover_thrust
+                + float(state.get("elev_i", 0.0))
+                + FLOOR_CLIMB_THRUST * floor_frac
+            ) / tilt
+            thrust = max(thrust, climb_t)
     thrust = float(np.clip(thrust, 0.0, 1.0))
 
     dbg = {
@@ -395,7 +488,7 @@ def compute_guidance(
 def _fresh_hold_state() -> dict:
     return {
         "last_elev_err": 0.0,
-        "elev_i": 0.0,
+        "elev_i": ELEV_I_SEED,
         "last_fused_frame_id": None,
         "gate_tilt_ema": None,
         "last_d_frame_id": None,
@@ -469,6 +562,7 @@ class GPPilot:
         self._backoff_last_t = 0.0
         self._flying_since: float | None = None
         self._go_start_ms: int | None = None
+        self._floor_z0: float | None = None  # GO-time NED z = flat-floor level
         self._tick = 0
         self._est_started = False
         self._last_arm_attempt = 0.0
@@ -523,6 +617,7 @@ class GPPilot:
         self._backoff_last_t = 0.0
         self._flying_since = None
         self._go_start_ms = None
+        self._floor_z0 = None
         self._close_log()
 
     def _open_log(self) -> None:
@@ -731,6 +826,19 @@ class GPPilot:
         if active > self.n_passed:
             self.n_passed = active
 
+        # Flat-floor clearance for the floor safety net. Capture GO-time NED z
+        # (drone on the pad = ground) once, then track height above it. z0
+        # persists across backoffs — the floor doesn't move — and is cleared
+        # only on a full race reset. Absent telemetry leaves clearance NaN
+        # (guard inert).
+        floor_clearance = float("nan")
+        lp = self.data.get("local_position_ned") or self.data.get("odometry")
+        if lp is not None and lp.get("z") is not None:
+            z_down = float(lp["z"])
+            if self._floor_z0 is None:
+                self._floor_z0 = z_down
+            floor_clearance = self._floor_z0 - z_down
+
         roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
@@ -743,6 +851,7 @@ class GPPilot:
             vX=vX,
             dt=dt,
             flying_t=flying_t,
+            floor_clearance_m=floor_clearance,
         )
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
@@ -892,7 +1001,9 @@ class GPPilot:
         pitch_cmd = (pitch_target - pitch_deg) * KP
         roll_cmd = (0.0 - roll_deg) * KR
         yaw_cmd = 0.0
-        thrust = HOVER_THRUST
+        # Include the learned hover trim: raw 0.264 is ~0.006 below measured
+        # hover, so every backoff slowly sank toward the floor-wedge cycle.
+        thrust = HOVER_THRUST + float(self._hold.get("elev_i", 0.0))
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )

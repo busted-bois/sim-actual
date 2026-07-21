@@ -8,9 +8,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from simulator.gp_pilot import (
+    ELEV_I_SEED,
+    FLOOR_CLEARANCE_M,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
+    MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
     _fresh_hold_state,
     compute_guidance,
@@ -105,6 +108,89 @@ class GuidanceTests(unittest.TestCase):
         # Positive elev → reduce thrust below hover
         self.assertLess(thrust, HOVER_THRUST)
 
+    def _descend_thrust(self, vD, floor_clearance=float("nan")):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 5,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": 2.0,  # gate below → thrust cut to descend
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=vD,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            floor_clearance_m=floor_clearance,
+        )
+        return thrust
+
+    def test_descent_rate_capped(self):
+        # Sinking well past the cap: the thrust cut for a below-gate must be
+        # clamped back up to the hover trim so the sink can't keep building
+        # into the bottom bar.
+        slow = self._descend_thrust(vD=0.0)  # not sinking: full cut allowed
+        fast = self._descend_thrust(vD=MAX_DESCENT_RATE_MPS + 1.0)  # over cap
+        self.assertLess(slow, HOVER_THRUST)  # descend command present
+        self.assertGreater(fast, slow)  # cap raised thrust back up
+        self.assertAlmostEqual(fast, HOVER_THRUST + ELEV_I_SEED, places=6)
+
+    def test_floor_guard_climbs_near_ground(self):
+        # Blind (no gate), near the floor: climb thrust must blend in.
+        state = _fresh_hold_state()
+
+        def blind_thrust(clearance):
+            _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=None,
+                vision_vel=None,
+                state=dict(state),
+                vX=2.0,
+                floor_clearance_m=clearance,
+            )
+            return thrust
+
+        safe = blind_thrust(5.0)  # well above floor: guard inert
+        low = blind_thrust(0.2)  # near floor: guard climbs
+        self.assertGreater(low, safe)
+        self.assertGreater(low, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_floor_guard_suppressed_when_gate_below(self):
+        # A fresh gate genuinely below us (intended descent) must NOT trip the
+        # floor guard — otherwise the descending course can't be flown.
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 5,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": 2.0,  # gate 2 m below → descend toward it
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            floor_clearance_m=0.2,  # low, but a gate is below → not a fall
+        )
+        self.assertGreater(dbg["elev_err"], 0.3)
+        self.assertLess(thrust, HOVER_THRUST)  # descend command preserved
+
     def test_elev_integral_trims_persistent_low_offset(self):
         # Drone stuck 0.5 m below gate centre (hover-trim mismatch): the I-term
         # must keep raising thrust over time where P-only plateaued.
@@ -165,7 +251,9 @@ class GuidanceTests(unittest.TestCase):
                 vision_vel=None,
                 state=state,
             )
-        self.assertAlmostEqual(state["elev_i"], 0.0, places=9)
+        from simulator.gp_pilot import ELEV_I_SEED
+
+        self.assertAlmostEqual(state["elev_i"], ELEV_I_SEED, places=9)
 
     def test_track_break_clears_derivative_state(self):
         # A gate switch must not inject phantom bearing/elev rates.
@@ -231,6 +319,140 @@ class GuidanceTests(unittest.TestCase):
         )
         self.assertAlmostEqual(state["last_elev_err"], 0.97, places=4)
 
+    def test_blind_sink_null_raises_thrust(self):
+        # Vertical analog of the sideslip null: residual sink while blind must
+        # be actively arrested, not integrated open-loop into the bottom bar
+        # (log: 0.7 m/s sink at lost-vision cost 0.47 m over a 0.65 s window).
+        from simulator.gp_pilot import ELEV_I_SEED
+
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.7,  # sinking while blind
+            vision=None,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
+        self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED + 0.02)
+
+    def test_blind_climb_also_nulled(self):
+        from simulator.gp_pilot import ELEV_I_SEED
+
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=-0.7,  # ballooning up while blind
+            vision=None,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["d_vert"], -0.7, places=6)
+        self.assertLess(thrust, HOVER_THRUST + ELEV_I_SEED - 0.02)
+
+    def test_blind_vd_null_clamped(self):
+        from simulator.gp_pilot import BLIND_VD_CLAMP_MPS
+
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=4.0,  # IMU dead-reckoning can drift — bound the damage
+            vision=None,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(dbg["d_vert"], BLIND_VD_CLAMP_MPS, places=6)
+
+    def test_near_gate_valid_vision_still_nulls_sink(self):
+        # Inside MIN_BX_FOR_ELEV with vision VALID the old code zeroed the
+        # vertical D entirely (elev_rate gated off) — the null must cover
+        # this window too, not just full blindness.
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 3,
+            "body_x_m": 2.2,  # < MIN_BX_FOR_ELEV
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.6,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertTrue(dbg["vision_valid"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.6, places=6)
+
+    def test_near_gate_valid_vision_decays_frozen_elev_err(self):
+        # The valid-but-close window used to HOLD the frozen error un-decayed.
+        state = _fresh_hold_state()
+        state["last_elev_err"] = 1.0
+        vision = {
+            "frame_id": 3,
+            "body_x_m": 2.2,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+        )
+        self.assertAlmostEqual(state["last_elev_err"], 0.97, places=4)
+
+    def test_vertical_error_slows_approach(self):
+        # Unconverged vertical state must trade speed for settle time: same
+        # range, big elev error => v_target drops to the THRU crawl.
+        from simulator.gp_pilot import THRU_SPEED_MPS
+
+        def run(bz):
+            state = _fresh_hold_state()
+            vision = {
+                "frame_id": 3,
+                "body_x_m": 4.0,
+                "body_y_m": 0.0,
+                "body_z_m": bz,
+                "normal_body": None,
+            }
+            _rr, _pr, _yr, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                vX=1.5,
+                flying_t=10.0,
+            )
+            return dbg["v_target"]
+
+        v_centred = run(0.0)
+        v_low = run(2.0)  # 2 m below the gate line
+        self.assertGreater(v_centred, v_low + 0.3)
+        self.assertAlmostEqual(v_low, THRU_SPEED_MPS, places=6)
+
     def test_gate_tilt_head_on_reads_zero(self):
         from simulator.gp_vision import gate_tilt_deg_from_normal
 
@@ -285,7 +507,10 @@ class GuidanceTests(unittest.TestCase):
             state=state,
         )
         self.assertFalse(dbg["vision_valid"])
-        self.assertAlmostEqual(thrust, HOVER_THRUST, places=3)
+        # Hover + the seeded trim (measured hover ~0.270 vs the 0.264 const).
+        from simulator.gp_pilot import ELEV_I_SEED
+
+        self.assertAlmostEqual(thrust, HOVER_THRUST + ELEV_I_SEED, places=2)
 
     def test_speed_loop_pitches_down_when_too_slow(self):
         from simulator.gp_pilot import CRUISE_SPEED_MPS, DESIRED_PITCH_DEG
@@ -563,6 +788,37 @@ class VisionAdapterTests(unittest.TestCase):
         g = best_pose_gate(data)
         self.assertAlmostEqual(float(g["pose"]["gate_pos_body"][0]), 6.0)
 
+    def test_best_pose_gate_ignores_third_gate(self):
+        from simulator.gp_vision import best_pose_gate
+
+        # Only the 2 NEAREST gates are eligible. A far gate dead-ahead (low
+        # bearing) would otherwise win on cost over the two off-axis near gates
+        # and yank the aim toward a gate two ahead while threading this one.
+        def gate(bx, by, conf=0.9):
+            return {
+                "conf": conf,
+                "pose": {
+                    "gate_pos_body": np.array([bx, by, 0.0]),
+                    "normal_body": np.array([-1.0, 0.0, 0.0]),
+                    "reproj_px": 1.0,
+                },
+            }
+
+        data = {
+            "pose": {
+                "frame_id": 1,
+                "gates": [
+                    gate(3.0, 2.6),  # nearest (r~3.97), off-axis -> cost ~7.5
+                    gate(4.0, 3.0),  # 2nd     (r=5.0),  off-axis -> cost ~8.2
+                    gate(6.0, 0.0),  # 3rd     (r=6.0),  dead-ahead cost 6.0
+                ],
+            }
+        }
+        g = best_pose_gate(data)
+        # Without the 2-gate cap the dead-ahead far gate (cost 6.0) would win;
+        # capped, only the two nearest are scored and the nearest one wins.
+        self.assertAlmostEqual(float(g["pose"]["gate_pos_body"][0]), 3.0)
+
     def test_yolo_tracker_suppresses_near_gate_and_cools_down(self):
         from simulator.gp_vision import YOLO_PASS_COOLDOWN_FR, YoloGateTracker
 
@@ -762,8 +1018,105 @@ class SmootherIdentityTests(unittest.TestCase):
         data2["frame"] = {"frame_id": 11}  # pose fid 8 < anduril's 10
         e2 = sm.update(data2)
         self.assertEqual(e2["frame_id"], 11)  # monotonic camera clock
-        # EMA applied (0.35*7 + 0.65*8 = 7.65), not raw pass-through.
-        self.assertAlmostEqual(e2["body_x_m"], 7.65, places=2)
+        # anduril -> yolo is a SOURCE FLIP: snap + track_break (blending
+        # across estimators used to sweep the aim through their offset).
+        self.assertAlmostEqual(e2["body_x_m"], 7.0, places=6)
+        self.assertTrue(e2.get("track_break"))
+
+
+class SourceFlipTests(unittest.TestCase):
+    def test_source_flip_snaps_without_blending(self):
+        # yolo -> anduril handoff: systematic offsets differ ~0.9 m vertically
+        # on clipped views and the step passes _same_target — EMA-blending it
+        # sweeps the aim point through the offset. Must SNAP + track_break.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+
+        def yolo_data(fid):
+            return {
+                "frame": {"frame_id": fid},
+                "pose": {
+                    "frame_id": fid,
+                    "gates": [
+                        {
+                            "conf": 0.9,
+                            "pose": {
+                                "gate_pos_body": np.array([6.0, 0.0, 0.0]),
+                                "normal_body": np.array([-1.0, 0.0, 0.0]),
+                                "reproj_px": 1.0,
+                            },
+                        }
+                    ],
+                },
+            }
+
+        est = None
+        for fid in range(1, 4):
+            est = sm.update(yolo_data(fid))
+        self.assertEqual(est["source"], "yolo")
+        # YOLO stale (inference fell behind 6 frames); anduril takes over
+        # 0.8 m higher within the EMA gap window (would blend without fix).
+        data = {
+            "frame": {"frame_id": 8},
+            "pose": {"frame_id": 2, "gates": []},
+            "anduril_gate": {
+                "frame_id": 8,
+                "body_x_m": 6.0,
+                "body_y_m": 0.0,
+                "body_z_m": -0.8,
+                "source": "anduril",
+                "reliable": True,
+                "normal_body": None,
+            },
+        }
+        est = sm.update(data)
+        self.assertEqual(est["source"], "anduril")
+        self.assertTrue(est.get("track_break"))
+        self.assertAlmostEqual(est["body_z_m"], -0.8, places=6)  # snap, no EMA
+
+    def test_source_flip_to_different_gate_debounces_not_snaps(self):
+        # Regression: the source-flip snap must NOT bypass identity debounce.
+        # A yolo->anduril flip that also lands on a DIFFERENT (far) gate used
+        # to snap instantly — banking toward the far gate while threading the
+        # near one. It must run the 3-frame BREAK_CONFIRM_N hold instead.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        # Lock the incumbent on a near gate (bx~6) via YOLO for 3 frames.
+        est = None
+        for fid in range(1, 4):
+            est = sm.update(_pose_data(fid, 6.0))
+        self.assertEqual(est["source"], "yolo")
+
+        def anduril_far(fid):
+            return {
+                "frame": {"frame_id": fid},
+                "pose": {"frame_id": 2, "gates": []},  # yolo stale/absent
+                "anduril_gate": {
+                    "frame_id": fid,
+                    "body_x_m": 15.0,
+                    "body_y_m": 6.0,  # different range AND direction
+                    "body_z_m": 0.0,
+                    "source": "anduril",
+                    "reliable": True,
+                    "normal_body": None,
+                },
+            }
+
+        # First flipped frame: HELD incumbent, not snapped to the far gate.
+        e1 = sm.update(anduril_far(4))
+        self.assertEqual(e1["source"], "yolo")
+        self.assertAlmostEqual(e1["body_x_m"], 6.0, places=6)
+        self.assertNotIn("track_break", e1)
+        # Second frame still held.
+        e2 = sm.update(anduril_far(5))
+        self.assertAlmostEqual(e2["body_x_m"], 6.0, places=6)
+        # Third confirming frame: NOW it may switch (debounce satisfied).
+        e3 = sm.update(anduril_far(6))
+        self.assertEqual(e3["source"], "anduril")
+        self.assertAlmostEqual(e3["body_x_m"], 15.0, places=6)
+        self.assertTrue(e3.get("track_break"))
 
 
 class WiringTests(unittest.TestCase):
@@ -776,8 +1129,10 @@ class WiringTests(unittest.TestCase):
         self.assertAlmostEqual(pilot._hold["elev_i"], 0.012)
         pilot._resume_flying()
         self.assertAlmostEqual(pilot._hold["elev_i"], 0.012)
-        pilot._reset_state()  # new race: trim starts clean
-        self.assertAlmostEqual(pilot._hold["elev_i"], 0.0)
+        pilot._reset_state()  # new race: trim restarts from the hover seed
+        from simulator.gp_pilot import ELEV_I_SEED
+
+        self.assertAlmostEqual(pilot._hold["elev_i"], ELEV_I_SEED)
 
     def test_controller_uses_gp_pilot(self):
         with patch.dict("os.environ", {"AUTO_PILOT": "gp"}, clear=False):

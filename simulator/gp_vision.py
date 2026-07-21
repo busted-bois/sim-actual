@@ -27,6 +27,12 @@ MAX_REPROJ_PX = 10.0
 # source alternate yolo<->anduril nearly every tick (log-verified sawtooth).
 YOLO_STALE_GAP_FR = 5  # pose packet this many frames behind the camera = stale
 BEARING_COST_M_PER_RAD = 5.0  # nearest-ahead pick: range + this per rad off-axis
+# Only ever consider the N nearest gates. A gate 3-4 course-lengths out can
+# briefly outscore the one dead ahead at handoff (big box, low bearing) and
+# yank the aim toward it while we're threading the near gate — the log-verified
+# gate-2 clip. The next gate we could legitimately switch to is always the
+# nearest or 2nd-nearest, so the far ones are pure distractors: drop them.
+MAX_GATES_CONSIDERED = 2
 # Pass-through suppression (Anduril-tracker parity for the YOLO path).
 YOLO_NEAR_BX_M = 2.0  # gate centre closer than this → threading it: go blind
 YOLO_NEAR_BOX_FRAC = 0.85  # box filling this fraction of the frame = on top of gate
@@ -59,8 +65,10 @@ def best_pose_gate(data: dict) -> dict | None:
     """
     pose_pkt = data.get("pose") or {}
     gates = pose_pkt.get("gates") or []
-    best = None
-    best_cost = float("inf")
+    # Collect valid, in-front gates with their range, then restrict to the
+    # MAX_GATES_CONSIDERED nearest before scoring — a far gate is never a
+    # legitimate next target and only serves to distract the selector.
+    candidates = []
     for g in gates:
         p = g.get("pose")
         if not p:
@@ -75,6 +83,11 @@ def best_pose_gate(data: dict) -> dict | None:
         if not np.all(np.isfinite(gb)) or gb[0] <= 0.1:
             continue
         rng = float(np.linalg.norm(gb))
+        candidates.append((rng, g, gb))
+    candidates.sort(key=lambda c: c[0])
+    best = None
+    best_cost = float("inf")
+    for rng, g, gb in candidates[:MAX_GATES_CONSIDERED]:
         bearing = abs(math.atan2(gb[1], gb[0]))
         cost = rng + BEARING_COST_M_PER_RAD * bearing
         if cost < best_cost:
@@ -384,6 +397,25 @@ class GateEstimateSmoother:
         vec = np.array(
             [est["body_x_m"], est["body_y_m"], est["body_z_m"]], dtype=np.float64
         )
+        if self._last_out is not None and est.get("source") != self._last_out.get(
+            "source"
+        ):
+            # Estimator handoff (yolo <-> anduril/hsv): their systematic
+            # offsets differ by up to ~0.9 m vertically on clipped views, and a
+            # SAME-gate step passes _same_target (~8 deg), so the EMA would
+            # sweep the aim point through the offset. Snap to the new source
+            # instead. BUT a flip that also lands on a DIFFERENT gate must run
+            # the 3-frame identity debounce + near->far pass cooldown via
+            # _on_target_break — snapping blindly here re-opened the "bank
+            # toward the far gate while threading the near one" crash.
+            if self._ema is not None:
+                pbx, pby, pbz = self._ema[1], self._ema[2], self._ema[3]
+                prev_vec = np.array([pbx, pby, pbz], dtype=np.float64)
+                if not _same_target(vec, prev_vec):
+                    return self._on_target_break(est, vec, prev_vec, fid)
+            est["track_break"] = True
+            self._ema = None
+            self._pending, self._pending_n = None, 0
         if self._ema is not None:
             prev_fid, pbx, pby, pbz = self._ema
             prev_vec = np.array([pbx, pby, pbz], dtype=np.float64)
