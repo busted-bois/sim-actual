@@ -25,6 +25,7 @@ from simulator.gp_vision import (
     GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
+    vision_gate_estimate,
 )
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
@@ -38,6 +39,11 @@ K_BEARING = 2.5
 K_LAT_D = 5.0
 MAX_BANK_DEG = 14.0
 PERP_BLEND_DIST = 6.0
+# Near-gate floor on lateral blend. blend=bx/PERP_BLEND_DIST shrinks to 0 as
+# we close, which starved bank authority exactly when off-center (CSV seg11:
+# by grew to -1.5 m while blend cut P/D). Keep enough bank to finish centering.
+NEAR_LAT_BLEND_FLOOR = 0.75
+BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
 TILT_EMA_ALPHA = 0.25
 K_P_THRUST = 0.014
 K_D_THRUST = 0.0175
@@ -318,6 +324,11 @@ def compute_guidance(
     )
     p_lat = K_BEARING * bearing_body * blend
     d_lat_term = K_LAT_D * d_lat * blend
+    # When still off-center near the gate, don't let blend starve the bank.
+    if vision_valid and abs(bearing_body) >= BEARING_NEED_BANK_DEG:
+        lat_blend = max(blend, NEAR_LAT_BLEND_FLOOR)
+        p_lat = K_BEARING * bearing_body * lat_blend
+        d_lat_term = K_LAT_D * d_lat * lat_blend
     desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
     roll_cmd_deg = (desired_roll - roll_deg) * KR
     yaw_cmd_deg = yaw_err * KY

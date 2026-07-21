@@ -133,8 +133,9 @@ class GuidanceTests(unittest.TestCase):
             state=state,
         )
         self.assertLess(dbg["blend"], 0.03)
-        # Bank authority scales with blend → near-gate roll command is small
-        self.assertLess(abs(dbg["desired_roll"]), 4.0)
+        # Off-center near the plane: lat blend floor keeps bank authority
+        # (was starved by blend→0 and caused lateral gate misses).
+        self.assertGreater(abs(dbg["desired_roll"]), 8.0)
 
     def test_no_vision_hoverish(self):
         state = _fresh_hold_state()
