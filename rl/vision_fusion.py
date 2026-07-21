@@ -43,8 +43,7 @@ def fuse_gate_target_position(
     p_body = spec.R_BODY_CAM @ p_cam
     p_meas = np.asarray(gate_world_pos, float) - R_wb @ p_body
     sigma = 0.8 * (1.1 - min(confidence, 1.0))
-    ekf.update_position(p_meas, sigma=sigma)
-    return True
+    return bool(ekf.update_position(p_meas, sigma=sigma, gate=True))
 
 
 def _wrap(a: float) -> float:
@@ -79,9 +78,11 @@ def fuse_pnp_gate(ekf, det: dict, gate_world_pos, max_pred_err_m: float = 6.0) -
     gate_pos_body is a full 3D body-frame measurement, so the implied drone
     position is p = gate_world - R_wb @ gate_body — far stronger than the HSV
     bearing/range path. Also anchors yaw the same way as fuse_gate_bearing_yaw.
-    Gated on prediction error so a detection of the WRONG gate (two gates in
-    frame) cannot poison the filter. Returns True when a position update ran.
+    Outliers are rejected by the ESKF Mahalanobis NIS gate (r^T S^{-1} r).
+    max_pred_err_m is unused (kept for call-site compat). Returns True when a
+    position update ran.
     """
+    del max_pred_err_m  # NIS gate replaces Euclidean pred-error check
     pose = det.get("pose") or {}
     gate_body = pose.get("gate_pos_body")
     conf = float(det.get("conf", 0.0) or 0.0)
@@ -96,10 +97,9 @@ def fuse_pnp_gate(ekf, det: dict, gate_world_pos, max_pred_err_m: float = 6.0) -
     R_wb = spec.quat_to_R(np.asarray(ekf.q, float))
     p_meas = g - R_wb @ np.asarray(gate_body, float)
     p_prior = ekf.p.copy()
-    if float(np.linalg.norm(p_meas - p_prior)) > max_pred_err_m:
-        return False
     sigma = 1.2 - min(conf, 0.9)  # 0.3–0.7 m by detection confidence
-    ekf.update_position(p_meas, sigma=sigma)
+    if not ekf.update_position(p_meas, sigma=sigma, gate=True):
+        return False
 
     # Yaw anchor: world bearing to the gate vs the body-frame PnP bearing.
     dx, dy = g[0] - p_prior[0], g[1] - p_prior[1]
