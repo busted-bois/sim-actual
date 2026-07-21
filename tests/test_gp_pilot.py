@@ -9,7 +9,6 @@ import numpy as np
 
 from simulator.gp_pilot import (
     ELEV_I_SEED,
-    FLOOR_CLEARANCE_M,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
