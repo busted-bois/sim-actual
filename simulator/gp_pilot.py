@@ -42,10 +42,7 @@ TRACK_LAT_GAIN = 3.5  # m of body-y per unit image offset (normalized -1..1)
 TRACK_ANGLE_GAIN = 0.8  # weight on the ribbon-heading lookahead term (curves)
 TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
 TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
-# After a gate pass, follow the ribbon for this many control ticks (60 Hz) to
-# trace the curve to the next gate instead of re-locking a dead-ahead gate and
-# coasting past the turn. ~1.5 s covers a typical inter-gate turn.
-POST_PASS_LINE_TICKS = 90
+TRACK_ANGLE_MIN_STRENGTH = 0.5  # trust the ribbon HEADING only above this (>=6 bands)
 
 
 # A real next gate is near and roughly ahead. After a pass YOLO intermittently
@@ -118,11 +115,16 @@ class TrackVirtualGate:
         t = self._last
         if t is None or t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
             return None
-        ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
-        by = (
-            t["offset"] * self.lat_gain
-            + math.tan(ang) * self.lookahead * self.angle_gain
-        )
+        # Offset (near-ribbon lateral position) is the reliable signal. The
+        # heading (angle) is only trustworthy with enough bands: the up-tilted
+        # camera sees little of the floor ribbon, so most detections are 2-4
+        # bands where `angle` saturates near +-pi/2 and points the WRONG way
+        # (live: a=+1.09 at s=0.33 banked +14 deg RIGHT into a LEFT curve). Use it
+        # only above TRACK_ANGLE_MIN_STRENGTH.
+        by = t["offset"] * self.lat_gain
+        if float(t["strength"]) >= TRACK_ANGLE_MIN_STRENGTH:
+            ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
+            by += math.tan(ang) * self.lookahead * self.angle_gain
         return {
             "body_x_m": self.lookahead,
             "body_y_m": float(by),
@@ -980,21 +982,17 @@ class GPPilot:
             vision = None
         vision_vel = self.vel_tracker.update(vision)
 
-        # Open a post-pass line-follow window on each gate pass (sim truth).
         active = int(self.data.get("active_gate_index", 0) or 0)
         if active > self.n_passed:
             self.n_passed = active
-            self._post_pass_until = self._tick + POST_PASS_LINE_TICKS
 
-        # Steering source: the blue ribbon takes over when (a) no usable gate, OR
-        # (b) we just passed a gate and are in the line-follow window — so the
-        # drone traces the course's CURVE to the next gate (e.g. the sharp left to
-        # gate 4) instead of re-locking whatever gate sits dead ahead and coasting
-        # straight past the turn. The ribbon IS the racing line: a straight course
-        # yields a straight virtual target, a left curve yields a left one.
+        # Blue-ribbon fallback: engage ONLY when no usable gate (a pure safety
+        # net). The earlier post-pass OVERRIDE was reverted — with the up-tilted
+        # camera the ribbon heading is too weak to reliably steer turns, and
+        # forcing it over a good gate banked the wrong way. Gate-following (with
+        # phantom rejection + predictive aim) is what reached 4 gates.
         self._track_active = False
-        in_pass_window = self._tick < self._post_pass_until
-        if track_vg is not None and (in_pass_window or not _gate_usable(vision)):
+        if track_vg is not None and not _gate_usable(vision):
             vision = track_vg
             vision_vel = None
             self._track_active = True
