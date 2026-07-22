@@ -311,6 +311,7 @@ def compute_guidance(
     dt: float = 1.0 / GP_CONTROL_HZ,
     flying_t: float = float("nan"),
     floor_clearance_m: float = float("nan"),
+    yaw_rate_rps: float = 0.0,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -398,7 +399,19 @@ def compute_guidance(
         and vis_frame_id is not None
         and vis_frame_id != state.get("last_fused_frame_id")
     ):
-        vy_raw = float(vision_vel["vy_body_mps"])
+        # De-rotate: the vision velocity is -d(gate_body)/dt, which during a YAW
+        # picks up a phantom lateral term (the gate sweeping across the image is
+        # rotation, not translation): v_true = v_vision - omega_z * bx. Untreated,
+        # a search/turn yaw spiked vY to +-2.6 m/s and slammed the bank the wrong
+        # way (the hit-or-miss turns). omega_z ~= 0 on a straight approach, so
+        # those are unchanged.
+        # SIGN-SAFE: the gyro sign convention here is uncertain (estimator negates
+        # gz; sim is inverted). Only accept the de-rotation when it SHRINKS |vY|
+        # (correct sign removing a real phantom). If it would GROW |vY| (wrong
+        # sign), keep the raw value — so this can never be worse than baseline.
+        vy_meas = float(vision_vel["vy_body_mps"])
+        vy_derot = vy_meas - yaw_rate_rps * bx
+        vy_raw = vy_derot if abs(vy_derot) <= abs(vy_meas) else vy_meas
         vz_raw = float(vision_vel["vz_body_mps"])
         state["vision_vy_ema"] = (
             VIS_VEL_EMA_ALPHA * vy_raw
@@ -989,6 +1002,7 @@ class GPPilot:
         vX = float(snap["vel_body"][0])
         vY = float(snap["vel_body"][1])
         vD = float(snap["vel_ned"][2])
+        yaw_rate_rps = math.radians(float(snap["rates_body_dps"][2]))
         dt = 1.0 / GP_CONTROL_HZ
         flying_t = (
             time.time() - self._flying_since
@@ -1108,6 +1122,7 @@ class GPPilot:
             dt=dt,
             flying_t=flying_t,
             floor_clearance_m=floor_clearance,
+            yaw_rate_rps=yaw_rate_rps,
         )
         # In search, keep the yaw (reorient toward the next gate) but soften the
         # bank so it faces the gate instead of slamming sideways past it.
