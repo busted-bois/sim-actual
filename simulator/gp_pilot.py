@@ -625,6 +625,9 @@ class GPPilot:
     def __init__(self, controller, data):
         self.controller = controller
         self.data = data
+        # Silence the per-frame "[vision] GATE cx=..." HSV spam so the [gp]
+        # guidance lines (and src=TRACK) are readable.
+        data["_quiet_vision"] = True
         self.n_passed = 0
         self.phase = Phase.WAIT_FOR_DATA
         self.est = GPEstimation(data)
