@@ -752,6 +752,14 @@ class GPPilot:
         self._blind_ticks = 0  # consecutive ticks with no usable gate
         self._course_cue = 0.0  # EMA lateral course direction (neg=left)
         self._search_active = False  # debug: arcing to reacquire after a pass
+        # Collision backoff DISABLED by default (GP_BACKOFF=1 to restore): a hit
+        # made the drone reverse ~3 m, losing all progress and flying backward
+        # into oblivion instead of just continuing toward the gate.
+        self._backoff_on = os.environ.get("GP_BACKOFF", "0").strip() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
@@ -1014,11 +1022,16 @@ class GPPilot:
             self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
             return
 
-        # Enter backoff on a fresh MAVLink COLLISION (mavlink_rx writes the key).
+        # Fresh MAVLink COLLISION (mavlink_rx writes the key). Backoff is OFF by
+        # default — reversing lost all progress and flew the drone backward into
+        # oblivion. Just consume the event and keep flying the guidance forward
+        # toward the gate. GP_BACKOFF=1 restores the old reverse-and-reacquire.
         if self.data.get("collision") is not None:
-            self._enter_backoff()
-            self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
-            return
+            if self._backoff_on:
+                self._enter_backoff()
+                self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
+                return
+            self.data.pop("collision", None)
 
         # Read the blue ribbon EVERY frame (cheap, cached per camera frame) for
         # both the fallback and diagnostics — synth caches its raw detection in

@@ -1501,6 +1501,7 @@ class GpRaceGateTests(unittest.TestCase):
         from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
+        pilot._backoff_on = True  # backoff is opt-in now; test the mechanism
         try:
             self._go_flying(ctrl, data, pilot)
             data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
@@ -1518,6 +1519,22 @@ class GpRaceGateTests(unittest.TestCase):
             ):
                 pilot.tick()
             self.assertEqual(pilot.phase, Phase.FLYING)
+        finally:
+            pilot.shutdown()
+
+    def test_collision_default_no_backoff_keeps_flying(self):
+        """Default (GP_BACKOFF off): a collision must NOT reverse — just consume
+        the event and keep flying the guidance forward."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        self.assertFalse(pilot._backoff_on)  # off by default
+        try:
+            self._go_flying(ctrl, data, pilot)
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)  # never enters BACKOFF
+            self.assertIsNone(data.get("collision"))  # event consumed
         finally:
             pilot.shutdown()
 
@@ -1574,6 +1591,7 @@ class GpRaceGateTests(unittest.TestCase):
         from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG, Phase
 
         ctrl, data, pilot = self._pilot()
+        pilot._backoff_on = True  # backoff is opt-in now; test the mechanism
         try:
             self._go_flying(ctrl, data, pilot)
             flying_since_go = pilot._flying_since
