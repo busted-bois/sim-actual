@@ -26,6 +26,81 @@ from simulator.gp_vision import (
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
 )
+from simulator.track_line import detect_track
+
+# --- Blue-track-line fallback -------------------------------------------------
+# The VQ2 course is marked by a glowing cyan floor ribbon that is visible to the
+# camera almost continuously, unlike the gates (sparse, lost after each pass).
+# When no usable GATE is in view, synthesize a virtual forward target ON the
+# ribbon so guidance keeps steering along the course instead of coasting blind
+# through the starvation windows that stall every pilot after a gate or two.
+TRACK_LOOKAHEAD_M = 5.0  # virtual target forward distance (body x)
+TRACK_LAT_GAIN = 3.0  # m of body-y per unit image offset (normalized -1..1)
+TRACK_ANGLE_GAIN = 0.6  # weight on the ribbon-heading lookahead term
+TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
+TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
+
+
+def _gate_usable(vision) -> bool:
+    """A real gate estimate good enough to steer to (reliable, ahead, finite)."""
+    if vision is None or not vision.get("reliable", False):
+        return False
+    bx = vision.get("body_x_m")
+    by = vision.get("body_y_m")
+    bz = vision.get("body_z_m")
+    if bx is None or by is None or bz is None:
+        return False
+    return bx > 0.1 and all(math.isfinite(v) for v in (bx, by, bz))
+
+
+class TrackVirtualGate:
+    """Turn the blue-ribbon detection into a virtual gate for compute_guidance.
+
+    A point TRACK_LOOKAHEAD_M ahead, offset in body-y by where the ribbon sits
+    (near offset + a heading-projected lookahead), held level (body_z=0). Feeding
+    it as `vision` makes the proven guidance bank to CENTER the ribbon and cruise
+    forward — no new control law, no velocity estimate. detect_track runs only on
+    a NEW camera frame (~30 Hz, ~2 ms) and the result is cached between ticks."""
+
+    def __init__(self):
+        self._last_fid = None
+        self._last = None
+
+    def reset(self) -> None:
+        self._last_fid = None
+        self._last = None
+
+    def synth(self, data) -> dict | None:
+        frame = data.get("frame")
+        if not frame or frame.get("img") is None:
+            return None
+        fid = frame.get("frame_id")
+        if fid != self._last_fid:
+            self._last_fid = fid
+            try:
+                self._last = detect_track(frame["img"])
+            except Exception:
+                self._last = None
+        t = self._last
+        if t is None or t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
+            return None
+        ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
+        by = (
+            t["offset"] * TRACK_LAT_GAIN
+            + math.tan(ang) * TRACK_LOOKAHEAD_M * TRACK_ANGLE_GAIN
+        )
+        return {
+            "body_x_m": TRACK_LOOKAHEAD_M,
+            "body_y_m": float(by),
+            "body_z_m": 0.0,
+            "frame_id": fid,
+            "reliable": True,
+            "source": "track",
+            "normal_body": None,
+            "method": None,
+            "strength": float(t["strength"]),
+        }
+
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
 # course (their controller.py hardcoded 0.264). The RL stack keeps using
@@ -368,9 +443,9 @@ def compute_guidance(
                     1.0,
                 )
             )
-            v_target = THRU_SPEED_MPS + (
-                CRUISE_SPEED_MPS - THRU_SPEED_MPS
-            ) * ease * vert_ok
+            v_target = (
+                THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok
+            )
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
         else:
@@ -557,6 +632,15 @@ class GPPilot:
         self.gate_smoother = GateEstimateSmoother()
         self._cmd_slew = CommandSlew()
         self._hold = _fresh_hold_state()
+        # Blue-ribbon fallback (on by default; GP_TRACKLINE=0 to disable). Only
+        # ever engages when no real gate is usable, so it can add steering to a
+        # starvation window but never override a gate.
+        self._trackline = (
+            TrackVirtualGate()
+            if os.environ.get("GP_TRACKLINE", "1").strip() not in ("0", "false", "no")
+            else None
+        )
+        self._track_active = False  # debug: was the last guidance from the ribbon
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
@@ -601,6 +685,9 @@ class GPPilot:
         self._hold = _fresh_hold_state()
         self.vel_tracker.reset()
         self.gate_smoother.reset()
+        if self._trackline is not None:
+            self._trackline.reset()
+        self._track_active = False
         self._cmd_slew.reset()
         self.est.reset()
         self.data.pop("collision", None)
@@ -749,9 +836,7 @@ class GPPilot:
                 # No "already running → fly now" (that skipped the 3s hold after
                 # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                countdown_done = (
-                    race_fresh and sim_ms >= start_ms and finish_ns < 0
-                )
+                countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
@@ -821,6 +906,16 @@ class GPPilot:
 
         vision = self.gate_smoother.update(self.data)
         vision_vel = self.vel_tracker.update(vision)
+        # Blue-line fallback: no usable gate this frame -> steer along the
+        # always-visible ribbon via a virtual forward target. Skip vision_vel
+        # (differencing a synthetic target makes phantom velocity).
+        self._track_active = False
+        if self._trackline is not None and not _gate_usable(vision):
+            vg = self._trackline.synth(self.data)
+            if vg is not None:
+                vision = vg
+                vision_vel = None
+                self._track_active = True
 
         active = int(self.data.get("active_gate_index", 0) or 0)
         if active > self.n_passed:
@@ -873,10 +968,11 @@ class GPPilot:
             src = dbg.get("source", "")
             infer = dbg.get("infer_ms")
             infer_s = f" yolo={infer:.0f}ms" if infer is not None else ""
+            steer = "TRACK" if self._track_active else src
             print(
                 f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
-                f"vX={vX:+.2f}/{vt:.2f} src={src}{infer_s} blend={dbg['blend']:.2f} "
+                f"vX={vX:+.2f}/{vt:.2f} src={steer}{infer_s} blend={dbg['blend']:.2f} "
                 f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
                 flush=True,
             )
