@@ -171,7 +171,15 @@ MIN_BX_FOR_ELEV = 2.5
 # sideslip integrated unopposed for the ~1-1.5 s blind window and drifted the
 # drone into the gate edge even after a perfectly centred approach.
 K_BLIND_VY_DEG = 8.0  # deg of bank per m/s residual sideslip while blind
-BLIND_BANK_DEG = 6.0  # cap — IMU vY is drifty, bound the damage
+BLIND_BANK_DEG = 10.0  # cap (was 6): vY is vision-fused now, needs real authority
+# Predictive lateral aim. The raw P-bank chases the gate's INSTANTANEOUS bearing,
+# so a small offset (0.3 m right) keeps banking toward the gate even while the
+# drone rushes rightward past it — it overshoots into the right edge in the blind
+# zone (the recurring gate-3 strike). Instead, aim at where the gate sits
+# relative to the drone AT THE CROSSING: by_pred = by - vY * t_lead, t_lead =
+# time-to-gate (bx/vX), capped. Nulling by_pred REVERSES sideslip before the edge
+# instead of feeding it. Undisturbed when vY~0 (gates entered centred + slow).
+LAT_LEAD_S_MAX = 0.6  # cap on the sideslip look-ahead time (s)
 ELEV_BLIND_DECAY = 0.97  # per 60 Hz tick (~0.55 s tau) on the frozen elev err
 # Vision-derivative frame-gap tolerance: YOLO (primary source) skips camera
 # frames when inference lags; dt scales by the actual gap, so up to 6 frames
@@ -484,11 +492,23 @@ def compute_guidance(
             PITCH_WIRE_MAX_DEG,
         )
     )
-    p_lat = K_BEARING * bearing_body * blend
-    d_lat_term = K_LAT_D * d_lat * blend
     if vision_valid:
+        # Predictive lateral aim: null where the gate will be at the crossing
+        # given current sideslip, not its instantaneous bearing. t_lead grows at
+        # close range (bx/vX) so drift is reversed BEFORE the blind zone; capped
+        # because vY, though vision-fused, is not exact.
+        vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
+        t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
+        by_pred = by - vY * t_lead
+        bearing_ctrl = float(
+            np.clip(math.degrees(math.atan2(by_pred, bx)), -25.0, 25.0)
+        )
+        p_lat = K_BEARING * bearing_ctrl * blend
+        d_lat_term = K_LAT_D * d_lat * blend
         desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
     else:
+        p_lat = K_BEARING * bearing_body * blend
+        d_lat_term = K_LAT_D * d_lat * blend
         # Blind (threading / suppressed): don't just level the wings — null
         # the residual sideslip so we cross the gate plane without drifting
         # into the edge. Inert whenever vision is valid.
@@ -544,6 +564,7 @@ def compute_guidance(
         "blend": blend,
         "elev_err": elev_err,
         "desired_roll": desired_roll,
+        "vY_fused": vY,
         "d_lat": d_lat,
         "d_vert": d_vert,
         "vision_valid": vision_valid,
@@ -975,7 +996,8 @@ class GPPilot:
             print(
                 f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
-                f"vX={vX:+.2f}/{vt:.2f} src={steer}{infer_s} blend={dbg['blend']:.2f} "
+                f"vX={vX:+.2f}/{vt:.2f} vY={dbg['vY_fused']:+.2f} src={steer}{infer_s} "
+                f"blend={dbg['blend']:.2f} droll={dbg['desired_roll']:+.1f} "
                 f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
                 flush=True,
             )
