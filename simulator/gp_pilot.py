@@ -52,6 +52,10 @@ TRACK_ANGLE_MIN_STRENGTH = 0.5  # trust the ribbon HEADING only above this (>=6 
 # offset / last gate bearing) via a strong side virtual target, sweeping the
 # next gate into view instead of flying off straight.
 SEARCH_START_TICKS = 18  # ~0.3 s blind after a pass before arcing
+# If a search keeps failing, REVERSE the scan direction every this-many ticks so
+# a wrong cue can't spin the drone 180deg away forever — it sweeps back and
+# finds the gate on the other side (live: it spun to -168deg one way and lost).
+SEARCH_SWEEP_TICKS = 45
 SEARCH_LOOKAHEAD_M = 4.0
 SEARCH_LAT_M = 4.0  # strong side offset -> max turn command toward the course
 SEARCH_CUE_ALPHA = 0.15  # EMA on the lateral course-direction cue
@@ -1095,7 +1099,12 @@ class GPPilot:
                 and self._blind_ticks >= SEARCH_START_TICKS
                 and abs(self._course_cue) > 0.15
             ):
-                side = math.copysign(1.0, self._course_cue)
+                # Sweep: start toward the cue, then flip direction each
+                # SEARCH_SWEEP_TICKS while still blind, so a wrong cue sweeps back
+                # instead of spinning away forever.
+                search_ticks = self._blind_ticks - SEARCH_START_TICKS
+                flip = -1.0 if (search_ticks // SEARCH_SWEEP_TICKS) % 2 == 1 else 1.0
+                side = math.copysign(1.0, self._course_cue) * flip
                 vision = {
                     "body_x_m": SEARCH_LOOKAHEAD_M,
                     "body_y_m": side * SEARCH_LAT_M,
