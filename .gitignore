@@ -30,3 +30,11 @@ rl/data/est_log_*.jsonl
 # GP expert demos + BC pretrain artifacts (make log-demos / make train-bc)
 rl/data/gp_demos.npz
 rl/data/policy_bc.pt
+
+# RL training scratch (logs, tensorboard, checkpoints, throwaway policies)
+rl/data/*.log
+rl/data/tb/
+rl/data/best/
+rl/data/ckpts/
+rl/data/policy_*_backup.pt
+rl/data/policy_*_failed.pt

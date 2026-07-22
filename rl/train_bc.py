@@ -49,7 +49,7 @@ def load_demos(path: str = DEMOS_PATH) -> tuple[torch.Tensor, torch.Tensor]:
             )
         obs = torch.from_numpy(d["obs"].astype(np.float32))
         act = torch.from_numpy(d["act"].astype(np.float32))
-    assert obs.shape[1] == spec.OBS_DIM and act.shape[1] == spec.ACTION_DIM
+    assert obs.shape[1] == spec.POLICY_OBS_DIM and act.shape[1] == spec.ACTION_DIM
     return obs, act
 
 
@@ -109,9 +109,11 @@ def save_policy(policy: StandalonePolicy, out: str = POLICY_BC_PT) -> None:
 def _selftest():
     # Tiny synthetic linear mapping: loss must clearly drop.
     rng = np.random.default_rng(3)
-    obs = torch.from_numpy(rng.uniform(-1, 1, (256, spec.OBS_DIM)).astype(np.float32))
+    obs = torch.from_numpy(
+        rng.uniform(-1, 1, (256, spec.POLICY_OBS_DIM)).astype(np.float32)
+    )
     w = torch.from_numpy(
-        rng.uniform(-0.2, 0.2, (spec.OBS_DIM, spec.ACTION_DIM)).astype(np.float32)
+        rng.uniform(-0.2, 0.2, (spec.POLICY_OBS_DIM, spec.ACTION_DIM)).astype(np.float32)
     )
     act = torch.clamp(obs @ w, -1, 1)
     policy, losses = train_bc(obs, act, epochs=15, batch_size=64)

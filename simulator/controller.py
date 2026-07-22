@@ -190,6 +190,12 @@ class Controller:
 
             return GPPilot(self, self.data)
 
+        if pilot == "rl":
+            # VQ2 learned-policy pilot (vision-only, no gate map). make rl-flight.
+            from simulator.rl_pilot import RLPilot
+
+            return RLPilot(self, self.data)
+
         if auto_flight_enabled():
             # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
             if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
