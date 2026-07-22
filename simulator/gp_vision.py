@@ -122,6 +122,11 @@ def _yolo_pose_estimate(data: dict) -> dict | None:
         "v_px": None,
         "reliable": True,
         "source": "yolo",
+        # PnP method: "edge-pair" is a single-edge fallback whose normal is a
+        # fixed camera-tilt placeholder, not a measured plane — consumers that
+        # read the full normal vector (RL obs) must not trust it as a real
+        # orientation. The GP guidance ignores the normal's z so it never cared.
+        "method": p.get("method"),
         "infer_ms": pose_pkt.get("infer_ms"),
     }
 

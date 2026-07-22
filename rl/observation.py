@@ -29,6 +29,45 @@ def _unit(v):
     return v / n if n > 1e-9 else np.zeros(3)
 
 
+def build_observation_body(
+    to_gate_body: np.ndarray,
+    dist_to_gate: float,
+    gate_normal_body: np.ndarray,
+    vel_body: np.ndarray,
+    ang_vel: np.ndarray,
+    gravity_body: np.ndarray,
+    to_next_gate_body: np.ndarray,
+    dist_to_next_gate: float,
+    last_action: np.ndarray | None = None,
+) -> np.ndarray:
+    """Assemble + normalize the 24-D observation from BODY-frame quantities.
+
+    Single source of truth for the obs contract: both training
+    (build_observation, which derives these from the world-frame gate map) and
+    VQ2 deploy (which gets them from YOLO+PnP vision + IMU/GyroAHRS) call this,
+    so a sim-trained policy sees an identically-constructed vector at deploy.
+
+    Inputs are all body FRD: to_gate_body / gate_normal_body / gravity_body /
+    to_next_gate_body are direction vectors (unit-normalized here where
+    training does); vel_body m/s; ang_vel rad/s; distances in meters.
+    """
+    obs = np.zeros(spec.OBS_DIM, dtype=np.float32)
+    L = spec.OBS_LAYOUT
+    tg = _unit(np.asarray(to_gate_body, float))
+    obs[L["to_gate_body"]] = tg
+    obs[L["dist_to_gate"]] = min(float(dist_to_gate) / DIST_SCALE, 5.0)
+    obs[L["gate_normal_body"]] = np.asarray(gate_normal_body, float)
+    obs[L["vel_body"]] = np.clip(np.asarray(vel_body, float) / V_SCALE, -5, 5)
+    obs[L["ang_vel"]] = np.clip(np.asarray(ang_vel, float) / RATE_SCALE, -3, 3)
+    obs[L["gravity_body"]] = np.asarray(gravity_body, float)
+    obs[L["yaw_align"]] = float(np.arctan2(tg[1], tg[0])) / np.pi
+    obs[L["to_next_gate_body"]] = _unit(np.asarray(to_next_gate_body, float))
+    obs[L["dist_to_next_gate"]] = min(float(dist_to_next_gate) / DIST_SCALE, 5.0)
+    la = np.zeros(3) if last_action is None else np.asarray(last_action, float)[:3]
+    obs[L["last_action"]] = np.clip(la, -1, 1)
+    return obs
+
+
 def build_observation(
     p: np.ndarray,
     v_world: np.ndarray,
@@ -60,37 +99,23 @@ def build_observation(
     gc = np.asarray(cur["pos"], float)
     dvec_w = gc - p
     dist = float(np.linalg.norm(dvec_w))
-    to_gate_body = Rt @ _unit(dvec_w)
-
     gnorm_w = spec.quat_to_R(np.asarray(cur["quat"], float)) @ np.array([1.0, 0, 0])
-    gate_normal_body = Rt @ gnorm_w
-
-    vel_body = (Rt @ v_world) / V_SCALE
-    ang = np.asarray(ang_vel, float) / RATE_SCALE
-    gravity_body = Rt @ np.array([0.0, 0.0, 1.0])
-
-    yaw_align = float(np.arctan2(to_gate_body[1], to_gate_body[0]))
-
     nc = np.asarray(nxt["pos"], float)
     ndvec_w = nc - p
-    ndist = float(np.linalg.norm(ndvec_w))
-    to_next_body = Rt @ _unit(ndvec_w)
 
-    la = np.zeros(3) if last_action is None else np.asarray(last_action, float)[:3]
-
-    obs = np.zeros(spec.OBS_DIM, dtype=np.float32)
-    L = spec.OBS_LAYOUT
-    obs[L["to_gate_body"]] = to_gate_body
-    obs[L["dist_to_gate"]] = min(dist / DIST_SCALE, 5.0)
-    obs[L["gate_normal_body"]] = gate_normal_body
-    obs[L["vel_body"]] = np.clip(vel_body, -5, 5)
-    obs[L["ang_vel"]] = np.clip(ang, -3, 3)
-    obs[L["gravity_body"]] = gravity_body
-    obs[L["yaw_align"]] = yaw_align / np.pi
-    obs[L["to_next_gate_body"]] = to_next_body
-    obs[L["dist_to_next_gate"]] = min(ndist / DIST_SCALE, 5.0)
-    obs[L["last_action"]] = np.clip(la, -1, 1)
-    return obs
+    # Derive body-frame quantities from the world gate map, then hand to the
+    # shared core so training and VQ2-vision deploy build the obs identically.
+    return build_observation_body(
+        to_gate_body=Rt @ dvec_w,
+        dist_to_gate=dist,
+        gate_normal_body=Rt @ gnorm_w,
+        vel_body=Rt @ v_world,
+        ang_vel=np.asarray(ang_vel, float),
+        gravity_body=Rt @ np.array([0.0, 0.0, 1.0]),
+        to_next_gate_body=Rt @ ndvec_w,
+        dist_to_next_gate=float(np.linalg.norm(ndvec_w)),
+        last_action=last_action,
+    )
 
 
 def _selftest():

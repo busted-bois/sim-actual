@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -88,8 +88,11 @@ fly-vision-est:
 hover:
 	uv run -m rl.fly2 --mode hover --seconds 8
 
-# Measure the sim's attitude/thrust response (open-loop characterization).
-dynamics:
+# Measure + FIT + persist translational dynamics (thrust_accel, hover, drag,
+# v_max) into flightlab/calibration.json so rl/env.py trains on the real thrust
+# curve and drag. Sim must be in a TRAINING session (odometry velocity needed).
+# `thrust-id` is an alias. --dry-run measures without writing.
+dynamics thrust-id:
 	uv run -m rl.dynamics_id
 
 # Attitude inner-loop harness (Spec B). Writes flightlab/calibration.json +
@@ -121,9 +124,24 @@ log-demos:
 train-bc:
 	uv run -m rl.train_bc
 
-# Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
+# Module 8: train PPO over the curriculum -> rl/data/policy.pt. Uses the GPU
+# when available (--device cpu to force CPU); warm-starts from policy_bc.pt when
+# present; TensorBoard logs + best/checkpoint models under rl/data/{tb,best,ckpts}.
+#   tensorboard --logdir rl/data/tb
 train-ppo:
 	uv run -m rl.train_ppo
+
+# VQ2 vision-only RL flight: fly rl/data/policy.pt on the live sim using
+# YOLO+PnP gate pose + IMU state (NO gate map, NO odometry). Run the sim in a
+# TRAINING session on the VQ2 course. Live rate calibration via env vars:
+#   RL_RATE_SCALE=0.4 RL_SIGN_ROLL=-1 RL_SIGN_PITCH=1 RL_SIGN_YAW=-1 make rl-flight
+rl-flight:
+	uv run auto_rl.py
+
+# Evaluate the trained policy offline (gates chained + completion per stage).
+# Headless, no live sim. Prints reproducible per-stage metrics from policy.pt.
+eval-policy:
+	uv run -m rl.eval_policy
 
 # Module 8: fly the trained policy on the live sim.
 fly-policy:

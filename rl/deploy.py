@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -76,6 +77,10 @@ def load_policy(path: str = POLICY_PT, device: str = "cpu"):
         "action_scale": tuple(
             float(s) for s in ckpt.get("action_scale", LEGACY_ACTION_SCALE)
         ),
+        # How many observation frames the policy was trained to consume (1 =
+        # legacy single-frame; 3 = the frame-stacked policy). Deploy must feed
+        # the SAME stack depth or the obs dimension won't match the net.
+        "obs_stack": int(ckpt.get("obs_stack", 1)),
     }
     if abs(meta["action_scale"][1] - RATE_SCALE) > 1e-9:
         print(
@@ -152,6 +157,8 @@ class PolicyRunner:
         self.act, self.meta = load_policy(policy_path)
         self.ekf = ESKF()
         self.last_action = np.zeros(spec.ACTION_DIM)
+        self._obs_stack = self.meta["obs_stack"]
+        self._frames: deque = deque(maxlen=self._obs_stack)
         self.gate_idx = 0
         self._prev_signed = None
         self._last_imu_t = None
@@ -167,9 +174,19 @@ class PolicyRunner:
         self.gate_idx = 0
         self.last_action[:] = 0.0
         self._last_imu_t = None
+        self._frames.clear()  # drop stale history across a re-seed / restart
         self._prev_signed = float(
             _gate_normal(gate_map[0]) @ (self.ekf.p - np.array(gate_map[0]["pos"]))
         )
+
+    def _stacked_obs(self, frame: np.ndarray) -> np.ndarray:
+        """Frame-stack the live observation to match the policy's training
+        depth (primes with copies of the first frame after a reset)."""
+        if not self._frames:
+            self._frames.extend([frame] * self._obs_stack)
+        else:
+            self._frames.append(frame)
+        return np.concatenate(self._frames, dtype=np.float32)
 
     def run(self):
         from rl.fly2_course import resolve_gate_map
@@ -299,7 +316,7 @@ class PolicyRunner:
                         _gate_normal(g) @ (st["p"] - np.array(g["pos"]))
                     )
 
-            obs = build_observation(
+            frame = build_observation(
                 st["p"],
                 st["v"],
                 st["q"],
@@ -308,6 +325,7 @@ class PolicyRunner:
                 self.gate_idx,
                 self.last_action[:3],
             )
+            obs = self._stacked_obs(frame)
             action = self.act(obs)
             self.last_action = action
             roll, pitch, yaw, thrust = live_scale_action(action, self.meta)
@@ -337,7 +355,7 @@ def _selftest():
     for stage in (0, 2):
         env = GateRacingEnv(stage=stage, seed=7)
         o, _ = env.reset()
-        assert o.shape == (spec.OBS_DIM,)
+        assert o.shape == (spec.POLICY_OBS_DIM,)
         tot, steps = 0.0, 0
         term = trunc = False
         while not (term or trunc):
