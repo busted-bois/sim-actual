@@ -49,6 +49,16 @@ from simulator.gp_vision import GateEstimateSmoother, VisionVelocityTracker
 RL_CONTROL_HZ = 50  # matches the policy's trained DECISION_HZ (< 100 Hz cap)
 VEL_CORRECT_K = 0.15  # vision-velocity anchor gain in the complementary filter
 VEL_CLIP_MPS = 8.0  # hard bound on the fused body velocity (safety)
+# Cap on the rotational-flow correction (omega x gate_body). At a far gate + high
+# spin it can blow up to 100+ m/s and CORRUPT the velocity it's meant to clean
+# (live: vrot hit 163). A real turn near a gate is only a few m/s; clamp it.
+VROT_CAP_MPS = 6.0
+# When no drift-free vision velocity is available, the raw IMU vel_body dead-
+# reckons to +-50 m/s within seconds. Don't free-run it: hold the last fused
+# value a few ticks, then decay toward zero so a lost-lock window can't pin the
+# velocity obs at the clip (which is itself wildly out-of-distribution).
+BLIND_VEL_HOLD_TICKS = 3
+VEL_DECAY = 0.9
 # After this many control ticks with no fresh gate, stop repeating the last
 # command and coast level (zero rates, hover thrust). ~1.6 ticks is normal
 # between 30 Hz vision frames; a long gap = near-gate blind window / lost lock,
@@ -115,6 +125,7 @@ class RLPilot:
         self._stale_ticks = 0  # control ticks since the last fresh gate
         self._vel_fused = np.zeros(3)  # complementary-filtered body velocity
         self._v_imu_prev: np.ndarray | None = None
+        self._vel_blind_ticks = 0
         self._vis_rot_mag = 0.0  # last rotational-flow correction magnitude (debug)
         self.last_action = np.zeros(4)
         self.n_passed = 0
@@ -167,6 +178,7 @@ class RLPilot:
         self._stale_ticks = 0
         self._vel_fused = np.zeros(3)
         self._v_imu_prev = None
+        self._vel_blind_ticks = 0
         self.last_action[:] = 0.0
         self.est.reset()
         self.vel_tracker.reset()
@@ -235,20 +247,32 @@ class RLPilot:
         range — the out-of-distribution velocity that stalls the policy exactly
         when it turns. Subtract it here to recover the true translational vel."""
         v_imu = np.asarray(snap["vel_body"], float)
-        if self._v_imu_prev is not None:
-            self._vel_fused = self._vel_fused + (v_imu - self._v_imu_prev)
-        self._v_imu_prev = v_imu
         vv = self.vel_tracker.last_velocity
         if vv is not None:
+            # Drift-free vision velocity available: bridge with the IMU's
+            # short-term CHANGE, then anchor to the (rotation-corrected) vision.
             v_vis = np.array(
                 [vv["vx_body_mps"], vv["vy_body_mps"], vv["vz_body_mps"]], float
             )
             if gate_body is not None:
                 omega = np.radians(np.asarray(snap["rates_body_dps"], float))
                 v_rot = np.cross(omega, gate_body)  # rotational optical flow
-                self._vis_rot_mag = float(np.linalg.norm(v_rot))
+                m = float(np.linalg.norm(v_rot))
+                self._vis_rot_mag = m
+                if m > VROT_CAP_MPS:  # clamp so a fast spin can't explode it
+                    v_rot = v_rot * (VROT_CAP_MPS / m)
                 v_vis = v_vis - v_rot
+            if self._v_imu_prev is not None:
+                self._vel_fused = self._vel_fused + (v_imu - self._v_imu_prev)
             self._vel_fused += VEL_CORRECT_K * (v_vis - self._vel_fused)
+            self._vel_blind_ticks = 0
+        else:
+            # No drift-free anchor: the IMU alone diverges, so hold briefly then
+            # decay toward zero rather than free-running it.
+            self._vel_blind_ticks += 1
+            if self._vel_blind_ticks > BLIND_VEL_HOLD_TICKS:
+                self._vel_fused = self._vel_fused * VEL_DECAY
+        self._v_imu_prev = v_imu
         self._vel_fused = np.clip(self._vel_fused, -VEL_CLIP_MPS, VEL_CLIP_MPS)
 
     def _build_frame(self, vision: dict, snap: dict) -> np.ndarray:
@@ -274,9 +298,7 @@ class RLPilot:
         # verbatim (no auto-unit), so normalize here to match training's unit.
         normal_travel = -np.asarray(nb, float) if measured else gate_body
         n = float(np.linalg.norm(normal_travel))
-        normal_travel = (
-            normal_travel / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
-        )
+        normal_travel = normal_travel / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
         frame = build_observation_body(
             to_gate_body=gate_body,
             dist_to_gate=dist,
@@ -461,6 +483,7 @@ class RLPilot:
         self._stale_ticks = 0
         self._vel_fused = np.zeros(3)
         self._v_imu_prev = None
+        self._vel_blind_ticks = 0
         self.n_passed = 0  # fresh lap — every GO is a new attempt
         self.last_action[:] = 0.0
 
@@ -476,6 +499,7 @@ class RLPilot:
         self._cmd = None
         self._vel_fused = np.zeros(3)
         self._v_imu_prev = None
+        self._vel_blind_ticks = 0
         self._go_start_ms = None
         self._finish_noted = False
         race = self.data.get("race_status")
