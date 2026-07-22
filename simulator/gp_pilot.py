@@ -34,23 +34,43 @@ from simulator.track_line import detect_track
 # When no usable GATE is in view, synthesize a virtual forward target ON the
 # ribbon so guidance keeps steering along the course instead of coasting blind
 # through the starvation windows that stall every pilot after a gate or two.
-TRACK_LOOKAHEAD_M = 5.0  # virtual target forward distance (body x)
-TRACK_LAT_GAIN = 3.0  # m of body-y per unit image offset (normalized -1..1)
-TRACK_ANGLE_GAIN = 0.6  # weight on the ribbon-heading lookahead term
+# Defaults are env-overridable for live tuning (GP_TRACK_*). Shorter lookahead +
+# higher lateral gain = tighter tracing of the ribbon (corrects offset sooner);
+# too tight oscillates. 4 m / 3.5 is a moderate-tight starting point.
+TRACK_LOOKAHEAD_M = 4.0  # virtual target forward distance (body x)
+TRACK_LAT_GAIN = 3.5  # m of body-y per unit image offset (normalized -1..1)
+TRACK_ANGLE_GAIN = 0.8  # weight on the ribbon-heading lookahead term (curves)
 TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
 TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
 
 
-def _gate_usable(vision) -> bool:
-    """A real gate estimate good enough to steer to (reliable, ahead, finite)."""
-    if vision is None or not vision.get("reliable", False):
+# A real next gate is near and roughly ahead. After a pass YOLO intermittently
+# locks a FAR background gate (live: bx=73.8 m, by=-16.4 m) and the pilot banks
+# hard at the phantom, kicking off the drift that crashes it. Drop such estimates
+# so the blue-line fallback (or the blind sideslip null) takes over instead.
+GATE_MAX_RANGE_M = 25.0
+GATE_MAX_LAT_M = 12.0
+
+
+def _plausible_gate(vision) -> bool:
+    """Geometrically believable as the next gate (near, ahead, finite)."""
+    if vision is None:
         return False
     bx = vision.get("body_x_m")
     by = vision.get("body_y_m")
     bz = vision.get("body_z_m")
     if bx is None or by is None or bz is None:
         return False
-    return bx > 0.1 and all(math.isfinite(v) for v in (bx, by, bz))
+    if not all(math.isfinite(v) for v in (bx, by, bz)):
+        return False
+    return 0.1 < bx < GATE_MAX_RANGE_M and abs(by) < GATE_MAX_LAT_M
+
+
+def _gate_usable(vision) -> bool:
+    """A real gate estimate good enough to steer to (reliable, near, ahead)."""
+    if vision is None or not vision.get("reliable", False):
+        return False
+    return _plausible_gate(vision)
 
 
 class TrackVirtualGate:
@@ -65,6 +85,16 @@ class TrackVirtualGate:
     def __init__(self):
         self._last_fid = None
         self._last = None
+
+        def _f(name, default):
+            try:
+                return float(os.environ.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        self.lookahead = _f("GP_TRACK_LOOKAHEAD", TRACK_LOOKAHEAD_M)
+        self.lat_gain = _f("GP_TRACK_LATGAIN", TRACK_LAT_GAIN)
+        self.angle_gain = _f("GP_TRACK_ANGGAIN", TRACK_ANGLE_GAIN)
 
     def reset(self) -> None:
         self._last_fid = None
@@ -86,11 +116,11 @@ class TrackVirtualGate:
             return None
         ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
         by = (
-            t["offset"] * TRACK_LAT_GAIN
-            + math.tan(ang) * TRACK_LOOKAHEAD_M * TRACK_ANGLE_GAIN
+            t["offset"] * self.lat_gain
+            + math.tan(ang) * self.lookahead * self.angle_gain
         )
         return {
-            "body_x_m": TRACK_LOOKAHEAD_M,
+            "body_x_m": self.lookahead,
             "body_y_m": float(by),
             "body_z_m": 0.0,
             "frame_id": fid,
@@ -929,6 +959,11 @@ class GPPilot:
             return
 
         vision = self.gate_smoother.update(self.data)
+        # Drop far/phantom locks (post-pass background gate, garbage YOLO) BEFORE
+        # they can steer or feed the velocity tracker — banking at a 70 m phantom
+        # is what crashed the run after gate 4.
+        if not _plausible_gate(vision):
+            vision = None
         vision_vel = self.vel_tracker.update(vision)
         # Blue-line fallback: no usable gate this frame -> steer along the
         # always-visible ribbon via a virtual forward target. Skip vision_vel
