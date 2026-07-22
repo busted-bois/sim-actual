@@ -17,11 +17,14 @@ from simulator.gp_pilot import (
     BACKOFF_PUSH_S,
     HOVER_THRUST,
     K_BEARING,
+    LOOKAHEAD_LAMBDA,
     MAX_BANK_DEG,
     PERP_BLEND_DIST,
     _backoff_pitch_target,
     _fresh_hold_state,
+    apply_lookahead_body,
     compute_guidance,
+    gate_segment_delta_ned,
 )
 from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
 from simulator.gyro_ahrs import GyroAHRS, euler_to_quat
@@ -1367,6 +1370,131 @@ class EstimatorResilienceTests(unittest.TestCase):
                 self.assertGreater(abs(yaw), 0.5)
             finally:
                 est.stop()
+
+
+class LookaheadTests(unittest.TestCase):
+    def _level_quat(self):
+        return np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+
+    def test_gate_segment_delta_ned(self):
+        gm = [
+            {"pos": [0.0, 0.0, -5.0]},
+            {"pos": [10.0, 4.0, -5.0]},
+            {"pos": [20.0, 4.0, -6.0]},
+        ]
+        d = gate_segment_delta_ned(gm, 0)
+        np.testing.assert_allclose(d, [10.0, 4.0, 0.0])
+        self.assertIsNone(gate_segment_delta_ned(gm, 2))  # last gate
+        self.assertIsNone(gate_segment_delta_ned([], 0))
+        self.assertIsNone(gate_segment_delta_ned(None, 0))
+
+    def test_apply_lambda_zero_identity(self):
+        gq = self._level_quat()
+        delta = np.array([10.0, 4.0, 0.0])
+        ax, ay, az, used = apply_lookahead_body(12.0, 0.0, 0.0, gq, delta, 0.0)
+        self.assertEqual((ax, ay, az, used), (12.0, 0.0, 0.0, 0.0))
+
+    def test_apply_body_mix_level(self):
+        # Identity gate quat: smaller horizontal is Δy=4 vs thru=10 → lateral=4
+        gq = self._level_quat()
+        delta = np.array([10.0, 4.0, 0.0])
+        ax, ay, az, used = apply_lookahead_body(12.0, 0.0, 0.0, gq, delta, 0.5)
+        self.assertAlmostEqual(used, 0.5)
+        self.assertAlmostEqual(ax, 12.0)
+        self.assertAlmostEqual(ay, 2.0)
+        self.assertAlmostEqual(az, 0.0)
+
+    def test_swapped_gate_axes_do_not_sideways_yank(self):
+        """Live bug: along-track ~24 m landed on gate-right; must not bias by by ~8 m."""
+        from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
+
+        gq90 = np.array([0.70710678, 0.0, 0.0, 0.70710678])
+        delta = np.array([-23.6, -2.1, -5.1])  # flipped climb Δ
+        ax, ay, az, used = apply_lookahead_body(10.0, 0.0, 0.0, gq90, delta, 0.35)
+        self.assertAlmostEqual(used, 0.35)
+        self.assertAlmostEqual(ax, 10.0)
+        self.assertLess(abs(ay), LOOKAHEAD_OFFSET_MAX_M + 0.01)
+        self.assertLess(abs(ay), 1.0)  # ~0.35*|−2.1|, not 0.35*24
+
+    def test_guidance_curves_toward_next(self):
+        """With modest Δ_y, lookahead should bank more."""
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 12.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "source": "anduril",
+        }
+        gq = self._level_quat()
+        _a, _b, _c, _t, dbg0 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            lookahead_lambda=0.0,
+            delta_ned=np.array([10.0, 4.0, 0.0]),
+            gate_quat=gq,
+        )
+        self.assertAlmostEqual(dbg0["bearing_deg"], 0.0, places=4)
+        self.assertEqual(dbg0["lookahead"], 0.0)
+
+        _a, _b, _c, _t, dbg1 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            lookahead_lambda=0.35,
+            delta_ned=np.array([10.0, 4.0, 0.0]),
+            gate_quat=gq,
+        )
+        self.assertAlmostEqual(dbg1["lookahead"], 0.35)
+        self.assertGreater(dbg1["bearing_deg"], 1.0)
+        self.assertGreater(dbg1["desired_roll"], dbg0["desired_roll"])
+        self.assertAlmostEqual(dbg1["bx"], 12.0, places=4)
+
+    def test_ahrs_yaw_no_longer_cancels_range(self):
+        """Regression: bx must stay put (old AHRS path collapsed it)."""
+        gq90 = np.array([0.70710678, 0.0, 0.0, 0.70710678])
+        delta = np.array([-23.6, -2.1, 5.1])
+        ax, ay, az, used = apply_lookahead_body(12.0, 0.0, 0.0, gq90, delta, 0.35)
+        self.assertAlmostEqual(used, 0.35)
+        self.assertAlmostEqual(ax, 12.0)
+        self.assertLess(abs(ay), 1.0)
+
+    def test_last_gate_no_delta(self):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 2,
+            "body_x_m": 8.0,
+            "body_y_m": 0.5,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        _a, _b, _c, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            delta_ned=None,
+            lookahead_lambda=LOOKAHEAD_LAMBDA,
+        )
+        self.assertEqual(dbg["lookahead"], 0.0)
+        expected = math.degrees(math.atan2(0.5, 8.0))
+        self.assertAlmostEqual(dbg["bearing_deg"], expected, places=4)
 
 
 if __name__ == "__main__":
