@@ -55,6 +55,11 @@ SEARCH_START_TICKS = 18  # ~0.3 s blind after a pass before arcing
 SEARCH_LOOKAHEAD_M = 4.0
 SEARCH_LAT_M = 4.0  # strong side offset -> max turn command toward the course
 SEARCH_CUE_ALPHA = 0.15  # EMA on the lateral course-direction cue
+# During search, YAW to reorient toward the next gate but scale the BANK down so
+# the drone turns to FACE it rather than slamming sideways and overshooting the
+# opening (then having to swing back). Once facing it, the normal approach takes
+# it mostly straight in — matches the observed "dip left then go right" miss.
+SEARCH_ROLL_SCALE = 0.35
 
 
 # A real next gate is near and roughly ahead. After a pass YOLO intermittently
@@ -254,6 +259,12 @@ SLOWDOWN_START_M = 5.0
 # per metre. Full cruise at <=0.25 m of error, pure THRU crawl at >=1.25 m.
 VERT_SETTLED_ERR_M = 0.25
 VERT_SLOW_ERR_M = 1.25
+# Lateral analog: slow down when the gate needs a big turn so the swing-over has
+# time to finish before the crossing, instead of barreling through the opening
+# sideways and clipping an edge (gate-4 turn: 4 m offset at 2.5 m/s -> 2.3 m/s
+# overshoot -> edge). Full cruise within LAT_SETTLED bearing, crawl beyond SLOW.
+LAT_SETTLED_BEARING_DEG = 6.0
+LAT_SLOW_BEARING_DEG = 18.0
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -499,8 +510,19 @@ def compute_guidance(
                     1.0,
                 )
             )
+            # Slow for a big turn: scale cruise down as the gate bearing grows so
+            # the lateral swing finishes before the crossing (edge-clip fix).
+            lat_ok = float(
+                np.clip(
+                    (LAT_SLOW_BEARING_DEG - abs(bearing_body))
+                    / (LAT_SLOW_BEARING_DEG - LAT_SETTLED_BEARING_DEG),
+                    0.0,
+                    1.0,
+                )
+            )
             v_target = (
-                THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok
+                THRU_SPEED_MPS
+                + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok * lat_ok
             )
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
@@ -1087,6 +1109,10 @@ class GPPilot:
             flying_t=flying_t,
             floor_clearance_m=floor_clearance,
         )
+        # In search, keep the yaw (reorient toward the next gate) but soften the
+        # bank so it faces the gate instead of slamming sideways past it.
+        if self._search_active:
+            roll_cmd *= SEARCH_ROLL_SCALE
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
