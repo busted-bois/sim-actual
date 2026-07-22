@@ -25,7 +25,6 @@ from simulator.gp_vision import (
     GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
-    vision_gate_estimate,
 )
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
@@ -44,6 +43,14 @@ PERP_BLEND_DIST = 6.0
 # by grew to -1.5 m while blend cut P/D). Keep enough bank to finish centering.
 NEAR_LAT_BLEND_FLOOR = 0.75
 BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
+# Aim between current and next gate: p_la = p_cur + λ (p_next - p_cur).
+# Δ is expressed in the *current gate* frame (map quat), not AHRS — GyroAHRS
+# yaw is unreferenced and was rotating NED Δ into random body axes (CSV:
+# bx collapsed by ~λ|Δx| → wild bank). Vision-aligned: gate frame ≈ body.
+# Default OFF: live logs showed map gate axes put ~24 m along-track onto
+# "right", yanking body-y by ~λ·24. Code path kept for λ>0 experiments.
+LOOKAHEAD_LAMBDA = 0.0
+LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·lateral / λ·vert when λ>0
 TILT_EMA_ALPHA = 0.25
 K_P_THRUST = 0.014
 K_D_THRUST = 0.0175
@@ -119,6 +126,62 @@ class Phase(Enum):
     BACKOFF = auto()
 
 
+def gate_segment_delta_ned(
+    gate_map: list | None, active: int, *, flipz: bool = False
+) -> np.ndarray | None:
+    """Δ = p_next − p_current in NED (optional climb-course Z flip)."""
+    if not gate_map or active < 0 or active + 1 >= len(gate_map):
+        return None
+    try:
+        p0 = np.asarray(gate_map[active]["pos"], dtype=float).copy()
+        p1 = np.asarray(gate_map[active + 1]["pos"], dtype=float).copy()
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    if p0.shape != (3,) or p1.shape != (3,):
+        return None
+    if flipz:
+        p0[2] = -p0[2]
+        p1[2] = -p1[2]
+    return p1 - p0
+
+
+def apply_lookahead_body(
+    bx: float,
+    by: float,
+    bz: float,
+    gate_quat: np.ndarray | None,
+    delta_ned: np.ndarray | None,
+    lam: float,
+) -> tuple[float, float, float, float]:
+    """Bias aim toward next gate: gate-frame lateral + vertical only.
+
+    Map quats often put the long along-track Δ on gate-"right" (live log:
+    delta_gate≈[-2.1, +23.6, -5.1]). Adding that to body-y yanked ~8 m
+    sideways. Use the *smaller* horizontal gate-frame component as lateral,
+    clamp offsets, leave bx unchanged.
+    """
+    if lam <= 0.0 or delta_ned is None or gate_quat is None:
+        return bx, by, bz, 0.0
+    from rl.spec import quat_to_R
+
+    R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))  # gate → world
+    dg = R_wg.T @ np.asarray(delta_ned, dtype=float)
+    # Horizontal gate axes: thru=dg[0], right=dg[1]. Along-track is the large one.
+    if abs(float(dg[1])) >= abs(float(dg[0])):
+        lateral = float(dg[0])
+    else:
+        lateral = float(dg[1])
+    vert = float(dg[2])
+    lat_off = float(np.clip(lam * lateral, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M))
+    vert_off = float(np.clip(lam * vert, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M))
+    ax = bx
+    ay = by + lat_off
+    az = bz + vert_off
+    if ax <= 0.1:
+        return bx, by, bz, 0.0
+    return ax, ay, az, float(lam)
+
+
 def compute_guidance(
     *,
     roll_deg: float,
@@ -133,6 +196,9 @@ def compute_guidance(
     vX: float = float("nan"),
     dt: float = 1.0 / GP_CONTROL_HZ,
     flying_t: float = float("nan"),
+    delta_ned: np.ndarray | None = None,
+    lookahead_lambda: float = LOOKAHEAD_LAMBDA,
+    gate_quat: np.ndarray | None = None,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -147,11 +213,14 @@ def compute_guidance(
     original fixed DESIRED_PITCH_DEG behavior.
 
     `flying_t` is seconds since GO (lean ramp / untrusted-vX guards).
+    `delta_ned` / `gate_quat` / `lookahead_lambda` bias aim toward next gate
+    in the current-gate frame (vision-aligned ≈ body).
     """
     vision_valid = False
     reliable = False
     bx = by = bz = float("nan")
     vis_frame_id = None
+    lam_used = 0.0
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
@@ -161,6 +230,12 @@ def compute_guidance(
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
+            bx, by, bz, lam_used = apply_lookahead_body(
+                bx, by, bz, gate_quat, delta_ned, float(lookahead_lambda)
+            )
+            if bx <= 0.1:
+                vision_valid = False
+                lam_used = 0.0
 
     elev_rate = 0.0
     if vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None:
@@ -356,6 +431,7 @@ def compute_guidance(
         "v_target": v_target,
         "pitch_des_deg": pitch_des_deg,
         "source": (vision or {}).get("source", ""),
+        "lookahead": lam_used,
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -480,12 +556,28 @@ class GPPilot:
         self._log_wr = None
         self._log_last_flush = 0.0
         self._debug = os.environ.get("GP_DEBUG", "").strip() in ("1", "true", "yes")
+        self.gate_map: list = []
+        self._gate_flipz = False
+        self._refresh_gate_map()
         # Original AndurilGP wire behavior: degree commands on the attitude
         # quaternion at 60 Hz (the encoding that flew the course).
         controller.control_hz = GP_CONTROL_HZ
         controller.set_control_mode("attitude_quat")
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
-        print("[gp] AndurilGP controls pilot ready (make control-flight)", flush=True)
+        print(
+            f"[gp] AndurilGP controls pilot ready (lookahead λ={LOOKAHEAD_LAMBDA}"
+            f", flipz={self._gate_flipz}, gates={len(self.gate_map)})",
+            flush=True,
+        )
+
+    def _refresh_gate_map(self) -> None:
+        """Load / refresh gate list (live track burst, else gate_map.json)."""
+        from rl.fly2_course import detect_climb_course, resolve_gate_map
+
+        gm = resolve_gate_map(self.data)
+        if gm:
+            self.gate_map = gm
+            self._gate_flipz = detect_climb_course(gm)
 
     @property
     def gates_passed(self) -> int:
@@ -540,7 +632,7 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des source".split()
+                "pitch_des source lookahead".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -563,6 +655,7 @@ class GPPilot:
             vt = dbg.get("v_target", float("nan"))
             pd = dbg.get("pitch_des_deg", float("nan"))
             src = str(dbg.get("source", "") or "")
+            la = float(dbg.get("lookahead", 0.0) or 0.0)
             self._log_wr.writerow(
                 [f"{now:.3f}"]
                 + [f"{v:.3f}" for v in att]
@@ -570,7 +663,15 @@ class GPPilot:
                 + [f"{thrust:.4f}"]
                 + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
                 + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
-                + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}", src]
+                + [
+                    f"{vY:.3f}",
+                    f"{vD:.3f}",
+                    f"{vX:.3f}",
+                    f"{vt:.3f}",
+                    f"{pd:.3f}",
+                    src,
+                    f"{la:.3f}",
+                ]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -737,6 +838,18 @@ class GPPilot:
         if active > self.n_passed:
             self.n_passed = active
 
+        if not self.gate_map:
+            self._refresh_gate_map()
+        delta_ned = gate_segment_delta_ned(
+            self.gate_map, active, flipz=self._gate_flipz
+        )
+        gate_quat = None
+        if self.gate_map and 0 <= active < len(self.gate_map):
+            try:
+                gate_quat = np.asarray(self.gate_map[active]["quat"], dtype=float)
+            except (KeyError, TypeError, ValueError):
+                gate_quat = None
+
         roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
@@ -749,6 +862,9 @@ class GPPilot:
             vX=vX,
             dt=dt,
             flying_t=flying_t,
+            delta_ned=delta_ned,
+            lookahead_lambda=LOOKAHEAD_LAMBDA,
+            gate_quat=gate_quat,
         )
         # Latch the live bearing so a backoff can steer back toward the gate
         # after it leaves the camera FOV. Cheap, and _enter_backoff can't
