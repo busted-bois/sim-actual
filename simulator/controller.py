@@ -155,10 +155,11 @@ CONTROL_HZ = 90
 
 
 class Controller:
-    def __init__(self, sim_conn, data, system_boot_ms):
+    def __init__(self, sim_conn, data, system_boot_ms, estimator=None):
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
+        self.estimator = estimator
         self.control_mode = "motor"
         # Per-pilot command rate: spec VADR-TS-003 4.4 caps it below 100 Hz.
         # Default 90 (IBVS/others); GPPilot lowers it to the original 60.
@@ -191,11 +192,17 @@ class Controller:
             return GPPilot(self, self.data)
 
         if auto_flight_enabled():
-            # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
-            if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
+            # Default IBVS; AUTO_PILOT=vnav selects world-map navigator,
+            # AUTO_PILOT=vio selects the live IMU+vision (no-odometry) pilot.
+            selected = os.environ.get("AUTO_PILOT", "ibvs").strip().lower()
+            if selected == "vnav":
                 from simulator.vision_nav_pilot import VisionNavPilot
 
                 return VisionNavPilot(self, self.data)
+            if selected == "vio":
+                from simulator.vio_pilot import VIOPilot
+
+                return VIOPilot(self, self.data, self.estimator)
             from simulator.ibvs_pilot import IBVSPilot
 
             return IBVSPilot(self, self.data)
@@ -233,6 +240,13 @@ class Controller:
                 self.arm()
         else:
             self._disarm_ticks = 0
+
+        if self.estimator is not None:
+            # StateEstimator predicts in-flight velocity from the COMMANDED
+            # thrust (this sim's accelerometer is garbage once thrust is
+            # applied -- see state_estimator.py's module docstring), so it
+            # needs the latest send regardless of which mode is active.
+            self.estimator.thrust_cmd = float(self._thrust)
 
         if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)
