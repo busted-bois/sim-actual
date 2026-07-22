@@ -42,6 +42,10 @@ TRACK_LAT_GAIN = 3.5  # m of body-y per unit image offset (normalized -1..1)
 TRACK_ANGLE_GAIN = 0.8  # weight on the ribbon-heading lookahead term (curves)
 TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
 TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
+# After a gate pass, follow the ribbon for this many control ticks (60 Hz) to
+# trace the curve to the next gate instead of re-locking a dead-ahead gate and
+# coasting past the turn. ~1.5 s covers a typical inter-gate turn.
+POST_PASS_LINE_TICKS = 90
 
 
 # A real next gate is near and roughly ahead. After a pass YOLO intermittently
@@ -695,6 +699,7 @@ class GPPilot:
             else None
         )
         self._track_active = False  # debug: was the last guidance from the ribbon
+        self._post_pass_until = 0  # tick until which the ribbon overrides gates
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
@@ -742,6 +747,7 @@ class GPPilot:
         if self._trackline is not None:
             self._trackline.reset()
         self._track_active = False
+        self._post_pass_until = 0
         self._cmd_slew.reset()
         self.est.reset()
         self.data.pop("collision", None)
@@ -958,6 +964,14 @@ class GPPilot:
             self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
             return
 
+        # Read the blue ribbon EVERY frame (cheap, cached per camera frame) for
+        # both the fallback and diagnostics — synth caches its raw detection in
+        # `_trackline._last` so the debug line can show whether the ribbon is
+        # actually seen mid-course.
+        track_vg = (
+            self._trackline.synth(self.data) if self._trackline is not None else None
+        )
+
         vision = self.gate_smoother.update(self.data)
         # Drop far/phantom locks (post-pass background gate, garbage YOLO) BEFORE
         # they can steer or feed the velocity tracker — banking at a 70 m phantom
@@ -965,20 +979,25 @@ class GPPilot:
         if not _plausible_gate(vision):
             vision = None
         vision_vel = self.vel_tracker.update(vision)
-        # Blue-line fallback: no usable gate this frame -> steer along the
-        # always-visible ribbon via a virtual forward target. Skip vision_vel
-        # (differencing a synthetic target makes phantom velocity).
-        self._track_active = False
-        if self._trackline is not None and not _gate_usable(vision):
-            vg = self._trackline.synth(self.data)
-            if vg is not None:
-                vision = vg
-                vision_vel = None
-                self._track_active = True
 
+        # Open a post-pass line-follow window on each gate pass (sim truth).
         active = int(self.data.get("active_gate_index", 0) or 0)
         if active > self.n_passed:
             self.n_passed = active
+            self._post_pass_until = self._tick + POST_PASS_LINE_TICKS
+
+        # Steering source: the blue ribbon takes over when (a) no usable gate, OR
+        # (b) we just passed a gate and are in the line-follow window — so the
+        # drone traces the course's CURVE to the next gate (e.g. the sharp left to
+        # gate 4) instead of re-locking whatever gate sits dead ahead and coasting
+        # straight past the turn. The ribbon IS the racing line: a straight course
+        # yields a straight virtual target, a left curve yields a left one.
+        self._track_active = False
+        in_pass_window = self._tick < self._post_pass_until
+        if track_vg is not None and (in_pass_window or not _gate_usable(vision)):
+            vision = track_vg
+            vision_vel = None
+            self._track_active = True
 
         # Flat-floor clearance for the floor safety net. Capture GO-time NED z
         # (drone on the pad = ground) once, then track height above it. z0
@@ -1028,12 +1047,18 @@ class GPPilot:
             infer = dbg.get("infer_ms")
             infer_s = f" yolo={infer:.0f}ms" if infer is not None else ""
             steer = "TRACK" if self._track_active else src
+            trk = self._trackline._last if self._trackline is not None else None
+            trk_s = (
+                f"trk(o={trk['offset']:+.2f},a={trk['angle']:+.2f},s={trk['strength']:.2f})"
+                if trk is not None
+                else "trk=none"
+            )
             print(
                 f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
                 f"vX={vX:+.2f}/{vt:.2f} vY={dbg['vY_fused']:+.2f} src={steer}{infer_s} "
                 f"blend={dbg['blend']:.2f} droll={dbg['desired_roll']:+.1f} "
-                f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
+                f"elev={dbg['elev_err']:+.2f} T={thrust:.3f} {trk_s}",
                 flush=True,
             )
 
