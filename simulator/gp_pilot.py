@@ -44,6 +44,18 @@ TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
 TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
 TRACK_ANGLE_MIN_STRENGTH = 0.5  # trust the ribbon HEADING only above this (>=6 bands)
 
+# --- Post-pass turn search ----------------------------------------------------
+# After a gate pass the drone often goes blind before the (off-axis) next gate
+# enters the narrow forward camera. Blind guidance only banks (translates) and
+# never re-orients, so on a real turn it coasts straight past. When blind for a
+# beat after a pass, ARC toward where the course is trending (the ribbon
+# offset / last gate bearing) via a strong side virtual target, sweeping the
+# next gate into view instead of flying off straight.
+SEARCH_START_TICKS = 18  # ~0.3 s blind after a pass before arcing
+SEARCH_LOOKAHEAD_M = 4.0
+SEARCH_LAT_M = 4.0  # strong side offset -> max turn command toward the course
+SEARCH_CUE_ALPHA = 0.15  # EMA on the lateral course-direction cue
+
 
 # A real next gate is near and roughly ahead. After a pass YOLO intermittently
 # locks a FAR background gate (live: bx=73.8 m, by=-16.4 m) and the pilot banks
@@ -702,6 +714,9 @@ class GPPilot:
         )
         self._track_active = False  # debug: was the last guidance from the ribbon
         self._post_pass_until = 0  # tick until which the ribbon overrides gates
+        self._blind_ticks = 0  # consecutive ticks with no usable gate
+        self._course_cue = 0.0  # EMA lateral course direction (neg=left)
+        self._search_active = False  # debug: arcing to reacquire after a pass
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
@@ -750,6 +765,9 @@ class GPPilot:
             self._trackline.reset()
         self._track_active = False
         self._post_pass_until = 0
+        self._blind_ticks = 0
+        self._course_cue = 0.0
+        self._search_active = False
         self._cmd_slew.reset()
         self.est.reset()
         self.data.pop("collision", None)
@@ -997,6 +1015,51 @@ class GPPilot:
             vision_vel = None
             self._track_active = True
 
+        # Track the lateral direction the course is trending (neg = left) from a
+        # usable gate's bearing or the ribbon offset, to steer the post-pass
+        # search the right way. (offset<0 = ribbon left = course turns left.)
+        cue = None
+        if _gate_usable(vision) and abs(vision["body_y_m"]) > 0.4:
+            cue = math.copysign(1.0, vision["body_y_m"])
+        elif (
+            self._trackline is not None
+            and self._trackline._last is not None
+            and abs(self._trackline._last.get("offset", 0.0)) > 0.15
+        ):
+            cue = math.copysign(1.0, self._trackline._last["offset"])
+        if cue is not None:
+            self._course_cue += SEARCH_CUE_ALPHA * (cue - self._course_cue)
+
+        # Post-pass turn search: blind for a beat after a pass -> ARC toward the
+        # course direction so the off-axis next gate sweeps into the camera,
+        # instead of coasting straight past the turn. A real gate (or the ribbon)
+        # always wins; this only fires when there is nothing else to steer to.
+        self._search_active = False
+        if _gate_usable(vision) or self._track_active:
+            self._blind_ticks = 0
+        else:
+            self._blind_ticks += 1
+            # Only arc when we actually have a course-direction cue; with no cue,
+            # hold straight (don't guess a turn onto a gate that's dead ahead).
+            if (
+                self.n_passed >= 1
+                and self._blind_ticks >= SEARCH_START_TICKS
+                and abs(self._course_cue) > 0.15
+            ):
+                side = math.copysign(1.0, self._course_cue)
+                vision = {
+                    "body_x_m": SEARCH_LOOKAHEAD_M,
+                    "body_y_m": side * SEARCH_LAT_M,
+                    "body_z_m": 0.0,
+                    "frame_id": None,
+                    "reliable": True,
+                    "source": "search",
+                    "normal_body": None,
+                    "method": None,
+                }
+                vision_vel = None
+                self._search_active = True
+
         # Flat-floor clearance for the floor safety net. Capture GO-time NED z
         # (drone on the pad = ground) once, then track height above it. z0
         # persists across backoffs — the floor doesn't move — and is cleared
@@ -1044,7 +1107,11 @@ class GPPilot:
             src = dbg.get("source", "")
             infer = dbg.get("infer_ms")
             infer_s = f" yolo={infer:.0f}ms" if infer is not None else ""
-            steer = "TRACK" if self._track_active else src
+            steer = (
+                "SEARCH"
+                if self._search_active
+                else ("TRACK" if self._track_active else src)
+            )
             trk = self._trackline._last if self._trackline is not None else None
             trk_s = (
                 f"trk(o={trk['offset']:+.2f},a={trk['angle']:+.2f},s={trk['strength']:.2f})"
@@ -1052,11 +1119,11 @@ class GPPilot:
                 else "trk=none"
             )
             print(
-                f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
+                f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p {yaw_deg:+.0f}y) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
                 f"vX={vX:+.2f}/{vt:.2f} vY={dbg['vY_fused']:+.2f} src={steer}{infer_s} "
-                f"blend={dbg['blend']:.2f} droll={dbg['desired_roll']:+.1f} "
-                f"elev={dbg['elev_err']:+.2f} T={thrust:.3f} {trk_s}",
+                f"ycmd={yaw_cmd:+.0f} cue={self._course_cue:+.2f} blind={self._blind_ticks} "
+                f"droll={dbg['desired_roll']:+.1f} T={thrust:.3f} {trk_s}",
                 flush=True,
             )
 
