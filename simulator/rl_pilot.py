@@ -54,6 +54,15 @@ VEL_CLIP_MPS = 8.0  # hard bound on the fused body velocity (safety)
 # between 30 Hz vision frames; a long gap = near-gate blind window / lost lock,
 # where holding an open-loop bank would drive into the gate edge.
 BLIND_HOLD_TICKS = 3
+# After this many ticks with no RELIABLE (YOLO-pose) lock, fall back to acting
+# on a plausible HSV/anduril detection rather than freezing. Live logs show
+# that right after a gate pass YOLO drops out but HSV still sees the next gate
+# at 1-5 m — flying that noisy-but-plausible estimate beats coasting past it.
+FALLBACK_AFTER_TICKS = 2
+# When TRULY blind after having passed a gate, yaw gently toward where the gate
+# was last seen (its body-y bearing) to bring the next gate back into FOV,
+# instead of holding attitude and drifting off course. Env: RL_REACQ_YAW.
+REACQUIRE_YAW_RATE = 0.35  # rad/s
 
 ARM_RETRY_S = 1.0
 CLOCK_RESET_SLACK_MS = 500
@@ -113,9 +122,12 @@ class RLPilot:
         self._last_vis_fid = None  # advance the stack only on a NEW vision frame
         self._cmd: tuple | None = None  # last command, repeated between frames
         self._stale_ticks = 0  # control ticks since the last fresh gate
+        self._no_reliable_ticks = 0  # control ticks since the last RELIABLE lock
         self._vel_fused = np.zeros(3)  # complementary-filtered body velocity
         self._v_imu_prev: np.ndarray | None = None
         self._vis_rot_mag = 0.0  # last rotational-flow correction magnitude (debug)
+        self._last_gate_by = 0.0  # last-seen gate bearing (body y) for reacquire
+        self._reacq_yaw = _env_float("RL_REACQ_YAW", REACQUIRE_YAW_RATE)
         self.last_action = np.zeros(4)
         self.n_passed = 0
 
@@ -165,8 +177,10 @@ class RLPilot:
         self._last_vis_fid = None
         self._cmd = None
         self._stale_ticks = 0
+        self._no_reliable_ticks = 0
         self._vel_fused = np.zeros(3)
         self._v_imu_prev = None
+        self._last_gate_by = 0.0
         self.last_action[:] = 0.0
         self.est.reset()
         self.vel_tracker.reset()
@@ -274,9 +288,7 @@ class RLPilot:
         # verbatim (no auto-unit), so normalize here to match training's unit.
         normal_travel = -np.asarray(nb, float) if measured else gate_body
         n = float(np.linalg.norm(normal_travel))
-        normal_travel = (
-            normal_travel / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
-        )
+        normal_travel = normal_travel / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
         frame = build_observation_body(
             to_gate_body=gate_body,
             dist_to_gate=dist,
@@ -311,6 +323,20 @@ class RLPilot:
             np.clip(thrust + self._thrust_trim, LIVE_THRUST_MIN, LIVE_THRUST_MAX)
         )
         return float(rates[0]), float(rates[1]), float(rates[2]), thrust
+
+    def _reacquire_cmd(self) -> tuple:
+        """Blind-window command: hover thrust + a gentle yaw toward the last-seen
+        gate bearing to sweep the next gate back into the camera. Zero roll/pitch
+        rate holds the current lean (the fallback-to-HSV path keeps truly-blind
+        windows short, so this is a nudge, not a full attitude controller). A
+        near-centred last bearing yaws ~0 (just coasts level)."""
+        by = self._last_gate_by
+        if abs(by) < 0.3:
+            yaw = 0.0
+        else:
+            yaw = self._signs[2] * self._reacq_yaw * (1.0 if by > 0 else -1.0)
+        yaw = float(np.clip(yaw, -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
+        return (0.0, 0.0, yaw, LIVE_HOVER_THRUST)
 
     # ---- main tick ------------------------------------------------------
     def tick(self) -> None:
@@ -400,34 +426,46 @@ class RLPilot:
                 [vision["body_x_m"], vision["body_y_m"], vision["body_z_m"]], float
             )
         self._update_velocity(snap, gate_body)  # keep the fused body velocity current
-        # Decide only on a fresh, RELIABLE vision frame (YOLO ~30 Hz). The
-        # smoother returns the identical estimate between camera frames (dedups
-        # on frame_id), so re-stacking every 50 Hz tick would fill the stack
-        # with duplicates and zero out the gate-relative derivatives. HSV
-        # fallbacks (reliable=False) carry noisy pinhole depth + no real
-        # normal — don't servo on them, hold instead.
+        # Decide on a fresh vision frame (YOLO ~30 Hz). The smoother returns the
+        # identical estimate between camera frames (dedups on frame_id), so
+        # re-stacking every 50 Hz tick would fill the stack with duplicates and
+        # zero out the gate-relative derivatives.
+        #   * RELIABLE (full YOLO-pose) frames drive the policy directly.
+        #   * When YOLO drops for >=FALLBACK_AFTER_TICKS ticks, act on a plausible
+        #     HSV/anduril detection too (noisy depth, no normal -> aim straight)
+        #     rather than freezing — right after a gate pass YOLO stops but HSV
+        #     still sees the next gate at 1-5 m; flying it beats coasting past.
         fid = vision.get("frame_id") if vision is not None else None
+        plausible = vision is not None and self._plausible(vision)
+        is_new = fid != self._last_vis_fid
+        reliable = plausible and bool(vision.get("reliable"))
+        # Ticks since the last RELIABLE lock (separate from _stale_ticks = ticks
+        # since the last ACTION) so the HSV/anduril fallback keeps firing on
+        # every new frame while YOLO is out, instead of throttling itself.
+        if reliable:
+            self._no_reliable_ticks = 0
+        else:
+            self._no_reliable_ticks += 1
         fresh = (
-            vision is not None
-            and bool(vision.get("reliable"))
-            and self._plausible(vision)
-            and fid != self._last_vis_fid
+            plausible
+            and is_new
+            and (reliable or self._no_reliable_ticks >= FALLBACK_AFTER_TICKS)
         )
         if fresh:
             self._stale_ticks = 0
             self._last_vis_fid = fid
+            self._last_gate_by = float(vision["body_y_m"])
             obs = self._stacked(self._build_frame(vision, snap))
             self._cmd = self._policy_cmd(obs)
         else:
-            # No fresh gate this tick. Repeat the last command for a couple of
-            # ticks (normal between 30 Hz frames), but NEVER hold an open-loop
-            # bank through a long blind window (near-gate suppression / lost
-            # lock ~0.3 s) — after BLIND_HOLD_TICKS coast level: zero rates,
-            # hover thrust, so it crosses the gate plane without banking into
-            # the edge or dropping.
+            # No usable gate this tick. Repeat the last command for a couple of
+            # ticks (normal between 30 Hz frames); after BLIND_HOLD_TICKS, stop
+            # holding an open-loop bank (which curves the drone off course) and
+            # actively RE-ACQUIRE: hover thrust + a gentle yaw toward where the
+            # gate was last seen, to bring the next gate back into the camera.
             self._stale_ticks += 1
             if self._cmd is None or self._stale_ticks > BLIND_HOLD_TICKS:
-                self._cmd = (0.0, 0.0, 0.0, LIVE_HOVER_THRUST)
+                self._cmd = self._reacquire_cmd()
         self.controller.set_attitude_rates(*self._cmd)
 
         if self._debug and self._tick % DEBUG_EVERY_N == 0:
@@ -436,6 +474,7 @@ class RLPilot:
             vf = self._vel_fused
             print(
                 f"[rl] passed={self.n_passed} src={v.get('source', 'blind')} "
+                f"stale={self._stale_ticks} "
                 f"gate(bx,by,bz)=({v.get('body_x_m', float('nan')):+.1f},"
                 f"{v.get('body_y_m', float('nan')):+.1f},"
                 f"{v.get('body_z_m', float('nan')):+.1f}) "
@@ -459,8 +498,10 @@ class RLPilot:
         self._last_vis_fid = None
         self._cmd = None
         self._stale_ticks = 0
+        self._no_reliable_ticks = 0
         self._vel_fused = np.zeros(3)
         self._v_imu_prev = None
+        self._last_gate_by = 0.0
         self.n_passed = 0  # fresh lap — every GO is a new attempt
         self.last_action[:] = 0.0
 
