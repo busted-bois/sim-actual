@@ -96,34 +96,10 @@ CORR_JIT_DIST = 0.4  # 40% range jitter
 # vision velocity) — see simulator/rl_pilot. Kept as a knob for future modest DR
 # (<=1.5) once the deploy velocity is measured clean.
 CURRICULUM = [
-    {
-        "num_gates": 1,
-        "spawn_dist": 5.0,
-        "jitter": 0.5,
-        "max_seconds": 20.0,
-        "vel_walk": 0.0,
-    },
-    {
-        "num_gates": 2,
-        "spawn_dist": 6.0,
-        "jitter": 1.0,
-        "max_seconds": 20.0,
-        "vel_walk": 0.0,
-    },
-    {
-        "num_gates": 6,
-        "spawn_dist": 7.0,
-        "jitter": 2.0,
-        "max_seconds": 30.0,
-        "vel_walk": 0.0,
-    },
-    {
-        "num_gates": 17,
-        "spawn_dist": 7.0,
-        "jitter": 2.0,
-        "max_seconds": 70.0,
-        "vel_walk": 0.0,
-    },
+    {"num_gates": 1, "spawn_dist": 5.0, "jitter": 0.5, "max_seconds": 20.0, "vel_walk": 0.0},
+    {"num_gates": 2, "spawn_dist": 6.0, "jitter": 1.0, "max_seconds": 20.0, "vel_walk": 0.0},
+    {"num_gates": 6, "spawn_dist": 7.0, "jitter": 2.0, "max_seconds": 30.0, "vel_walk": 0.0},
+    {"num_gates": 17, "spawn_dist": 7.0, "jitter": 2.0, "max_seconds": 70.0, "vel_walk": 0.0},
 ]
 
 
@@ -162,11 +138,7 @@ class GateRacingEnv(gym.Env):
         self.user_gate_map = gate_map
         # Per-stage episode budget (a 17-gate course needs far more than 20 s);
         # an explicit max_seconds still wins for callers that set it.
-        ms = (
-            max_seconds
-            if max_seconds is not None
-            else self.cfg.get("max_seconds", 20.0)
-        )
+        ms = max_seconds if max_seconds is not None else self.cfg.get("max_seconds", 20.0)
         self.max_steps = int(ms * DECISION_HZ)
         self.randomize = bool(randomize)
         self.action_space = spaces.Box(-1.0, 1.0, (spec.ACTION_DIM,), np.float32)
@@ -209,7 +181,11 @@ class GateRacingEnv(gym.Env):
         # an honest full-course metric — and the gate-0 spawn is unchanged so
         # metrics stay comparable across runs.
         start_idx = 0
-        if self.randomize and n > 2 and self.np_random.uniform() < DR_RANDOM_START_PROB:
+        if (
+            self.randomize
+            and n > 2
+            and self.np_random.uniform() < DR_RANDOM_START_PROB
+        ):
             start_idx = int(self.np_random.integers(1, n - 1))
         gs = np.array(self.gate_map[start_idx]["pos"])
         if start_idx == 0:
@@ -247,9 +223,7 @@ class GateRacingEnv(gym.Env):
         # Per-episode velocity-noise magnitude, annealed by stage; models the
         # live vision-differenced velocity the policy meets on deploy.
         cap = float(self.cfg.get("vel_walk", 0.0))
-        self._vel_walk_std = (
-            float(self.np_random.uniform(0.0, cap)) if self._obs_noise else 0.0
-        )
+        self._vel_walk_std = float(self.np_random.uniform(0.0, cap)) if self._obs_noise else 0.0
         # Prime the frame stack with copies of the first frame (no history yet).
         f0 = self._frame()
         self._stack = deque(
@@ -284,9 +258,7 @@ class GateRacingEnv(gym.Env):
         self._thrust_accel = THRUST_ACCEL * float(r.uniform(*DR_THRUST_SCALE))
         self._rate_tau = RATE_TAU * float(r.uniform(*DR_RATE_TAU_SCALE))
         self._drag = DRAG * float(r.uniform(*DR_DRAG_SCALE))
-        self._latency_steps = int(
-            r.integers(DR_LATENCY_STEPS[0], DR_LATENCY_STEPS[1] + 1)
-        )
+        self._latency_steps = int(r.integers(DR_LATENCY_STEPS[0], DR_LATENCY_STEPS[1] + 1))
         self._obs_pos_bias = r.normal(0.0, DR_OBS_POS_BIAS, 3)
         self._obs_vel_bias = r.normal(0.0, DR_OBS_VEL_BIAS, 3)
         self._obs_noise = True
@@ -319,9 +291,7 @@ class GateRacingEnv(gym.Env):
             v = v + self._obs_vel_bias + r.normal(0.0, DR_OBS_VEL_NOISE, 3)
             omega = omega + r.normal(0.0, DR_OBS_RATE_NOISE, 3)
             q = _quat_norm(
-                _quat_mult(
-                    q, np.array([1.0, *(0.5 * r.normal(0.0, DR_OBS_ANG_NOISE, 3))])
-                )
+                _quat_mult(q, np.array([1.0, *(0.5 * r.normal(0.0, DR_OBS_ANG_NOISE, 3))]))
             )
         obs = build_observation(
             p, v, q, omega, self.gate_map, self.gate_idx, self.last_action[:3]
@@ -344,13 +314,9 @@ class GateRacingEnv(gym.Env):
             self._velc = 0.6 * self._velc + 0.4 * self.np_random.normal(0, vstd, 3)
             obs[L["vel_body"]] = np.clip(obs[L["vel_body"]] + self._velc / 10.0, -5, 5)
         if _CORR_JIT:  # diagnostic: live-magnitude correlated gate-pose jitter
-            self._jit = 0.7 * self._jit + 0.3 * self.np_random.normal(
-                0, CORR_JIT_DIR, 3
-            )
+            self._jit = 0.7 * self._jit + 0.3 * self.np_random.normal(0, CORR_JIT_DIR, 3)
             obs[L["to_gate_body"]] = obs[L["to_gate_body"]] + self._jit
-            obs[L["dist_to_gate"]] *= (
-                1.0 + 0.7 * self._jit[0] / CORR_JIT_DIR * CORR_JIT_DIST
-            )
+            obs[L["dist_to_gate"]] *= 1.0 + 0.7 * self._jit[0] / CORR_JIT_DIR * CORR_JIT_DIST
         return obs
 
     # ---- gym API --------------------------------------------------------
