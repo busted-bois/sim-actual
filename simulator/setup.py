@@ -6,6 +6,7 @@ from pymavlink import mavutil
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.preflight import udp_port_in_use
+from simulator.state_estimator import StateEstimator
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
 
@@ -130,10 +131,17 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # traffic mid-flight; flightlab/bus.py manages its own for the harness.
 
     # -------------------------------
+    # State estimator (VIO: IMU strapdown + gate-landmark vision updates).
+    # Feeds off HIGHRES_IMU inline on the MAVLinkRX thread; unused unless a
+    # pilot (AUTO_PILOT=vio) actually reads its pose.
+    # -------------------------------
+    estimator = StateEstimator()
+
+    # -------------------------------
     # Setup Mavlink msg receiver
     # -------------------------------
     print("Setting up MAVLink rx...", flush=True)
-    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data)
+    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data, estimator=estimator)
 
     # -------------------------------
     # Timesync request Loop
@@ -149,7 +157,7 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # -------------------------------
     # Main control loop
     # -------------------------------
-    controller = Controller(sim_conn, shared_data, system_boot_ms)
+    controller = Controller(sim_conn, shared_data, system_boot_ms, estimator=estimator)
 
     return {
         "vision_rx": vision_rx,
@@ -157,4 +165,5 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
         "ts_loop": ts_loop,
         "sim_conn": sim_conn,
         "controller": controller,
+        "estimator": estimator,
     }
