@@ -1,0 +1,85 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\wrapper\ekf_c_api.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\covariance.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\ekf.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\ekf_helper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\estimator_interface.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\height_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\velocity_fusion.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\position_fusion.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\yaw_fusion.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\imu_down_sampler\imu_down_sampler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\fake_height_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\fake_pos_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\ZeroGyroUpdate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\ZeroVelocityUpdate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\external_vision\ev_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\external_vision\ev_height_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\external_vision\ev_pos_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\external_vision\ev_vel_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\aid_sources\external_vision\ev_yaw_control.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\bias_estimator\bias_estimator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\modules\ekf2\EKF\output_predictor\output_predictor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\lib\geo\geo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\kunal\Desktop\sim-actual\ekf2\px4\lib\lat_lon_alt\lat_lon_alt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\kunal\Desktop\sim-actual\ekf2\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{8444885A-A434-3DCA-8DDF-FE802BCD9DA2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
