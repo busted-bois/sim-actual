@@ -368,9 +368,9 @@ def compute_guidance(
                     1.0,
                 )
             )
-            v_target = THRU_SPEED_MPS + (
-                CRUISE_SPEED_MPS - THRU_SPEED_MPS
-            ) * ease * vert_ok
+            v_target = (
+                THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok
+            )
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
         else:
@@ -515,9 +515,14 @@ class CommandSlew:
     the response smooth without touching the guidance gains.
     """
 
-    def __init__(self, hz: float = GP_CONTROL_HZ):
-        self._max_step_deg = CMD_SLEW_DEG_S / hz
-        self._max_step_thrust = THRUST_SLEW_PER_S / hz
+    def __init__(
+        self,
+        hz: float = GP_CONTROL_HZ,
+        deg_s: float = CMD_SLEW_DEG_S,
+        thrust_per_s: float = THRUST_SLEW_PER_S,
+    ):
+        self._max_step_deg = deg_s / hz
+        self._max_step_thrust = thrust_per_s / hz
         self.reset()
 
     def reset(self) -> None:
@@ -749,9 +754,7 @@ class GPPilot:
                 # No "already running → fly now" (that skipped the 3s hold after
                 # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                countdown_done = (
-                    race_fresh and sim_ms >= start_ms and finish_ns < 0
-                )
+                countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "

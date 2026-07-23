@@ -63,15 +63,23 @@ class VisionRX:
         self.is_running = True
         self.thread.start()
         # YOLO-pose gate detector, on its own thread (CPU inference is too slow
-        # to run inline here). Reads data["frame"], writes data["pose"].
-        # Kept for make view / IBVS; GPPilot prefers Anduril HSV via anduril_gate.
-        from simulator.gate_pose import GatePoseRunner
+        # to run inline here). SKIP_YOLO=1 disables it (blue-line pilot then
+        # flies HSV-only with no gate assist).
+        self.gate_pose = None
+        skip_yolo = os.environ.get("SKIP_YOLO", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not skip_yolo:
+            from simulator.gate_pose import GatePoseRunner
 
-        self.gate_pose = GatePoseRunner(data)
+            self.gate_pose = GatePoseRunner(data)
 
     def get_thread_for_join(self):
         self.is_running = False
-        self.gate_pose.is_running = False
+        if self.gate_pose is not None:
+            self.gate_pose.is_running = False
         return self.thread
 
     def _vision_loop(self):
@@ -252,7 +260,22 @@ class VisionRX:
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
                 obstacle_px.append((ocx, ocy))
             self.data["obstacles"] = obstacles
-            self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
+
+            # Dual-cyan corridor (blue-line pilot); cheap HSV, always on.
+            from simulator.blue_line_vision import (
+                annotate_blue_lines,
+                detect_blue_lines,
+                estimate_to_dict,
+            )
+
+            bl_est, bl_mask = detect_blue_lines(img, frame_id, return_mask=True)
+            self.data["blue_line"] = estimate_to_dict(bl_est)
+            if bl_est.found:
+                self.data["frame"]["annotated"] = annotate_blue_lines(
+                    img, bl_est, bl_mask
+                )
+            else:
+                self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
         except Exception as e:
             from simulator import config
 

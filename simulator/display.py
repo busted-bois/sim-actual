@@ -34,13 +34,21 @@ _window_open = False
 
 def pick(data):
     """Choose what to show from the shared data dict, returning (img, tag).
-    Prefers the YOLO-pose annotated frame (data["pose"]), then the classical
-    overlay, then the raw frame. `tag` changes only when a new frame is
+    Prefers blue-line overlay, then YOLO-pose annotated, then classical
+    overlay, then raw frame. `tag` changes only when a new frame is
     available, so callers can skip redundant ticks. (None, None) if no frame."""
+    frame = data.get("frame")
+    bl = data.get("blue_line")
+    if (
+        frame is not None
+        and bl is not None
+        and bl.get("found")
+        and frame.get("annotated") is not None
+    ):
+        return frame["annotated"], ("b", frame["frame_id"])
     pose = data.get("pose")
     if pose is not None and pose.get("annotated") is not None:
         return pose["annotated"], ("p", pose["frame_id"])
-    frame = data.get("frame")
     if frame is not None:
         return frame.get("annotated", frame.get("img")), ("f", frame["frame_id"])
     return None, None
@@ -53,10 +61,11 @@ def start():
     _window_open = True
 
 
-def tick(frame, elapsed):
+def tick(frame, elapsed, hud=None):
     """Show one frame and (lazily) record it. `frame` may be None -- we still
     pump waitKey so the window stays responsive while waiting for the first
-    sim frame. `elapsed` (s) is drawn so screen-recordings self-timestamp."""
+    sim frame. `elapsed` (s) is drawn so screen-recordings self-timestamp.
+    `hud` (optional str) is drawn on a second line for pilot status."""
     global _video_writer
     if not _window_open:
         return
@@ -73,6 +82,17 @@ def tick(frame, elapsed):
             2,
             cv2.LINE_AA,
         )
+        if hud:
+            cv2.putText(
+                frame,
+                hud,
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
         if RECORD:
             if _video_writer is None:
                 os.makedirs(os.path.dirname(_RECORD_PATH), exist_ok=True)
