@@ -315,5 +315,7 @@ EXPORTS
 	ekf2_get_status
 	ekf2_push_ext_vision_vel
 	ekf2_push_imu
+	ekf2_set_at_rest
+	ekf2_set_in_air
 	ekf2_update
 	printf

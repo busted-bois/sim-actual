@@ -50,9 +50,11 @@ class EclEkf:
             lib.ekf2_create.restype = ctypes.c_void_p
             lib.ekf2_destroy.argtypes = [ctypes.c_void_p]
             lib.ekf2_push_imu.argtypes = [ctypes.c_void_p] + [ctypes.c_double] * 7 + [ctypes.c_uint64]
-            lib.ekf2_push_ext_vision_vel.argtypes = [ctypes.c_void_p] + [ctypes.c_double] * 4 + [ctypes.c_uint64]
+            lib.ekf2_push_ext_vision_vel.argtypes = [ctypes.c_void_p] + [ctypes.c_double] * 6 + [ctypes.c_uint64]
             lib.ekf2_update.argtypes = [ctypes.c_void_p]
             lib.ekf2_update.restype = ctypes.c_int
+            lib.ekf2_set_at_rest.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.ekf2_set_in_air.argtypes = [ctypes.c_void_p, ctypes.c_int]
             lib.ekf2_get_state.argtypes = [
                 ctypes.c_void_p, ctypes.c_double * 3, ctypes.c_double * 3,
                 ctypes.c_double * 4, ctypes.POINTER(ctypes.c_int),
@@ -76,13 +78,27 @@ class EclEkf:
         )
 
     def push_vision_velocity(self, vx, vy, vz, var, t_us):
-        """Body-FRD velocity measurement (m/s) with isotropic variance ((m/s)^2)."""
+        """Body-FRD velocity measurement (m/s). `var` is either a scalar isotropic
+        variance or a (var_x, var_y, var_z) triple — hand an axis a huge variance
+        to make the filter ignore that component ((m/s)^2)."""
+        if isinstance(var, (tuple, list)):
+            vxr, vyr, vzr = (float(v) for v in var)
+        else:
+            vxr = vyr = vzr = float(var)
         EclEkf._lib.ekf2_push_ext_vision_vel(
-            self._h, float(vx), float(vy), float(vz), float(var), int(t_us),
+            self._h, float(vx), float(vy), float(vz), vxr, vyr, vzr, int(t_us),
         )
 
     def update(self) -> bool:
         return bool(EclEkf._lib.ekf2_update(self._h))
+
+    def set_at_rest(self, at_rest: bool) -> None:
+        """Assert the vehicle is stationary -> enables the Zero-Velocity Update,
+        the fast tilt aligner. Set during the pre-flight hold; clear once moving."""
+        EclEkf._lib.ekf2_set_at_rest(self._h, 1 if at_rest else 0)
+
+    def set_in_air(self, in_air: bool) -> None:
+        EclEkf._lib.ekf2_set_in_air(self._h, 1 if in_air else 0)
 
     def _refresh(self):
         EclEkf._lib.ekf2_get_state(
