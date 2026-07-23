@@ -21,6 +21,7 @@ from enum import Enum, auto
 import numpy as np
 
 from simulator.gp_estimation import GPEstimation
+from simulator.anduril_gate_detect import CAM_TILT_DEG
 from simulator.gp_vision import (
     GateEstimateSmoother,
     VisionVelocityTracker,
@@ -30,7 +31,7 @@ from simulator.gp_vision import (
 # Anduril's own measured trim, byte-faithful to the original that flew the
 # course (their controller.py hardcoded 0.264). The RL stack keeps using
 # spec.HOVER_THRUST — rl.gp_expert passes its own hover_thrust in.
-HOVER_THRUST = 0.264
+HOVER_THRUST = 0.270
 # Original AndurilGP command rate (2:1 with the 30 Hz camera; spec cap 100).
 GP_CONTROL_HZ = 60
 DESIRED_PITCH_DEG = -2.0
@@ -51,12 +52,15 @@ BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
 # "right", yanking body-y by ~λ·24. Code path kept for λ>0 experiments.
 LOOKAHEAD_LAMBDA = 0.0
 LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·lateral / λ·vert when λ>0
+# Cross-track: bank bias from e_signed = (p_rel × dhat)_z (vision/gate-frame).
+# Negated into roll so +by (gate right) adds +bank toward the path/gate.
+K_CROSS = 0.3  # deg per meter CTE
 TILT_EMA_ALPHA = 0.25
 K_P_THRUST = 0.014
 K_D_THRUST = 0.0175
 BEARING_RATE_CLAMP_DEG_S = 60.0
 ELEV_RATE_CLAMP_M_S = 5.0
-MIN_BX_FOR_ELEV = 3.0
+MIN_BX_FOR_ELEV = 3.0  # elev_rate only; elev_err updates whenever vision valid
 VIS_VEL_EMA_ALPHA = 0.35
 OF_ALPHA = 0.6
 KP, KR, KY = 1.0, -1.0, -1.0
@@ -116,7 +120,12 @@ WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 # Post-GO speed safety: IMU vX is often ~0 right after reset, which otherwise
 # saturates PITCH_DES_MIN and open-loop dives to 20–30 km/h.
 LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
+LAUNCH_THRUST_FLOOR_S = 3.0  # after GO: never command thrust below hover
 UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
+# Reject absurd post-gate ghost ranges.
+MAX_GATE_BX_M = 22.0
+MAX_ABS_BZ_M = 10.0
+ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
 
 
 class Phase(Enum):
@@ -143,6 +152,37 @@ def gate_segment_delta_ned(
         p0[2] = -p0[2]
         p1[2] = -p1[2]
     return p1 - p0
+
+
+def path_dhat_body(
+    delta_ned: np.ndarray | None, gate_quat: np.ndarray | None
+) -> np.ndarray | None:
+    """Unit path direction in gate frame (≈ body when vision-aligned)."""
+    if delta_ned is None or gate_quat is None:
+        return None
+    from rl.spec import quat_to_R
+
+    d = np.asarray(delta_ned, dtype=float).reshape(3)
+    n = float(np.linalg.norm(d))
+    if n < 1e-3:
+        return None
+    R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))
+    dhat = R_wg.T @ (d / n)
+    hn = float(np.linalg.norm(dhat))
+    if hn < 1e-9:
+        return None
+    return dhat / hn
+
+
+def cross_track_error(
+    bx: float, by: float, bz: float, dhat_b: np.ndarray
+) -> tuple[np.ndarray, float]:
+    """ecross = p_rel × dhat; e_signed = 2D z-component bx*dhy − by*dhx."""
+    p_rel = np.array([bx, by, bz], dtype=float)
+    dhat = np.asarray(dhat_b, dtype=float).reshape(3)
+    ecross = np.cross(p_rel, dhat)
+    e_signed = float(bx * dhat[1] - by * dhat[0])
+    return ecross, e_signed
 
 
 def apply_lookahead_body(
@@ -236,25 +276,33 @@ def compute_guidance(
             if bx <= 0.1:
                 vision_valid = False
                 lam_used = 0.0
+            elif bx > MAX_GATE_BX_M or abs(bz) > MAX_ABS_BZ_M:
+                # Ghost / wrong-gate after a pass — hold altitude, don't chase.
+                vision_valid = False
+                lam_used = 0.0
+                bx = by = bz = float("nan")
 
     elev_rate = 0.0
-    if vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None:
-        qw, qx, qy, qz = quat
-        gate_pD = (
-            2 * (qx * qz - qw * qy) * bx
-            + 2 * (qy * qz + qw * qx) * by
-            + (1 - 2 * (qx * qx + qy * qy)) * bz
-        )
-        prev_fid = state.get("prev_elev_frame_id")
-        if prev_fid is not None and 0 < vis_frame_id - prev_fid <= 3:
-            dt_e = (vis_frame_id - prev_fid) / 30.0
-            elev_rate = (gate_pD - state["prev_gate_pD"]) / dt_e
-        state["prev_gate_pD"] = gate_pD
-        state["prev_elev_frame_id"] = vis_frame_id
-        state["last_elev_err"] = gate_pD
+    elev_updated = False
+    if vision_valid and vis_frame_id is not None:
+        # Anduril body_z includes camera down-tilt; elev uses tilt-compensated
+        # bz_elev (optical-axis → 0) instead of AHRS-projected gate_pD.
+        bz_elev = bz
+        if (vision or {}).get("source") == "anduril":
+            bz_elev = bz - math.tan(math.radians(CAM_TILT_DEG)) * max(bx, 0.1)
+        state["last_elev_err"] = float(bz_elev)
+        elev_updated = True
+        if bx > MIN_BX_FOR_ELEV:
+            prev_fid = state.get("prev_elev_frame_id")
+            if prev_fid is not None and 0 < vis_frame_id - prev_fid <= 3:
+                dt_e = (vis_frame_id - prev_fid) / 30.0
+                elev_rate = (bz_elev - state["prev_gate_pD"]) / dt_e
+            state["prev_gate_pD"] = float(bz_elev)
+            state["prev_elev_frame_id"] = vis_frame_id
     elif not vision_valid:
         state["prev_gate_pD"] = None
         state["prev_elev_frame_id"] = None
+        state["last_elev_err"] = 0.0
 
     # Vision-IMU velocity fusion (lateral + body-down). Forward speed for the
     # cap stays IMU-only — OF understates closing rate and caused dive saturation.
@@ -405,6 +453,20 @@ def compute_guidance(
         p_lat = K_BEARING * bearing_body * lat_blend
         d_lat_term = K_LAT_D * d_lat * lat_blend
     desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
+    e_signed = 0.0
+    ecross = np.zeros(3)
+    if vision_valid:
+        dhat_b = path_dhat_body(delta_ned, gate_quat)
+        if dhat_b is not None:
+            ecross, e_signed = cross_track_error(bx, by, bz, dhat_b)
+            # vcorrection → bank: negate so +by banks toward gate/path.
+            desired_roll = float(
+                np.clip(
+                    desired_roll - K_CROSS * e_signed,
+                    -MAX_BANK_DEG,
+                    MAX_BANK_DEG,
+                )
+            )
     roll_cmd_deg = (desired_roll - roll_deg) * KR
     yaw_cmd_deg = yaw_err * KY
 
@@ -413,8 +475,18 @@ def compute_guidance(
         math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
     )
     elev_err = float(state.get("last_elev_err", 0.0))
-    thrust = (hover_thrust - elev_err * K_P_THRUST + d_vert * K_D_THRUST) / tilt
-    thrust = float(np.clip(thrust, 0.0, 1.0))
+    elev_err = float(np.clip(elev_err, -2.0, 2.0))
+    thrust_raw = hover_thrust - elev_err * K_P_THRUST + d_vert * K_D_THRUST
+    thrust = float(np.clip(thrust_raw / tilt, 0.0, 1.0))
+    # Pad / GO: elev must not drop us off the launch platform.
+    if not math.isnan(flying_t) and flying_t < LAUNCH_THRUST_FLOOR_S:
+        thrust = max(thrust, float(hover_thrust))
+    # Near gate: don't sink under the ring (live: stuck @1 m → collision backoff).
+    if vision_valid and not math.isnan(bx) and bx < 3.0:
+        thrust = max(thrust, float(hover_thrust) - 0.01)
+    # Falling: never keep commanding descend (post-gate ghost sink).
+    if vD > ANTI_SINK_VD_MPS:
+        thrust = max(thrust, float(hover_thrust) + 0.02)
 
     dbg = {
         "bearing_deg": bearing_body,
@@ -432,6 +504,9 @@ def compute_guidance(
         "pitch_des_deg": pitch_des_deg,
         "source": (vision or {}).get("source", ""),
         "lookahead": lam_used,
+        "e_signed": e_signed,
+        "ecross": ecross,
+        "elev_updated": elev_updated,
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -566,7 +641,7 @@ class GPPilot:
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
         print(
             f"[gp] AndurilGP controls pilot ready (lookahead λ={LOOKAHEAD_LAMBDA}"
-            f", flipz={self._gate_flipz}, gates={len(self.gate_map)})",
+            f", K_CROSS={K_CROSS}, flipz={self._gate_flipz}, gates={len(self.gate_map)})",
             flush=True,
         )
 
@@ -632,7 +707,7 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des source lookahead".split()
+                "pitch_des source lookahead e_signed".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -656,6 +731,7 @@ class GPPilot:
             pd = dbg.get("pitch_des_deg", float("nan"))
             src = str(dbg.get("source", "") or "")
             la = float(dbg.get("lookahead", 0.0) or 0.0)
+            es = float(dbg.get("e_signed", 0.0) or 0.0)
             self._log_wr.writerow(
                 [f"{now:.3f}"]
                 + [f"{v:.3f}" for v in att]
@@ -671,6 +747,7 @@ class GPPilot:
                     f"{pd:.3f}",
                     src,
                     f"{la:.3f}",
+                    f"{es:.3f}",
                 ]
             )
             if now - self._log_last_flush >= 1.0:
@@ -896,6 +973,7 @@ class GPPilot:
                 f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
                 flush=True,
             )
+
 
     def _resume_flying(
         self, *, reseed_attitude: bool, preserve_vision: bool = False

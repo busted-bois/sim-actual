@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim open open-sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -23,6 +23,14 @@ test:
 
 sim:
 	uv run main.py
+
+# Open FlightSim.exe (complete install; avoids paths with spaces via C:\AIGP_SIM).
+open open-sim:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/open-flightsim.ps1
+else
+	@echo "FlightSim.exe is Windows-only"
+endif
 
 # Manual keyboard flight — WASD move, Q/E turn, R/F up/down, C level, L auto-land.
 manual:
