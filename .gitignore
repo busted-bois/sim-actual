@@ -23,6 +23,7 @@ runs/
 rl/data/nav_log*.csv
 rl/data/course_log*.csv
 rl/data/gp_log_*.csv
+rl/data/bl_log_*.csv
 # Harness outputs (measured signs + plant calibration) + estimator debug logs
 flightlab/signs.json
 flightlab/calibration.json

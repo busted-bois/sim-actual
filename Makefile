@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight blueline free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo train-blueline-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -19,10 +19,15 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_blue_line_pilot -v
 
+# Blue-line corridor flight (HSV dual-cyan + YOLO gate assist). Default on
+# this branch. SKIP_YOLO=1 for HSV-only; BL_GATE_ASSIST=0 to ignore gates.
 sim:
-	uv run main.py
+	uv run auto_blueline.py
+
+# Alias for make sim.
+blueline: sim
 
 # Manual keyboard flight — WASD move, Q/E turn, R/F up/down, C level, L auto-land.
 manual:
@@ -125,6 +130,11 @@ train-bc:
 train-ppo:
 	uv run -m rl.train_ppo
 
+# Blue-line corridor PPO (HSV dual-cyan obs, attitude-quat actions) ->
+# rl/data/blueline_ppo.zip + rl/data/blueline_best/
+train-blueline-ppo:
+	uv run -m rl.train_blueline_ppo
+
 # Module 8: fly the trained policy on the live sim.
 fly-policy:
 	uv run -m rl.deploy
@@ -138,4 +148,5 @@ rl-test:
 	uv run -m rl.ekf --selftest
 	uv run -m rl.observation --selftest
 	uv run -m rl.env --selftest
+	uv run -m rl.blueline_env --selftest
 	uv run -m rl.deploy --selftest

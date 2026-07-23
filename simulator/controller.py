@@ -181,14 +181,17 @@ class Controller:
 
         from simulator.auto_flight import auto_flight_enabled
 
-        # AUTO_PILOT=gp works outside overnight AUTO_FLIGHT (make auto-gp /
-        # Anduril-style single-shot main). Other AUTO_PILOT values only apply
-        # under make auto.
+        # AUTO_PILOT=gp / blueline work outside overnight AUTO_FLIGHT
+        # (make control-flight / make blueline). Other values need make auto.
         pilot = os.environ.get("AUTO_PILOT", "").strip().lower()
         if pilot == "gp":
             from simulator.gp_pilot import GPPilot
 
             return GPPilot(self, self.data)
+        if pilot == "blueline":
+            from simulator.blue_line_pilot import BlueLinePilot
+
+            return BlueLinePilot(self, self.data)
 
         if auto_flight_enabled():
             # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
