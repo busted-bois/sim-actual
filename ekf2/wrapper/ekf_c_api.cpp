@@ -52,16 +52,18 @@ __declspec(dllexport) void ekf2_push_imu(Ekf2Handle *h,
 	h->ekf.setIMUData(s);
 }
 
-// External-vision VELOCITY measurement in body-FRD (m/s), isotropic variance.
+// External-vision VELOCITY measurement in body-FRD (m/s), PER-AXIS variance so a
+// caller can down-weight an axis it distrusts (e.g. forward PnP velocity) by
+// handing it a huge variance instead of fusing it.
 __declspec(dllexport) void ekf2_push_ext_vision_vel(Ekf2Handle *h,
-		double vx, double vy, double vz, double vel_var, uint64_t t_us)
+		double vx, double vy, double vz,
+		double var_x, double var_y, double var_z, uint64_t t_us)
 {
 	extVisionSample ev{};
 	ev.time_us = t_us;
 	ev.vel = matrix::Vector3f((float)vx, (float)vy, (float)vz);
 	ev.vel_frame = VelocityFrame::BODY_FRAME_FRD;
-	const float v = static_cast<float>(vel_var);
-	ev.velocity_var = matrix::Vector3f(v, v, v);
+	ev.velocity_var = matrix::Vector3f((float)var_x, (float)var_y, (float)var_z);
 	ev.quat = matrix::Quatf();   // identity; unused for VEL-only fusion
 	ev.quality = 100;
 	ev.reset_counter = 0;
@@ -70,6 +72,17 @@ __declspec(dllexport) void ekf2_push_ext_vision_vel(Ekf2Handle *h,
 
 // Run one filter step; returns 1 if the filter produced an update this call.
 __declspec(dllexport) int ekf2_update(Ekf2Handle *h) { return h->ekf.update() ? 1 : 0; }
+
+// The excluded module glue (EKF2.cpp) normally sets these from the land detector.
+// vehicle_at_rest gates the Zero-Velocity Update, which is the FAST tilt aligner
+// (tight obs_var while unaligned) — set it during the stationary pre-flight hold
+// so tilt aligns in ~1s instead of ~8s. Clear it (and set in_air) once moving.
+__declspec(dllexport) void ekf2_set_at_rest(Ekf2Handle *h, int at_rest) {
+	h->ekf.set_vehicle_at_rest(at_rest != 0);
+}
+__declspec(dllexport) void ekf2_set_in_air(Ekf2Handle *h, int in_air) {
+	h->ekf.set_in_air_status(in_air != 0);
+}
 
 // out: pos[3]=NED position (m), vel_ned[3]=NED velocity (m/s), quat[4]=(w,x,y,z)
 // body->NED. valid=1 once tilt alignment is complete (velocity meaningful).

@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -62,6 +62,14 @@ probe:
 # Offline selftest for the VQ2 state estimator (ESKF + tilt/mag/baro/landmarks).
 est-selftest:
 	uv run -m simulator.state_estimator --selftest
+
+# Validate the ecl/EKF2 estimator against VQ1 GROUND TRUTH. Run on the legacy
+# VQ1 sim (telemetry ON): flies the GP pilot, runs EclEkf as a live shadow fed
+# IMU + PnP vision velocity, and logs EKF-fused vs IMU-dead-reckon vs truth
+# (LOCAL_POSITION_NED/ATTITUDE). Ctrl+C to stop and print the RMSE report.
+# Re-report a saved log:  make est-validate ARGS="--report logs/ecl_validate_<boot>.jsonl"
+est-validate:
+	uv run -m simulator.ecl_validate $(ARGS)
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
