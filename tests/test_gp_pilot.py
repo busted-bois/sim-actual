@@ -17,6 +17,7 @@ from simulator.gp_pilot import (
     BACKOFF_PUSH_S,
     HOVER_THRUST,
     K_BEARING,
+    K_CROSS,
     LOOKAHEAD_LAMBDA,
     MAX_BANK_DEG,
     PERP_BLEND_DIST,
@@ -24,7 +25,9 @@ from simulator.gp_pilot import (
     _fresh_hold_state,
     apply_lookahead_body,
     compute_guidance,
+    cross_track_error,
     gate_segment_delta_ned,
+    path_dhat_body,
 )
 from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
 from simulator.gyro_ahrs import GyroAHRS, euler_to_quat
@@ -1495,6 +1498,99 @@ class LookaheadTests(unittest.TestCase):
         self.assertEqual(dbg["lookahead"], 0.0)
         expected = math.degrees(math.atan2(0.5, 8.0))
         self.assertAlmostEqual(dbg["bearing_deg"], expected, places=4)
+
+
+class CrossTrackTests(unittest.TestCase):
+    def _level_quat(self):
+        return np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+
+    def test_dhat_unit(self):
+        gq = self._level_quat()
+        d = path_dhat_body(np.array([10.0, 0.0, 0.0]), gq)
+        self.assertIsNotNone(d)
+        self.assertAlmostEqual(float(np.linalg.norm(d)), 1.0, places=6)
+        np.testing.assert_allclose(d, [1.0, 0.0, 0.0], atol=1e-6)
+        self.assertIsNone(path_dhat_body(None, gq))
+        self.assertIsNone(path_dhat_body(np.array([10.0, 0.0, 0.0]), None))
+        self.assertIsNone(path_dhat_body(np.zeros(3), gq))
+
+    def test_on_path_zero_cte(self):
+        dhat = np.array([1.0, 0.0, 0.0])
+        ecross, e_signed = cross_track_error(10.0, 0.0, 0.0, dhat)
+        self.assertAlmostEqual(e_signed, 0.0, places=6)
+        np.testing.assert_allclose(ecross, [0.0, 0.0, 0.0], atol=1e-9)
+
+    def test_offset_by_gives_signed_cte(self):
+        dhat = np.array([1.0, 0.0, 0.0])
+        _ec, e_signed = cross_track_error(10.0, 2.0, 0.0, dhat)
+        self.assertAlmostEqual(e_signed, -2.0, places=6)
+
+    def test_guidance_banks_toward_path(self):
+        """by>0 with dhat along +x → extra +bank vs bearing-only."""
+        gq = self._level_quat()
+        delta = np.array([10.0, 0.0, 0.0])  # path along +X in gate/NED
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 12.0,
+            "body_y_m": 0.4,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "source": "anduril",
+        }
+        _a, _b, _c, _t, dbg0 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            delta_ned=None,
+            gate_quat=gq,
+            lookahead_lambda=0.0,
+        )
+        _a, _b, _c, _t, dbg1 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            delta_ned=delta,
+            gate_quat=gq,
+            lookahead_lambda=0.0,
+        )
+        self.assertAlmostEqual(dbg1["e_signed"], -0.4, places=4)
+        self.assertLess(abs(dbg0["desired_roll"]), MAX_BANK_DEG - 0.5)
+        self.assertGreater(dbg1["desired_roll"], dbg0["desired_roll"])
+        self.assertAlmostEqual(
+            dbg1["desired_roll"] - dbg0["desired_roll"], K_CROSS * 0.4, places=3
+        )
+
+    def test_last_gate_no_cte_term(self):
+        vision = {
+            "frame_id": 1,
+            "body_x_m": 8.0,
+            "body_y_m": 1.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        _a, _b, _c, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            delta_ned=None,
+            gate_quat=self._level_quat(),
+        )
+        self.assertEqual(dbg["e_signed"], 0.0)
 
 
 if __name__ == "__main__":
