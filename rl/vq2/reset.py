@@ -60,40 +60,45 @@ def reset_episode(sim: SimInterface, est: GPEstimation, settle_s: float = 1.0,
 
 class GatePassTracker:
     """Count gate passes for the reward. Prefers the sim's `active_gate_index`
-    (ground-truth progress counter, if the race is live); falls back to a
-    vision near-then-lost heuristic when the index isn't advancing."""
+    (authoritative if the race is live); otherwise detects a pass from VISION:
+    the range to the nearest gate dropped close (< NEAR_M) and then JUMPED UP
+    (the NEXT gate appeared far) -- which is what a real pass looks like on a
+    continuous course. Robust to the acquired/lost flicker (a same-gate
+    re-acquire has ~the same range, so no jump -> no false pass)."""
 
-    def __init__(self, near_m: float = 2.5):
-        self.near_m = near_m
+    NEAR_M = 2.0   # "at the gate" within this range
+    JUMP_M = 3.0   # range growing this far past its minimum = switched to next gate
+
+    def __init__(self):
         self.n_passed = 0
-        self._was_near = False
+        self._min_r = float("inf")
         self._last_index = None
 
     def reset(self, sim: SimInterface) -> None:
         self.n_passed = 0
-        self._was_near = False
+        self._min_r = float("inf")
         self._last_index = int(sim.data.get("active_gate_index", 0) or 0)
 
     def update(self, sim: SimInterface, pose_est: dict | None) -> bool:
-        # 1) authoritative: race index advanced.
+        # 1) authoritative: race index advanced (only if the race is live).
         idx = sim.data.get("active_gate_index")
         if idx is not None and self._last_index is not None and int(idx) > self._last_index:
             self._last_index = int(idx)
             self.n_passed += 1
-            self._was_near = False
+            self._min_r = float("inf")
             return True
         if idx is not None:
             self._last_index = int(idx)
-        # 2) fallback: was within near_m of the gate, then lost it (crossed plane).
+        # 2) vision: got close, then the range jumped up -> passed to the next gate.
         if pose_est is not None:
             r = math.sqrt(pose_est["body_x_m"] ** 2 + pose_est["body_y_m"] ** 2
                           + pose_est["body_z_m"] ** 2)
-            if r < self.near_m:
-                self._was_near = True
-        elif self._was_near:
-            self._was_near = False
-            self.n_passed += 1
-            return True
+            if r < self._min_r:
+                self._min_r = r
+            if self._min_r < self.NEAR_M and r > self._min_r + self.JUMP_M:
+                self.n_passed += 1
+                self._min_r = r          # re-baseline toward the new gate
+                return True
         return False
 
 
