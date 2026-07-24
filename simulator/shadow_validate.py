@@ -85,8 +85,18 @@ class ShadowValidator:
         # Import EclShadow lazily (pulls the DLL) after path setup is fine.
         from simulator.ecl_validate import EclShadow
 
-        self.full = EclShadow(self.est_data, gyro_sign=GYRO_SIGN, use_vision=True, verbose=False)
-        self.imu = EclShadow(self.est_data, gyro_sign=GYRO_SIGN, use_vision=False, verbose=False)
+        # Per-shadow IMU queues: the tap appends EVERY HIGHRES_IMU sample so the
+        # shadow threads process them all with correct dt, even when GIL-starved
+        # by Abhay's control loop + YOLO. (A single overwritten dict dropped ~90%
+        # of samples -> dt clamped to 0.1 -> tilt never aligned.)
+        from collections import deque
+
+        self._q_full = deque(maxlen=8000)
+        self._q_imu = deque(maxlen=8000)
+        self.full = EclShadow(self.est_data, gyro_sign=GYRO_SIGN, use_vision=True,
+                              verbose=False, imu_queue=self._q_full)
+        self.imu = EclShadow(self.est_data, gyro_sign=GYRO_SIGN, use_vision=False,
+                             verbose=False, imu_queue=self._q_imu)
 
         self.vision_rx = None
         self.rows: list[dict] = []
@@ -135,11 +145,14 @@ class ShadowValidator:
         if typ == "HIGHRES_IMU":
             self._imu_seen = True
             # Estimator input only. Accel = specific force (m/s^2), gyro rad/s.
-            self.est_data["imu"] = {
+            s = {
                 "ax": msg.xacc, "ay": msg.yacc, "az": msg.zacc,
                 "gx": msg.xgyro, "gy": msg.ygyro, "gz": msg.zgyro,
                 "time_us": int(msg.time_usec),
             }
+            self.est_data["imu"] = s          # latest (for status readout)
+            self._q_full.append(s)            # queue EVERY sample to each shadow
+            self._q_imu.append(s)
         elif typ == "LOCAL_POSITION_NED":
             self.truth["pos"] = (float(msg.x), float(msg.y), float(msg.z))
             self.truth["vel"] = (float(msg.vx), float(msg.vy), float(msg.vz))
@@ -181,6 +194,7 @@ class ShadowValidator:
             "full_status": list(sf["status"]), "ev_pushed": sf["ev_pushed"],
             "full_in_air": sf["in_air"],
             "acc_fed": list(sf["acc_fed"]), "gyro_fed": list(sf["gyro_fed"]),
+            "ev_diag": sf.get("ev_diag"),
             "imu_pos": list(si["pos_ned"]), "imu_vel": list(si["vel_ned"]),
             "imu_euler": list(si["euler"]), "imu_valid": si["valid"],
         })
@@ -237,8 +251,10 @@ class ShadowValidator:
             ti, ya, evf = sf["status"]
             anorm = math.sqrt(sum(v * v for v in sf["acc_fed"]))
             gnorm = math.sqrt(sum(v * v for v in sf["gyro_fed"]))
-            print(f"[shadow] imu={'live' if adv else 'STALE'} cam_ev={'on' if sf['ev_pushed'] else 'off'} "
-                  f"in_air={int(sf['in_air'])} tilt={int(ti)} valid={int(sf['valid'])} gate={self.truth['gate']} "
+            evd = sf.get("ev_diag")
+            evstr = (f"ev:{'ACC' if evd['accept'] else 'REJ'} innov={evd['innov']}" if evd else "ev:--")
+            print(f"[shadow] imu={'live' if adv else 'STALE'} in_air={int(sf['in_air'])} "
+                  f"tilt={int(ti)} valid={int(sf['valid'])} gate={self.truth['gate']} {evstr} "
                   f"| |a|={anorm:4.1f} |g|={gnorm:4.2f} | |v| ekf={ekf_sp:4.1f} truth={tr_sp:4.1f} m/s",
                   flush=True)
 
@@ -331,6 +347,24 @@ def analyze(rows: list[dict]) -> None:
 
     block("FULL", full)
     block("IMU", imu)
+
+    # Vision measurement health: innovation gating + accept/reject (from ev_diag).
+    diags = [r["ev_diag"] for r in rows if r.get("ev_diag")]
+    if diags:
+        acc = [d for d in diags if d["accept"]]
+        rej = [d for d in diags if not d["accept"]]
+        innov = np.array([d["innov"] for d in diags])
+        spd = np.array([d["speed"] for d in diags])
+        print(f"\n  VISION MEASUREMENT HEALTH ({len(diags)} vision frames)")
+        print(f"    accepted={len(acc)} ({100*len(acc)/len(diags):.0f}%)  rejected={len(rej)} "
+              f"({100*len(rej)/len(diags):.0f}%)")
+        print(f"    innovation |vision-pred| (m/s): mean={innov.mean():.1f}  p50={np.median(innov):.1f}  "
+              f"max={innov.max():.1f}")
+        print(f"    raw vision speed (m/s):         mean={spd.mean():.1f}  max={spd.max():.1f}"
+              f"  (drone caps ~9)")
+        if acc:
+            ai = np.array([d["innov"] for d in acc])
+            print(f"    ACCEPTED innovation: mean={ai.mean():.2f}  max={ai.max():.2f} (these corrected the state)")
 
     # Attitude (FULL). Report per-axis; pitch has the known ATTITUDE sign flip.
     ea = np.array([r["full_euler"] for r in full])
