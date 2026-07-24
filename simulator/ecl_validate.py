@@ -50,8 +50,18 @@ GYRO_SIGN = float(os.environ.get("ECL_GYRO_SIGN", "-1.0"))
 # truth comparison reveals whether forward PnP velocity is usable (the pilot
 # currently trusts only lateral+vertical). Set ECL_EV_AXES=yz to match deploy.
 EV_AXES = os.environ.get("ECL_EV_AXES", "xyz").lower()
-EV_STD = float(os.environ.get("ECL_EV_NOISE", "0.3"))  # m/s; var = std^2
+# PnP-differenced velocity is noisy; do NOT tell the EKF it's precise. Default
+# std 1.0 m/s (var 1.0) -- realistic, so the filter corrects gently instead of
+# snapping to garbage. (Was 0.3 = over-trusting; see shadow-validation audit.)
+EV_STD = float(os.environ.get("ECL_EV_NOISE", "1.0"))  # m/s; var = std^2
 EV_VAR = EV_STD * EV_STD
+# Body-frame innovation gate: reject a vision-velocity measurement whose
+# disagreement with the filter's PREDICTED body velocity exceeds this (m/s).
+# Body frame is yaw-invariant, so this survives the mag-free yaw error.
+EV_INNOV_GATE = float(os.environ.get("ECL_EV_INNOV_GATE", "4.0"))
+# Absolute physical cap: the drone tops out ~9 m/s (raceconfig v_max). Any body
+# speed above this is a gate-switch/PnP-jump artifact -> reject.
+EV_SPEED_CAP = float(os.environ.get("ECL_EV_SPEED_CAP", "12.0"))
 
 SHADOW_POLL_HZ = 400
 LOG_HZ = 30
@@ -74,8 +84,13 @@ class EclShadow:
     needed; only the published snapshot is lock-guarded for the logger."""
 
     def __init__(self, data: dict, gyro_sign: float = GYRO_SIGN, acc_sign=None,
-                 record=False, use_vision=True, verbose=True):
+                 record=False, use_vision=True, verbose=True, imu_queue=None):
         self.data = data
+        # Optional thread-safe IMU queue. When set, the loop DRAINS it (processing
+        # every sample with its own timestamp) instead of polling a single
+        # overwritten dict -- this is what keeps dt correct when the thread is
+        # GIL-starved and would otherwise drop samples (huge dt -> no alignment).
+        self._imu_q = imu_queue
         self._use_vision = use_vision
         self._verbose = verbose
         self._gsign = gyro_sign
@@ -91,7 +106,10 @@ class EclShadow:
         self._thread: threading.Thread | None = None
         self._last_imu_ts: int | None = None
         self._last_vis_fid: int | None = None
+        self._last_gx = 0.0
+        self._last_gy = 0.0
         self._last_gz = 0.0  # rad/s, signed as fed to EKF (for de-rotation)
+        self._ev_diag = None  # last vision measurement diagnostics (for logging)
         self._ekf_time_us = 0  # monotonic clock fed to the EKF (reset-proof)
         self._in_air = False   # latches true on first real motion
         self._seen_still = False
@@ -111,6 +129,7 @@ class EclShadow:
             "in_air": False,
             "acc_fed": (0.0, 0.0, 0.0),
             "gyro_fed": (0.0, 0.0, 0.0),
+            "ev_diag": None,
         }
 
     def start(self) -> None:
@@ -126,7 +145,16 @@ class EclShadow:
         last_tb = 0.0
         while self._running:
             try:
-                self._step()
+                if self._imu_q is not None:
+                    # Drain ALL queued samples so none are dropped even if this
+                    # thread woke late (GIL contention). Each keeps its own
+                    # timestamp -> dt stays correct regardless of wake cadence.
+                    n = 0
+                    while self._imu_q and n < 2000:
+                        self._step(self._imu_q.popleft())
+                        n += 1
+                else:
+                    self._step()
             except Exception:
                 now = time.monotonic()
                 if now - last_tb >= 5.0:
@@ -134,9 +162,26 @@ class EclShadow:
                     last_tb = now
             time.sleep(interval)
 
-    def _step(self) -> None:
-        imu = self.data.get("imu")
+    def _step(self, imu=None) -> None:
         if imu is None:
+            imu = self.data.get("imu")
+        if imu is None:
+            return
+        rax = float(imu.get("ax", imu.get("xacc", 0.0)))
+        ray = float(imu.get("ay", imu.get("yacc", 0.0)))
+        raz = float(imu.get("az", imu.get("zacc", 0.0)))
+        rgx = float(imu.get("gx", imu.get("xgyro", 0.0)))
+        rgy = float(imu.get("gy", imu.get("ygyro", 0.0)))
+        rgz = float(imu.get("gz", imu.get("zgyro", 0.0)))
+        # REJECT DEGENERATE samples. The sim stream emits all-zero IMU samples at
+        # startup/hiccups; to the EKF an all-zero accel is FREE-FALL (no gravity
+        # vector) which stalls tilt alignment and ramps velocity. A powered drone's
+        # specific-force magnitude is never near 0, so |a|<1 (or non-finite) is a
+        # bad sample -- drop it WITHOUT touching the clock, so the next good
+        # sample's dt spans the gap. (This flakiness is why some runs aligned and
+        # others didn't -- luck of how many zeros hit before launch.)
+        a2 = rax * rax + ray * ray + raz * raz
+        if not math.isfinite(a2 + rgx + rgy + rgz) or a2 < 1.0:
             return
         ts_us = int(imu.get("time_us") or imu.get("time_usec") or 0)
         if self._last_imu_ts is None:
@@ -152,13 +197,6 @@ class EclShadow:
         # time-ordered ring buffers.
         self._ekf_time_us += int(dt * 1e6)
         et = self._ekf_time_us
-
-        rax = float(imu.get("ax", imu.get("xacc", 0.0)))
-        ray = float(imu.get("ay", imu.get("yacc", 0.0)))
-        raz = float(imu.get("az", imu.get("zacc", 0.0)))
-        rgx = float(imu.get("gx", imu.get("xgyro", 0.0)))
-        rgy = float(imu.get("gy", imu.get("ygyro", 0.0)))
-        rgz = float(imu.get("gz", imu.get("zgyro", 0.0)))
 
         # Keep the EKF at-rest (ZUPT tilt alignment) for the ENTIRE true stationary
         # hold, then latch in_air at launch and never go back. Aligning tilt while
@@ -204,7 +242,7 @@ class EclShadow:
 
         ax, ay, az = self._asign[0] * rax, self._asign[1] * ray, self._asign[2] * raz
         gx, gy, gz = self._gsign * rgx, self._gsign * rgy, self._gsign * rgz
-        self._last_gz = gz
+        self._last_gx, self._last_gy, self._last_gz = gx, gy, gz
         self.ekf.push_imu(ax, ay, az, gx, gy, gz, dt, et)
 
         # A vision hiccup must NEVER stall the filter: push EV if we can, but
@@ -241,36 +279,69 @@ class EclShadow:
                 "in_air": self._in_air,
                 "acc_fed": (ax, ay, az),
                 "gyro_fed": (gx, gy, gz),
+                "ev_diag": self._ev_diag,
             }
 
+    def _keepalive(self, ts_us: int, pred):
+        """Push the filter's OWN predicted velocity with huge variance. Innovation
+        is ~0, so it's a no-op update -- but it keeps EV fusion from timing out,
+        which structurally prevents the EKF's reset-to-vision path from ever
+        firing on reacquisition. Vision only ever CORRECTS, never resets."""
+        self.ekf.push_vision_velocity(pred[0], pred[1], pred[2], (1e6, 1e6, 1e6), ts_us)
+
     def _maybe_push_vision(self, ts_us: int) -> bool:
+        # Vision aiding only during ALIGNED FLIGHT. During the stationary hold
+        # ZUPT owns the state (and vision velocity is meaningless when parked);
+        # pushing EV before tilt-align interferes with alignment. Gate on
+        # valid (tilt aligned) AND in_air (launched) -- no EV before then.
+        if not (self._in_air and self.ekf.valid()):
+            return False
+        # Filter's predicted BODY velocity (fwd,right,down). Body frame is
+        # yaw-invariant, so innovation gating here survives the mag-free yaw error.
+        pred = self.ekf.velocity_body()
         est = _yolo_pose_estimate(self.data)  # dict with body_x_m/frame_id (or None)
         vel = self.tracker.update(est)
         if vel is None or est is None:
+            self._keepalive(ts_us, pred)
             return False
         fid = est.get("frame_id")
         if fid is not None and fid == self._last_vis_fid:
+            self._keepalive(ts_us, pred)
             return False
         self._last_vis_fid = fid
         bx = float(est.get("body_x_m", 0.0))
+        by = float(est.get("body_y_m", 0.0))
+        bz = float(est.get("body_z_m", 0.0))
         vx = float(vel["vx_body_mps"])
         vy = float(vel["vy_body_mps"])
         vz = float(vel["vz_body_mps"])
-        # De-rotate lateral: a yaw sweeps the gate across the image and fakes a
-        # sideways velocity (v_true = v - omega_z * bx). Sign-safe like the pilot:
-        # only take it when it SHRINKS |vy| (removes a real phantom).
-        vy_derot = vy - self._last_gz * bx
-        if abs(vy_derot) <= abs(vy):
-            vy = vy_derot
-        # Suppress an axis both ways: huge variance so post-engage FUSION ignores
-        # it (IMU carries that axis), AND value 0 so the one-shot velocity RESET
-        # at EV-engage (ev_vel.h resetVelocityTo, which uses the raw value
-        # regardless of variance) seeds 0 rather than a distrusted vision value.
-        # The drone is stationary at engage, so 0 is the right seed.
+        # FULL rotational-flow de-rotation. The tracker measures -d(p_gate_body)/dt
+        # = v_drone_body + omega x p_gate (the gate sweeps across frame under BOTH
+        # translation AND body rotation). So v_drone = measured - omega x p_gate.
+        # (Old code only did the omega_z*bx term; banked turns leaked the rest.)
+        gx, gy, gz = self._last_gx, self._last_gy, self._last_gz
+        vx -= (gy * bz - gz * by)
+        vy -= (gz * bx - gx * bz)
+        vz -= (gx * by - gy * bx)
+        # Innovation vs prediction (body frame) + absolute physical cap.
+        inx, iny, inz = vx - pred[0], vy - pred[1], vz - pred[2]
+        innov = math.sqrt(inx * inx + iny * iny + inz * inz)
+        speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+        accept = innov <= EV_INNOV_GATE and speed <= EV_SPEED_CAP
+        self._ev_diag = {
+            "meas": (round(vx, 2), round(vy, 2), round(vz, 2)),
+            "pred": (round(pred[0], 2), round(pred[1], 2), round(pred[2], 2)),
+            "innov": round(innov, 2), "speed": round(speed, 2), "accept": accept,
+        }
+        if not accept:
+            self._keepalive(ts_us, pred)  # reject -> gentle no-op, never reset
+            return False
+        # Accepted: fuse with realistic variance. Suppressed axes keep the
+        # prediction (not 0) + huge var, so they're true no-ops.
         big = 1e6
-        ox, vx_v = (vx, EV_VAR) if "x" in EV_AXES else (0.0, big)
-        oy, vy_v = (vy, EV_VAR) if "y" in EV_AXES else (0.0, big)
-        oz, vz_v = (vz, EV_VAR) if "z" in EV_AXES else (0.0, big)
+        ox, vx_v = (vx, EV_VAR) if "x" in EV_AXES else (pred[0], big)
+        oy, vy_v = (vy, EV_VAR) if "y" in EV_AXES else (pred[1], big)
+        oz, vz_v = (vz, EV_VAR) if "z" in EV_AXES else (pred[2], big)
         self.ekf.push_vision_velocity(ox, oy, oz, (vx_v, vy_v, vz_v), ts_us)
         return True
 
