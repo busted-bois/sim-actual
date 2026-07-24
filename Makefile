@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval
 
 i install:
 	uv sync
@@ -161,6 +161,29 @@ eval-policy:
 # Module 8: fly the trained policy on the live sim.
 fly-policy:
 	uv run -m rl.deploy
+
+# --- VQ2 real-sim RL (rl/vq2/) --------------------------------------------
+# DE-RISK FIRST: benchmark automated episodic reset speed + re-align reliability
+# on the live VQ2 sim. If resets are slow/flaky, real-sim RL is not viable.
+rl2-reset-bench:
+	uv run -m rl.vq2.reset --cycles $(or $(CYCLES),10)
+
+# Collect BC demos by taping the proven GP pilot flying the real sim (appends).
+rl2-log-demos:
+	uv run -m rl.vq2.log_demos
+
+# Behaviour-clone a PPO policy on the demos -> rl/data/vq2/policy_bc.zip (no sim).
+rl2-train-bc:
+	uv run -m rl.vq2.train_bc $(ARGS)
+
+# Train PPO in the REAL VQ2 sim (single instance, real-time -- slow; run unattended).
+# Warm-start:  make rl2-train ARGS="--resume rl/data/vq2/policy_bc.zip"
+rl2-train:
+	uv run -m rl.vq2.train $(ARGS)
+
+# Evaluate a trained VQ2 policy in the real sim.
+rl2-eval:
+	uv run -m rl.vq2.eval $(ARGS)
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:
