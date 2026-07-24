@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval rl2-log
 
 i install:
 	uv sync
@@ -184,6 +184,11 @@ rl2-train:
 # Evaluate a trained VQ2 policy in the real sim.
 rl2-eval:
 	uv run -m rl.vq2.eval $(ARGS)
+
+# Read the training episode log: gate-pass rate + per-term reward breakdown.
+# Verifies the drone registers gate passes and the reward function is working.
+rl2-log:
+	uv run -m rl.vq2.read_log $(ARGS)
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:

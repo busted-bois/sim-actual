@@ -27,6 +27,7 @@ OSC_K = 0.01                  # - per ‖roll/pitch rate cmd‖² (attitude osci
 RATE_K = 0.005               # - per ‖ang-rate cmd‖² (excessive angular rate)
 TIME_K = 0.01                 # - per step (finish quickly)
 COLLISION_PEN = -20.0
+SOFT_COLLISION_PEN = -0.3     # - proximity warning (NOT terminal; nudge away)
 OOB_PEN = -20.0
 CRASH_PEN = -20.0
 TIMEOUT_PEN = -5.0
@@ -42,63 +43,72 @@ class StepCtx:
     prev_action: np.ndarray      # (4,) normalized last step
     gate_passed: bool
     course_complete: bool
-    collision: bool
+    collision: bool              # HARD contact -> terminal
     out_of_bounds: bool
     flipped: bool
     timeout: bool
+    soft_collision: bool = False  # proximity warning -> small penalty, keep flying
 
 
 def step(ctx: StepCtx):
-    """-> (reward: float, terminated: bool, truncated: bool, reason: str)."""
-    r = 0.0
+    """-> (reward, terminated, truncated, reason, parts).
+
+    `parts` is a per-term breakdown of this step's reward (progress, fwd, smooth,
+    osc, rate, time, soft_col, gate_bonus, terminal) so the trainer can log which
+    components actually fire -- i.e. verify the reward function is working."""
+    p = {}
 
     # progress toward the visible gate (positive closing, negative opening).
-    if ctx.visible and ctx.prev_dist is not None and ctx.dist is not None:
-        r += PROGRESS_K * (ctx.prev_dist - ctx.dist)
+    p["progress"] = (PROGRESS_K * (ctx.prev_dist - ctx.dist)
+                     if ctx.visible and ctx.prev_dist is not None and ctx.dist is not None
+                     else 0.0)
 
     # forward speed encouragement.
-    r += FWD_SPEED_K * max(0.0, float(ctx.vel_body[0]))
+    p["fwd"] = FWD_SPEED_K * max(0.0, float(ctx.vel_body[0]))
 
     # smoothness / oscillation / rate penalties.
     da = np.asarray(ctx.action, float) - np.asarray(ctx.prev_action, float)
-    r -= SMOOTH_K * float(np.dot(da, da))
     a3 = np.asarray(ctx.action, float)[:3]
-    r -= OSC_K * float(a3[0] * a3[0] + a3[1] * a3[1])   # roll/pitch target churn
-    r -= RATE_K * float(np.dot(a3, a3))                 # overall angular effort
+    p["smooth"] = -SMOOTH_K * float(np.dot(da, da))
+    p["osc"] = -OSC_K * float(a3[0] * a3[0] + a3[1] * a3[1])   # roll/pitch target churn
+    p["rate"] = -RATE_K * float(np.dot(a3, a3))                # overall angular effort
 
     # time penalty (finish quickly).
-    r -= TIME_K
+    p["time"] = -TIME_K
+
+    # proximity warning (low-threat COLLISION) -- nudge away, don't end the run.
+    p["soft_col"] = SOFT_COLLISION_PEN if ctx.soft_collision else 0.0
 
     # gate events.
-    if ctx.gate_passed:
-        r += GATE_PASS_BONUS
+    p["gate_bonus"] = GATE_PASS_BONUS if ctx.gate_passed else 0.0
 
     # terminal events.
     terminated = False
     truncated = False
     reason = ""
+    p["terminal"] = 0.0
     if ctx.course_complete:
-        r += COURSE_BONUS
+        p["terminal"] = COURSE_BONUS
         terminated = True
         reason = "course_complete"
     elif ctx.collision:
-        r += COLLISION_PEN
+        p["terminal"] = COLLISION_PEN
         terminated = True
         reason = "collision"
     elif ctx.flipped:
-        r += CRASH_PEN
+        p["terminal"] = CRASH_PEN
         terminated = True
         reason = "flipped"
     elif ctx.out_of_bounds:
-        r += OOB_PEN
+        p["terminal"] = OOB_PEN
         terminated = True
         reason = "out_of_bounds"
     elif ctx.timeout:
-        r += TIMEOUT_PEN
+        p["terminal"] = TIMEOUT_PEN
         truncated = True
         reason = "timeout"
 
-    return float(r), terminated, truncated, reason
+    return float(sum(p.values())), terminated, truncated, reason, p
 
 
 if __name__ == "__main__":  # quick sanity
@@ -106,10 +116,13 @@ if __name__ == "__main__":  # quick sanity
                 action=np.zeros(4), prev_action=np.zeros(4), gate_passed=False,
                 course_complete=False, collision=False, out_of_bounds=False,
                 flipped=False, timeout=False)
-    r, t, tr, _ = step(StepCtx(**base))
+    r, t, tr, _, parts = step(StepCtx(**base))
     assert r > 0 and not t and not tr, (r, t, tr)          # closing distance -> +
-    r2, _, _, _ = step(StepCtx(**{**base, "prev_dist": 4.0, "dist": 5.0}))
+    assert abs(sum(parts.values()) - r) < 1e-9             # parts sum to total
+    r2, _, _, _, _ = step(StepCtx(**{**base, "prev_dist": 4.0, "dist": 5.0}))
     assert r2 < r                                          # opening distance -> less
-    rc, tc, _, why = step(StepCtx(**{**base, "collision": True}))
+    rc, tc, _, why, _ = step(StepCtx(**{**base, "collision": True}))
     assert tc and why == "collision" and rc < -10          # collision terminates, big -
+    rs, ts, _, _, ps = step(StepCtx(**{**base, "soft_collision": True}))
+    assert not ts and ps["soft_col"] < 0                   # proximity -> penalty, NOT terminal
     print("[vq2.reward] selftest OK", round(r, 3), round(r2, 3), round(rc, 3))

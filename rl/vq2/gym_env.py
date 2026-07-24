@@ -14,6 +14,7 @@ a BC warm-start and expect long wall-clock.
 from __future__ import annotations
 
 import math
+import os
 import time
 
 import gymnasium as gym
@@ -31,6 +32,12 @@ from rl.vq2.reset import GatePassTracker, reset_episode
 DECISION_HZ = 50
 _DT = 1.0 / DECISION_HZ
 
+# MAVLink COLLISION.threat_level: 0 NONE, 1 LOW, 2 HIGH. The sim streams these as
+# PROXIMITY warnings near structures (the working GP pilot ignores low ones and
+# keeps flying); only a HIGH-threat event is treated as a real crash. Override
+# with env var VQ2_HARD_THREAT to recalibrate once we see live values.
+HARD_THREAT = int(os.environ.get("VQ2_HARD_THREAT", "2"))
+
 
 class VQ2RealEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -39,6 +46,7 @@ class VQ2RealEnv(gym.Env):
                  ip: str = "127.0.0.1", mav_port: int = 14550):
         super().__init__()
         self.sim = SimInterface(ip=ip, mav_port=mav_port)
+        self.sim.data["_quiet_vision"] = True   # silence per-frame [vision] GATE spam
         self.est = GPEstimation(self.sim.data)
         self.est.start()
         self.gates = GatePassTracker()
@@ -85,6 +93,10 @@ class VQ2RealEnv(gym.Env):
         self._prev_action = np.zeros(spec.ACTION_DIM, np.float32)
         self._prev_dist = None
         self._last_collision = self.sim.data.get("last_collision")
+        self._n_hard = self._n_soft = 0
+        self._last_threat, self._last_delta = 0, -1.0
+        self._ep_parts = {}
+        self._ep_min_range = float("inf")
         ego, pose_est, conf = self._read()
         obs = self.stacker.reset(self._frame(ego, pose_est, conf, self._prev_action))
         return obs, {}
@@ -107,9 +119,19 @@ class VQ2RealEnv(gym.Env):
         # events.
         gate_passed = self.gates.update(self.sim, pose_est)
         course_complete = self.gates.n_passed >= self.num_gates
+        # COLLISION is a threat/proximity stream, not a crash flag. Only a
+        # HIGH-threat event ends the episode; low-threat = proximity nudge.
         col = self.sim.data.get("last_collision")
-        collision = col is not None and col != self._last_collision
+        col_evt = col is not None and col != self._last_collision
         self._last_collision = col
+        threat = int(col[1]) if col else 0
+        delta = float(col[2]) if col else -1.0
+        collision = col_evt and threat >= HARD_THREAT
+        soft_collision = col_evt and not collision
+        if col_evt:
+            self._n_hard += int(collision)
+            self._n_soft += int(soft_collision)
+            self._last_threat, self._last_delta = threat, delta
         flipped = self._flipped(ego)
         oob = self._out_of_bounds(ego)
         timeout = self._steps >= self.max_steps
@@ -122,13 +144,19 @@ class VQ2RealEnv(gym.Env):
         else:
             dist, visible = None, False
 
-        r, terminated, truncated, reason = reward_mod.step(reward_mod.StepCtx(
+        r, terminated, truncated, reason, parts = reward_mod.step(reward_mod.StepCtx(
             prev_dist=self._prev_dist, dist=dist, visible=visible,
             vel_body=np.asarray(ego["vel_body"], float),
             action=action, prev_action=self._prev_action,
             gate_passed=gate_passed, course_complete=course_complete,
-            collision=collision, out_of_bounds=oob, flipped=flipped, timeout=timeout,
+            collision=collision, soft_collision=soft_collision,
+            out_of_bounds=oob, flipped=flipped, timeout=timeout,
         ))
+        # accumulate per-term reward sums + closest gate range over the episode.
+        for k, v in parts.items():
+            self._ep_parts[k] = self._ep_parts.get(k, 0.0) + v
+        if visible and dist is not None:
+            self._ep_min_range = min(self._ep_min_range, dist)
 
         # on a gate pass the visible gate switches (range jumps) -> drop prev_dist
         # so the switch isn't scored as a huge negative progress.
@@ -136,8 +164,19 @@ class VQ2RealEnv(gym.Env):
         self._prev_action = action
 
         obs = self.stacker.push(self._frame(ego, pose_est, conf, action))
+        p = np.asarray(ego["pos_ned"], float)
         info = {"reason": reason, "gates_passed": self.gates.n_passed,
-                "steps": self._steps}
+                "steps": self._steps,
+                "gate_range": dist if dist is not None else -1.0,
+                "gate_visible": visible,
+                "min_gate_range": self.gates._min_r,
+                "alt_m": -float(p[2]),          # NED down -> altitude above spawn
+                "fwd_m": float(p[0]),           # forward distance from spawn
+                "n_hard_col": self._n_hard, "n_soft_col": self._n_soft,
+                "last_threat": self._last_threat, "last_delta": self._last_delta,
+                "ep_min_range": (self._ep_min_range if self._ep_min_range != float("inf")
+                                 else None),
+                "reward_parts": dict(self._ep_parts)}
         return obs, r, terminated, truncated, info
 
     def close(self):

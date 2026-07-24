@@ -12,14 +12,53 @@ unattended; the reset harness recycles episodes. Optional BC warm-start via
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
 from rl.vq2.gym_env import VQ2RealEnv
 
 DATA = os.path.join("rl", "data", "vq2")
+
+
+class EpisodeLog(BaseCallback):
+    """Per-episode log so you can SEE whether gates registered and which reward
+    terms fired. Appends one JSON line per episode to `episodes.jsonl` AND records
+    gates_passed / min_range / per-term reward sums to TensorBoard."""
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+        self._ep = 0
+
+    def _on_step(self) -> bool:
+        for info, done in zip(self.locals["infos"], self.locals["dones"]):
+            if not done:
+                continue
+            self._ep += 1
+            ep = info.get("episode", {})            # Monitor-added {r, l}
+            parts = info.get("reward_parts", {})
+            rec = {
+                "ep": self._ep, "t": int(self.num_timesteps),
+                "R": round(float(ep.get("r", 0.0)), 2), "len": int(ep.get("l", 0)),
+                "gates": info.get("gates_passed"), "reason": info.get("reason"),
+                "min_range": (round(info["ep_min_range"], 2)
+                              if info.get("ep_min_range") is not None else None),
+                "hard_col": info.get("n_hard_col"), "soft_col": info.get("n_soft_col"),
+                "parts": {k: round(float(v), 2) for k, v in parts.items()},
+            }
+            with open(self.path, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            # TensorBoard scalars (watch these trend over training).
+            self.logger.record("episode/gates_passed", float(info.get("gates_passed", 0)))
+            if info.get("ep_min_range") is not None:
+                self.logger.record("episode/min_gate_range", float(info["ep_min_range"]))
+            self.logger.record("episode/hard_collisions", float(info.get("n_hard_col", 0)))
+            for k, v in parts.items():
+                self.logger.record(f"reward/{k}", float(v))
+        return True
 
 
 def train(total_steps: int = 200_000, n_steps: int = 1024, seconds: float = 30.0,
@@ -28,7 +67,8 @@ def train(total_steps: int = 200_000, n_steps: int = 1024, seconds: float = 30.0
     env = VQ2RealEnv(max_seconds=seconds, num_gates=gates)
     if resume and os.path.exists(resume):
         print(f"[vq2.train] resuming from {resume}", flush=True)
-        model = PPO.load(resume, env=env, tensorboard_log=os.path.join(DATA, "tb"))
+        model = PPO.load(resume, env=env, device="cpu",
+                         tensorboard_log=os.path.join(DATA, "tb"))
     else:
         model = PPO(
             "MlpPolicy", env,
@@ -41,8 +81,10 @@ def train(total_steps: int = 200_000, n_steps: int = 1024, seconds: float = 30.0
     ckpt = CheckpointCallback(save_freq=n_steps * 5,
                               save_path=os.path.join(DATA, "ckpts"),
                               name_prefix="vq2_ppo")
+    eplog = EpisodeLog(os.path.join(DATA, "episodes.jsonl"))
+    print(f"[vq2.train] episode log -> {os.path.join(DATA, 'episodes.jsonl')}", flush=True)
     try:
-        model.learn(total_timesteps=total_steps, callback=ckpt)
+        model.learn(total_timesteps=total_steps, callback=[ckpt, eplog])
     finally:
         model.save(os.path.join(DATA, "vq2_ppo"))
         env.close()
