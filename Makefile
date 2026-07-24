@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -70,6 +70,13 @@ est-selftest:
 # Re-report a saved log:  make est-validate ARGS="--report logs/ecl_validate_<boot>.jsonl"
 est-validate:
 	uv run -m simulator.ecl_validate $(ARGS)
+
+# SHADOW-MODE validation: run Abhay's known-good telemetry pilot (VQ1 sim)
+# UNMODIFIED while our VQ2 estimator observes IMU+camera only, then compare vs
+# ground truth. Set ABHAY_DIR if his repo isn't at the default Desktop path.
+# Re-report:  make shadow-validate ARGS="--report logs/shadow_<ts>.jsonl"
+shadow-validate:
+	uv run -m simulator.shadow_validate $(ARGS)
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
