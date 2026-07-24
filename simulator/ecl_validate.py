@@ -73,8 +73,11 @@ class EclShadow:
     All EclEkf calls happen on this one thread, so no locking of the filter is
     needed; only the published snapshot is lock-guarded for the logger."""
 
-    def __init__(self, data: dict, gyro_sign: float = GYRO_SIGN, acc_sign=None, record=False):
+    def __init__(self, data: dict, gyro_sign: float = GYRO_SIGN, acc_sign=None,
+                 record=False, use_vision=True, verbose=True):
         self.data = data
+        self._use_vision = use_vision
+        self._verbose = verbose
         self._gsign = gyro_sign
         # Per-axis accel sign; VQ1 flips forward (ax). Default isotropic ACC_SIGN.
         self._asign = acc_sign if acc_sign is not None else (ACC_SIGN, ACC_SIGN, ACC_SIGN)
@@ -92,14 +95,22 @@ class EclShadow:
         self._ekf_time_us = 0  # monotonic clock fed to the EKF (reset-proof)
         self._in_air = False   # latches true on first real motion
         self._seen_still = False
+        self._launch_hi = 0    # consecutive high-gyro samples (launch debounce)
         self._t0 = time.time()
         self._prev_status = (False, False, False)
         self._snap = {
             "vel_ned": (0.0, 0.0, 0.0),
+            "pos_ned": (0.0, 0.0, 0.0),
             "euler": (0.0, 0.0, 0.0),
+            "quat": (1.0, 0.0, 0.0, 0.0),
+            "var": {"vel_ned": (0.0, 0.0, 0.0), "pos_ned": (0.0, 0.0, 0.0),
+                    "gyro_bias": (0.0, 0.0, 0.0), "accel_bias": (0.0, 0.0, 0.0)},
             "status": (False, False, False),  # tilt_align, yaw_align, ev_vel
             "valid": False,
             "ev_pushed": False,
+            "in_air": False,
+            "acc_fed": (0.0, 0.0, 0.0),
+            "gyro_fed": (0.0, 0.0, 0.0),
         }
 
     def start(self) -> None:
@@ -158,9 +169,11 @@ class EclShadow:
         if not self._in_air:
             # Detect launch from the GYRO (live IMU) so a frozen/stale position
             # feed can't wrongly report "already moving" and skip ZUPT alignment.
-            # Truth speed only helps as a backup once we've actually seen it low
-            # (guards against a stale constant like 10.5 m/s at rest).
+            # DEBOUNCED: a single transient spike at arming must NOT latch in_air
+            # (that permanently kills ZUPT tilt alignment) -- require SUSTAINED
+            # rotation (~0.25s). Truth speed is a backup only after seen-low.
             g_norm = math.sqrt(rgx * rgx + rgy * rgy + rgz * rgz)
+            self._launch_hi = self._launch_hi + 1 if g_norm > 0.6 else 0
             lp = self.data.get("local_position_ned") or self.data.get("odometry")
             sp = None
             if lp is not None:
@@ -169,7 +182,7 @@ class EclShadow:
                                + float(lp.get("vz", 0.0)) ** 2)
                 if sp < 0.5:
                     self._seen_still = True
-            launched = g_norm > 0.8 or (sp is not None and self._seen_still and sp > 2.0)
+            launched = self._launch_hi >= 25 or (sp is not None and self._seen_still and sp > 2.0)
             if launched:
                 self._in_air = True
                 self.ekf.set_at_rest(False)
@@ -196,10 +209,12 @@ class EclShadow:
 
         # A vision hiccup must NEVER stall the filter: push EV if we can, but
         # always run update() so tilt keeps aligning and IMU keeps propagating.
-        try:
-            ev_pushed = self._maybe_push_vision(et)
-        except Exception:
-            ev_pushed = False
+        ev_pushed = False
+        if self._use_vision:
+            try:
+                ev_pushed = self._maybe_push_vision(et)
+            except Exception:
+                ev_pushed = False
         self.ekf.update()
 
         vn = self.ekf.velocity_ned()
@@ -207,19 +222,25 @@ class EclShadow:
         status = self.ekf.status()
         # Announce alignment milestones so the operator knows when it's safe to
         # start the race (tilt must align first, then EV velocity can engage).
-        if status[0] and not self._prev_status[0]:
+        if self._verbose and status[0] and not self._prev_status[0]:
             print(f"[ecl] >>> TILT ALIGNED at t={time.time()-self._t0:.1f}s "
                   f"-- safe to START THE RACE now <<<", flush=True)
-        if status[2] and not self._prev_status[2]:
+        if self._verbose and status[2] and not self._prev_status[2]:
             print(f"[ecl] EV velocity fusion engaged at t={time.time()-self._t0:.1f}s", flush=True)
         self._prev_status = status
         with self._lock:
             self._snap = {
                 "vel_ned": vn,
+                "pos_ned": self.ekf.position_ned(),
                 "euler": _quat_to_euler(qw, qx, qy, qz),
+                "quat": (qw, qx, qy, qz),
+                "var": self.ekf.variance(),
                 "status": status,
                 "valid": self.ekf.valid(),
                 "ev_pushed": ev_pushed,
+                "in_air": self._in_air,
+                "acc_fed": (ax, ay, az),
+                "gyro_fed": (gx, gy, gz),
             }
 
     def _maybe_push_vision(self, ts_us: int) -> bool:
@@ -328,18 +349,29 @@ def _fit_convention(rows: list[dict]) -> None:
 def report(rows: list[dict]) -> None:
     """Print the RMSE comparison: EKF vs truth vs dead-reckon."""
     has_truth = [r for r in rows if r.get("truth_vel")]
-    valid = [r for r in has_truth if r.get("valid")]
+    valid_all = [r for r in rows if r.get("valid")]        # EKF-valid, truth or not
+    valid = [r for r in has_truth if r.get("valid")]        # truth-scored subset
     tilt_row = next((r for r in rows if r.get("status") and r["status"][0]), None)
     ev_any = sum(1 for r in rows if r.get("ev_pushed"))
     print("\n" + "=" * 68)
-    print("  ecl/EKF2 vs VQ1 GROUND TRUTH")
+    print("  ecl/EKF2 vs GROUND TRUTH" + ("  (VQ2: NO TELEMETRY)" if not has_truth else ""))
     print("=" * 68)
     print(f"  samples:   {len(rows)} logged")
     print(f"  truth:     {len(has_truth)} with LOCAL_POSITION_NED/ATTITUDE  "
-          f"{'<-- 0 means VQ1 telemetry never streamed' if not has_truth else ''}")
-    print(f"  EKF valid: {len(valid)} (tilt-aligned)  "
+          f"{'<-- 0 = no telemetry (real VQ2, or stale/absent stream)' if not has_truth else ''}")
+    print(f"  EKF valid: {len(valid_all)} (tilt-aligned)  "
           f"{'tilt at t=%.1fs' % tilt_row['t'] if tilt_row else '<-- tilt NEVER aligned (ZUPT should do it in ~1s at rest)'}")
     print(f"  EV pushed: {ev_any} vision-velocity samples")
+
+    # No-truth (VQ2): can't score RMSE, but quantify EKF vs dead-reckon |v| so the
+    # spiking is visible.
+    if not has_truth and valid_all:
+        ekf_sp = [math.sqrt(sum(v * v for v in r["ekf_vel_ned"])) for r in valid_all]
+        dead_sp = [math.sqrt(sum(v * v for v in r["dead_vel_ned"])) for r in valid_all]
+        print(f"\n  NO-TRUTH speed stats over {len(valid_all)} valid samples (m/s):")
+        print(f"    EKF  |v|: mean={sum(ekf_sp)/len(ekf_sp):5.1f}  max={max(ekf_sp):5.1f}")
+        print(f"    dead |v|: mean={sum(dead_sp)/len(dead_sp):5.1f}  max={max(dead_sp):5.1f}")
+        print("    EKF spikes >> dead => vision-velocity (EV) resets inject noise.")
 
     _fit_convention(rows)
 
@@ -369,10 +401,11 @@ def report(rows: list[dict]) -> None:
               f"   max: {d_all_max.max():.2f}   (this is the baseline the EKF must beat)")
 
     if not valid:
-        print("\n  No EKF-valid samples yet -- can't score the fused estimate.")
         if not has_truth:
-            print("  FIX: confirm you're on the VQ1 (telemetry) sim, not VQ2.")
+            print("\n  No telemetry -> can't score EKF vs truth (see speed stats above).")
+            print("  To validate against truth, run on the VQ1 (telemetry) sim.")
         else:
+            print("\n  No EKF-valid samples yet -- can't score the fused estimate.")
             print("  FIX: tilt should ZUPT-align in ~1s while stationary -- if it")
             print("       didn't, check ACCEL AT REST above (bad |a| blocks alignment).")
         print("=" * 68 + "\n")

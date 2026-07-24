@@ -97,6 +97,23 @@ __declspec(dllexport) void ekf2_get_state(Ekf2Handle *h,
 	if (valid) { *valid = h->ekf.attitude_valid() ? 1 : 0; }
 }
 
+// Estimator covariance (state variances) — how uncertain the filter thinks it
+// is. vel_var[3]=NED velocity variance (m/s)^2, pos_var[3]=NED position variance
+// (m)^2, gyro_bias_var[3] (rad/s)^2, accel_bias_var[3] (m/s^2)^2.
+__declspec(dllexport) void ekf2_get_variance(Ekf2Handle *h,
+		double vel_var[3], double pos_var[3],
+		double gyro_bias_var[3], double accel_bias_var[3])
+{
+	const matrix::Vector3f vv = h->ekf.getVelocityVariance();
+	const matrix::Vector3f pv = h->ekf.getPositionVariance();
+	const matrix::Vector3f gv = h->ekf.getGyroBiasVariance();
+	const matrix::Vector3f av = h->ekf.getAccelBiasVariance();
+	for (int i = 0; i < 3; ++i) {
+		vel_var[i] = vv(i); pos_var[i] = pv(i);
+		gyro_bias_var[i] = gv(i); accel_bias_var[i] = av(i);
+	}
+}
+
 // Diagnostics: which alignment/aiding flags are set.
 __declspec(dllexport) void ekf2_get_status(Ekf2Handle *h,
 		int *tilt_align, int *yaw_align, int *ev_vel)

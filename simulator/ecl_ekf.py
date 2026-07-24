@@ -63,6 +63,7 @@ class EclEkf:
                 ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
                 ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
             ]
+            lib.ekf2_get_variance.argtypes = [ctypes.c_void_p] + [ctypes.c_double * 3] * 4
             EclEkf._lib = lib
         self._h = EclEkf._lib.ekf2_create()
         self._pos = (ctypes.c_double * 3)()
@@ -105,6 +106,10 @@ class EclEkf:
             self._h, self._pos, self._vel, self._quat, ctypes.byref(self._valid)
         )
 
+    def position_ned(self):
+        self._refresh()
+        return (self._pos[0], self._pos[1], self._pos[2])
+
     def velocity_ned(self):
         self._refresh()
         return (self._vel[0], self._vel[1], self._vel[2])
@@ -130,6 +135,19 @@ class EclEkf:
     def valid(self) -> bool:
         self._refresh()
         return bool(self._valid.value)
+
+    def variance(self):
+        """Estimator state variances: dict with vel_ned/pos_ned/gyro_bias/accel_bias,
+        each a 3-tuple. Diagonal of the covariance — how uncertain the filter is."""
+        vv = (ctypes.c_double * 3)(); pv = (ctypes.c_double * 3)()
+        gv = (ctypes.c_double * 3)(); av = (ctypes.c_double * 3)()
+        EclEkf._lib.ekf2_get_variance(self._h, vv, pv, gv, av)
+        return {
+            "vel_ned": (vv[0], vv[1], vv[2]),
+            "pos_ned": (pv[0], pv[1], pv[2]),
+            "gyro_bias": (gv[0], gv[1], gv[2]),
+            "accel_bias": (av[0], av[1], av[2]),
+        }
 
     def status(self):
         """(tilt_align, yaw_align, ev_vel) booleans."""
