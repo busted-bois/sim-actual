@@ -104,12 +104,10 @@ class VQ2RealEnv(gym.Env):
     def step(self, action):
         action = np.clip(np.asarray(action, np.float32), -1.0, 1.0)
 
-        # act: policy angle-targets -> rates -> MAVLink, held for one decision tick.
-        ego = self.est.snapshot()
-        roll = math.radians(ego["att_deg"][0])
-        pitch = math.radians(ego["att_deg"][1])
-        rr, pr, yr, th = controller.action_to_rates(action, roll, pitch)
-        self.sim.send_attitude_rates(rr, pr, yr, th)
+        # act: policy -> absolute attitude (deg) -> quat wire (the SAME channel
+        # the GP pilot flies on), held for one decision tick.
+        roll_deg, pitch_deg, yaw_deg, th = controller.action_to_attitude(action)
+        self.sim.send_attitude_quat_deg(roll_deg, pitch_deg, yaw_deg, th)
         time.sleep(_DT)
 
         # observe.
