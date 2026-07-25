@@ -18,7 +18,6 @@ expert. Run it during a normal race; each run APPENDS to rl/data/vq2/demos.npz.
 
 from __future__ import annotations
 
-import math
 import os
 import sys
 import time
@@ -30,32 +29,13 @@ DATA = os.path.join("rl", "data", "vq2")
 DEMOS = os.path.join(DATA, "demos.npz")
 
 
-def gp_cmd_to_action(roll_deg, pitch_deg, yaw_deg, thrust, cur_roll_rad, cur_pitch_rad):
-    """GP pilot deg-command (a rate-like attitude cmd) -> our normalized action
-    [-1,1]^4 = (roll_target, pitch_target, yaw_rate, thrust), the inverse of
-    `rl.vq2.controller.action_to_rates`."""
-    from rl import spec
-    from rl.vq2 import controller as ctl
-
-    roll_rate = math.radians(roll_deg)
-    pitch_rate = math.radians(pitch_deg)
-    yaw_rate = math.radians(yaw_deg)
-    roll_target = cur_roll_rad + roll_rate / ctl.KP_ATT
-    pitch_target = cur_pitch_rad + pitch_rate / ctl.KP_ATT
-    return np.array([
-        np.clip(roll_target / ctl.MAX_TILT_RAD, -1.0, 1.0),
-        np.clip(pitch_target / ctl.MAX_TILT_RAD, -1.0, 1.0),
-        np.clip(yaw_rate / spec.MAX_YAW_RATE, -1.0, 1.0),
-        np.clip(2.0 * float(thrust) - 1.0, -1.0, 1.0),
-    ], dtype=np.float32)
-
-
 def main():
     os.environ.setdefault("AUTO_PILOT", "gp")
     os.environ.setdefault("GP_DISPLAY", "0")
 
     from simulator.setup import setup_components
     from simulator.gp_vision import _yolo_pose_estimate, best_pose_gate
+    from rl.vq2.controller import gp_cmd_to_action
     from rl.vq2.observation import ObsStacker, build_frame
 
     data = {"_quiet_vision": True}
@@ -110,9 +90,9 @@ def main():
                 continue
 
             ego = est.snapshot()
-            cur_roll = math.radians(ego["att_deg"][0])
-            cur_pitch = math.radians(ego["att_deg"][1])
-            action = gp_cmd_to_action(*cmd, cur_roll, cur_pitch)
+            # cmd = (roll_deg, pitch_deg, yaw_deg, thrust) -- absolute attitude on
+            # the quat wire, the exact form action_to_attitude sends at deploy.
+            action = gp_cmd_to_action(*cmd)
 
             pose_est = _yolo_pose_estimate(data)
             g = best_pose_gate(data)

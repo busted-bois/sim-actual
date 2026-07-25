@@ -22,7 +22,6 @@ import time
 import numpy as np
 
 from simulator.gp_estimation import GPEstimation
-from simulator.gp_vision import _yolo_pose_estimate
 from rl import spec
 from rl.sim_interface import SimInterface
 
@@ -132,7 +131,7 @@ def benchmark(cycles: int = 10, hover_s: float = 1.5) -> None:
     print(f"  re-align success:  {ok_count}/{cycles}")
     est_ep = lat.mean() + 6.0  # ~reset + a short episode
     print(f"  => ~{est_ep:.0f}s per (reset+episode). For 200k steps @50Hz ({200000/50/60:.0f} min flight)")
-    print(f"     plus resets, budget accordingly. FEASIBLE if latency is a few s and success ~100%.")
+    print("     plus resets, budget accordingly. FEASIBLE if latency a few s, success ~100%.")
     sim.close()
 
 

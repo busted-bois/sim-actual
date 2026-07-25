@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval rl2-log
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate
 
 i install:
 	uv sync
@@ -189,6 +189,13 @@ rl2-eval:
 # Verifies the drone registers gate passes and the reward function is working.
 rl2-log:
 	uv run -m rl.vq2.read_log $(ARGS)
+
+# ISOLATION TEST: fly straight at the gate with a hand-coded vision servo (GP
+# steering law) through the RL env's command path -- NO neural net. If this
+# threads gate 1, the vision->control plumbing is sound and the RL failure is the
+# learned policy. Start the race, then run.
+rl2-fly-gate:
+	uv run -m rl.vq2.fly_to_gate $(ARGS)
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:
