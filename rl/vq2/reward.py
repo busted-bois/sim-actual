@@ -2,7 +2,7 @@
 
 Pure functions (no sim/env state) so they unit-test offline. The env passes in
 the quantities it already computed for the observation. Terminal events
-(collision / crash / out-of-bounds / course-complete) end the episode as
+(collision / crash / out-of-bounds / gate-lost / course-complete) end the episode as
 `terminated`; the step/time limit ends it as `truncated` (Gymnasium semantics).
 
 All reward terms from the spec map here:
@@ -21,15 +21,17 @@ import numpy as np
 GATE_PASS_BONUS = 10.0        # + per gate cleared
 COURSE_BONUS = 30.0           # + on final gate (course complete)
 PROGRESS_K = 2.0              # + per metre closed toward the gate (also - when opening)
-FWD_SPEED_K = 0.05            # + per (m/s) forward body velocity
-SMOOTH_K = 0.02               # - per ‖Δaction‖² (jerk / oscillation)
-OSC_K = 0.01                  # - per ‖roll/pitch rate cmd‖² (attitude oscillation)
-RATE_K = 0.005               # - per ‖ang-rate cmd‖² (excessive angular rate)
-TIME_K = 0.01                 # - per step (finish quickly)
+FWD_SPEED_K = 0            # + per (m/s) forward body velocity
+SMOOTH_K = 0.00               # - per ‖Δaction‖² (jerk / oscillation)
+OSC_K = 0.00               # - per ‖roll/pitch rate cmd‖² (attitude oscillation)
+RATE_K = 0.000               # - per ‖ang-rate cmd‖² (excessive angular rate)
+TIME_K = 0.00                 # - per step (finish quickly)
 COLLISION_PEN = -20.0
 SOFT_COLLISION_PEN = -0.3     # - proximity warning (NOT terminal; nudge away)
 OOB_PEN = -20.0
 CRASH_PEN = -20.0
+GATE_LOST_PEN = -10.0         # - vision lock lost (terminal; reset episode)
+TOO_HIGH_PEN = -15.0          # - climbed far above the race corridor
 TIMEOUT_PEN = -5.0
 
 
@@ -48,6 +50,8 @@ class StepCtx:
     flipped: bool
     timeout: bool
     soft_collision: bool = False  # proximity warning -> small penalty, keep flying
+    gate_lost: bool = False       # vision lock lost long enough -> terminal reset
+    too_high: bool = False        # alt above race ceiling -> terminal reset
 
 
 def step(ctx: StepCtx):
@@ -99,10 +103,18 @@ def step(ctx: StepCtx):
         p["terminal"] = CRASH_PEN
         terminated = True
         reason = "flipped"
+    elif ctx.too_high:
+        p["terminal"] = TOO_HIGH_PEN
+        terminated = True
+        reason = "too_high"
     elif ctx.out_of_bounds:
         p["terminal"] = OOB_PEN
         terminated = True
         reason = "out_of_bounds"
+    elif ctx.gate_lost:
+        p["terminal"] = GATE_LOST_PEN
+        terminated = True
+        reason = "gate_lost"
     elif ctx.timeout:
         p["terminal"] = TIMEOUT_PEN
         truncated = True
@@ -125,4 +137,8 @@ if __name__ == "__main__":  # quick sanity
     assert tc and why == "collision" and rc < -10          # collision terminates, big -
     rs, ts, _, _, ps = step(StepCtx(**{**base, "soft_collision": True}))
     assert not ts and ps["soft_col"] < 0                   # proximity -> penalty, NOT terminal
-    print("[vq2.reward] selftest OK", round(r, 3), round(r2, 3), round(rc, 3))
+    rg, tg, _, whyg, _ = step(StepCtx(**{**base, "gate_lost": True, "visible": False, "dist": None}))
+    assert tg and whyg == "gate_lost" and rg < 0           # lost lock terminates + resets
+    rh, thh, _, whyh, _ = step(StepCtx(**{**base, "too_high": True}))
+    assert thh and whyh == "too_high" and rh < -10
+    print("[vq2.reward] selftest OK", round(r, 3), round(r2, 3), round(rc, 3), round(rg, 3))

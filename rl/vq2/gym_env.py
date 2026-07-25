@@ -37,6 +37,12 @@ _DT = 1.0 / DECISION_HZ
 # keeps flying); only a HIGH-threat event is treated as a real crash. Override
 # with env var VQ2_HARD_THREAT to recalibrate once we see live values.
 HARD_THREAT = int(os.environ.get("VQ2_HARD_THREAT", "2"))
+# Consecutive decision ticks without a visible gate before ending the episode.
+# ~0.3s @50Hz — ignores 1-frame flicker / brief post-pass gaps, resets on real lock loss.
+GATE_LOST_STEPS = int(os.environ.get("VQ2_GATE_LOST_STEPS", "15"))
+# Max altitude above spawn (m). Race gates sit near spawn altitude; above this
+# the episode ends so the policy cannot leave the corridor by climbing.
+MAX_ALT_M = float(os.environ.get("VQ2_MAX_ALT_M", "8.0"))
 
 
 class VQ2RealEnv(gym.Env):
@@ -61,6 +67,8 @@ class VQ2RealEnv(gym.Env):
         self._prev_action = np.zeros(spec.ACTION_DIM, np.float32)
         self._prev_dist: float | None = None
         self._last_collision = None
+        self._seen_gate = False
+        self._lost_steps = 0
 
     # ---- helpers ---------------------------------------------------------
     def _read(self):
@@ -81,8 +89,12 @@ class VQ2RealEnv(gym.Env):
 
     def _out_of_bounds(self, ego) -> bool:
         p = np.asarray(ego["pos_ned"], float)   # relative to spawn (drifts)
-        # loose guards; the sim COLLISION event is the primary crash signal.
-        return bool(p[2] > 4.0 or p[2] < -40.0 or math.hypot(p[0], p[1]) > 60.0)
+        # floor / lateral only — altitude ceiling is `_too_high`.
+        return bool(p[2] > 4.0 or math.hypot(p[0], p[1]) > 60.0)
+
+    def _too_high(self, ego) -> bool:
+        # NED: alt above spawn = -z.
+        return bool(-float(ego["pos_ned"][2]) > MAX_ALT_M)
 
     # ---- gym API ---------------------------------------------------------
     def reset(self, *, seed=None, options=None):
@@ -97,6 +109,8 @@ class VQ2RealEnv(gym.Env):
         self._last_threat, self._last_delta = 0, -1.0
         self._ep_parts = {}
         self._ep_min_range = float("inf")
+        self._seen_gate = False
+        self._lost_steps = 0
         ego, pose_est, conf = self._read()
         obs = self.stacker.reset(self._frame(ego, pose_est, conf, self._prev_action))
         return obs, {}
@@ -134,6 +148,7 @@ class VQ2RealEnv(gym.Env):
             self._last_threat, self._last_delta = threat, delta
         flipped = self._flipped(ego)
         oob = self._out_of_bounds(ego)
+        too_high = self._too_high(ego)
         timeout = self._steps >= self.max_steps
 
         # distance to the currently-visible gate (for progress shaping).
@@ -144,6 +159,16 @@ class VQ2RealEnv(gym.Env):
         else:
             dist, visible = None, False
 
+        # Vision lock loss -> terminal reset. Require having acquired once this
+        # episode, then GATE_LOST_STEPS consecutive misses (debounce flicker /
+        # brief post-pass gaps). Gate pass clears the lost counter.
+        if visible or gate_passed:
+            self._seen_gate = True
+            self._lost_steps = 0
+        elif self._seen_gate:
+            self._lost_steps += 1
+        gate_lost = self._seen_gate and self._lost_steps >= GATE_LOST_STEPS
+
         r, terminated, truncated, reason, parts = reward_mod.step(reward_mod.StepCtx(
             prev_dist=self._prev_dist, dist=dist, visible=visible,
             vel_body=np.asarray(ego["vel_body"], float),
@@ -151,6 +176,7 @@ class VQ2RealEnv(gym.Env):
             gate_passed=gate_passed, course_complete=course_complete,
             collision=collision, soft_collision=soft_collision,
             out_of_bounds=oob, flipped=flipped, timeout=timeout,
+            gate_lost=gate_lost, too_high=too_high,
         ))
         # accumulate per-term reward sums + closest gate range over the episode.
         for k, v in parts.items():
