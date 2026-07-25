@@ -640,7 +640,7 @@ class GPPilot:
         controller.set_control_mode("attitude_quat")
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
         print(
-            f"[gp] AndurilGP controls pilot ready (lookahead λ={LOOKAHEAD_LAMBDA}"
+            f"[gp] AndurilGP controls pilot ready (lookahead lambda={LOOKAHEAD_LAMBDA}"
             f", K_CROSS={K_CROSS}, flipz={self._gate_flipz}, gates={len(self.gate_map)})",
             flush=True,
         )
@@ -913,10 +913,46 @@ class GPPilot:
 
         active = int(self.data.get("active_gate_index", 0) or 0)
         if active > self.n_passed:
+            print(
+                f"[gp] PASSED gate {active} (was {self.n_passed})",
+                flush=True,
+            )
             self.n_passed = active
+            self.est.on_gate_passed()
 
         if not self.gate_map:
             self._refresh_gate_map()
+        # Vision landmark → ESKF update after IMU predict (Pk^- = FPF^T+Q).
+        # p = gate_map − R_wb @ gate_body (same as rl/fly2 --est).
+        if (
+            vision is not None
+            and self.gate_map
+            and 0 <= active < len(self.gate_map)
+        ):
+            try:
+                from rl.spec import quat_to_R
+
+                bx_l = float(vision.get("body_x_m", float("nan")))
+                by_l = float(vision.get("body_y_m", float("nan")))
+                bz_l = float(vision.get("body_z_m", float("nan")))
+                if (
+                    not any(math.isnan(v) for v in (bx_l, by_l, bz_l))
+                    and bx_l > 0.5
+                    and bool(vision.get("reliable", True))
+                ):
+                    map_p = np.asarray(
+                        self.gate_map[active]["pos"], dtype=float
+                    ).copy()
+                    if self._gate_flipz:
+                        map_p[2] = -map_p[2]
+                    R_wb = quat_to_R(np.asarray(snap["quat"], dtype=float))
+                    self.est.update_landmark(
+                        map_p - R_wb @ np.array([bx_l, by_l, bz_l]),
+                        range_m=bx_l,
+                    )
+            except (KeyError, TypeError, ValueError, IndexError):
+                pass
+
         delta_ned = gate_segment_delta_ned(
             self.gate_map, active, flipz=self._gate_flipz
         )
@@ -951,6 +987,7 @@ class GPPilot:
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
+        self.est.set_thrust(thrust)
         # Degree commands on the attitude-quaternion wire (original encoding).
         self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
         self._log_tick(
@@ -1219,6 +1256,7 @@ class GPPilot:
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
+        self.est.set_thrust(thrust)
         self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
         self._log_tick(
             (roll_deg, pitch_deg, yaw_deg),

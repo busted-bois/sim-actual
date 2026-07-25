@@ -129,6 +129,8 @@ class ESKF:
             return
         accel_body = np.asarray(accel_body, float)
         gyro_body = np.asarray(gyro_body, float)
+        if not (np.isfinite(accel_body).all() and np.isfinite(gyro_body).all()):
+            return
         R = quat_to_R(self.q)
         a_world = R @ accel_body + G_WORLD
 
@@ -136,16 +138,20 @@ class ESKF:
         self.v = self.v + a_world * dt
         self.q = quat_norm(quat_mult(self.q, quat_from_smallangle(gyro_body * dt)))
 
+        # Error-state transition F = I + A dt  (Fk in the discrete Kalman).
         A = np.zeros((9, 9))
         A[0:3, 3:6] = np.eye(3)
         A[3:6, 6:9] = -R @ skew(accel_body)
         A[6:9, 6:9] = -skew(gyro_body)
         F = np.eye(9) + A * dt
 
+        # Process noise Q (tunable via sigma_accel/sigma_gyro → sa/sg).
+        # Covariance time update: Pk^- = F Pk-1 F^T + Q.
         Q = np.zeros((9, 9))
         Q[3:6, 3:6] = (self.sa**2) * dt * dt * np.eye(3)
         Q[6:9, 6:9] = (self.sg**2) * dt * dt * np.eye(3)
         self.P = F @ self.P @ F.T + Q
+        self.P = 0.5 * (self.P + self.P.T)
 
     # ---- generic update (Joseph form) --------------------------------------
     def _update(
@@ -173,6 +179,7 @@ class ESKF:
         self.q = quat_norm(quat_mult(self.q, quat_from_smallangle(dx[6:9])))
         I_KH = np.eye(9) - Kk @ H
         self.P = I_KH @ self.P @ I_KH.T + Kk @ Rm @ Kk.T
+        self.P = 0.5 * (self.P + self.P.T)
         return True
 
     def update_position(self, p_meas, sigma=0.5, gate: bool = True) -> bool:
