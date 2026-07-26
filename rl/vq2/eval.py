@@ -9,11 +9,11 @@ import argparse
 
 from stable_baselines3 import PPO
 
-from rl.vq2.gym_env import VQ2RealEnv
+from rl.vq2.gym_env import DEFAULT_NUM_GATES, VQ2RealEnv
 
 
 def evaluate(model_path: str, episodes: int = 5, seconds: float = 30.0,
-             gates: int = 6) -> None:
+             gates: int = DEFAULT_NUM_GATES) -> None:
     env = VQ2RealEnv(max_seconds=seconds, num_gates=gates)
     model = PPO.load(model_path, device="cpu")
     passed_hist = []
@@ -63,6 +63,6 @@ if __name__ == "__main__":
     ap.add_argument("--model", type=str, default="rl/data/vq2/vq2_ppo.zip")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--seconds", type=float, default=30.0)
-    ap.add_argument("--gates", type=int, default=6)
+    ap.add_argument("--gates", type=int, default=DEFAULT_NUM_GATES)
     args = ap.parse_args()
     evaluate(args.model, args.episodes, args.seconds, args.gates)

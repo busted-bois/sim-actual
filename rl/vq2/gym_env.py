@@ -25,12 +25,15 @@ from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import _yolo_pose_estimate, best_pose_gate
 from rl import spec
 from rl.sim_interface import SimInterface
-from rl.vq2 import controller, reward as reward_mod
+from rl.vq2 import controller, reward as reward_mod, success
 from rl.vq2.observation import ObsStacker, build_frame, POLICY_OBS_DIM
 from rl.vq2.reset import GatePassTracker, reset_episode
 
 DECISION_HZ = 50
 _DT = 1.0 / DECISION_HZ
+
+# The VQ2 course has 17 gates (NOT 6).
+DEFAULT_NUM_GATES = 17
 
 # MAVLink COLLISION.threat_level: 0 NONE, 1 LOW, 2 HIGH. The sim streams these as
 # PROXIMITY warnings near structures (the working GP pilot ignores low ones and
@@ -42,8 +45,9 @@ HARD_THREAT = int(os.environ.get("VQ2_HARD_THREAT", "2"))
 class VQ2RealEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, max_seconds: float = 30.0, num_gates: int = 6,
-                 ip: str = "127.0.0.1", mav_port: int = 14550):
+    def __init__(self, max_seconds: float = 30.0, num_gates: int = DEFAULT_NUM_GATES,
+                 ip: str = "127.0.0.1", mav_port: int = 14550,
+                 record_success: bool = False):
         super().__init__()
         self.sim = SimInterface(ip=ip, mav_port=mav_port)
         self.sim.data["_quiet_vision"] = True   # silence per-frame [vision] GATE spam
@@ -53,6 +57,9 @@ class VQ2RealEnv(gym.Env):
         self.stacker = ObsStacker()
         self.max_steps = int(max_seconds * DECISION_HZ)
         self.num_gates = num_gates
+        # When True, the instant the policy passes a NEW gate this episode, the
+        # segment start->that-gate is saved permanently (incremental BC data).
+        self.record_success = record_success
 
         self.action_space = spaces.Box(-1.0, 1.0, (spec.ACTION_DIM,), np.float32)
         self.observation_space = spaces.Box(-10.0, 10.0, (POLICY_OBS_DIM,), np.float32)
@@ -97,8 +104,14 @@ class VQ2RealEnv(gym.Env):
         self._last_threat, self._last_delta = 0, -1.0
         self._ep_parts = {}
         self._ep_min_range = float("inf")
+        # success-segment buffer (start -> current), saved on each new gate pass.
+        self._seg_obs, self._seg_act = [], []
+        self._seg_rew, self._seg_simus, self._seg_gidx = [], [], []
+        self._ep_max_gate = 0
+        self._ep_collisions = 0
         ego, pose_est, conf = self._read()
         obs = self.stacker.reset(self._frame(ego, pose_est, conf, self._prev_action))
+        self._last_obs = obs                 # the obs the policy will condition on
         return obs, {}
 
     def step(self, action):
@@ -162,6 +175,33 @@ class VQ2RealEnv(gym.Env):
         self._prev_action = action
 
         obs = self.stacker.push(self._frame(ego, pose_est, conf, action))
+
+        # ---- incremental success recording (training only) ----------------
+        # Buffer (obs the policy saw, action it took). On passing a NEW gate,
+        # save the whole start->gate segment IMMEDIATELY (not at episode end).
+        if self.record_success:
+            imu = self.sim.data.get("imu") or {}
+            self._seg_obs.append(self._last_obs)
+            self._seg_act.append(action)
+            self._seg_rew.append(float(r))
+            self._seg_simus.append(int(imu.get("time_us") or 0))
+            self._seg_gidx.append(int(self.sim.data.get("active_gate_index", -1) or -1))
+            self._ep_collisions += int(collision)
+            if gate_passed and self.gates.n_passed > self._ep_max_gate:
+                self._ep_max_gate = self.gates.n_passed
+                try:
+                    path = success.save_segment(
+                        self.gates.n_passed, self._seg_obs, self._seg_act,
+                        reward=self._seg_rew, sim_us=self._seg_simus,
+                        gate_index=self._seg_gidx,
+                        gates_reached=self.gates.n_passed, collisions=self._ep_collisions)
+                    print(f"[vq2.env] SAVED success segment -> {path} "
+                          f"({len(self._seg_act)} steps, {self._ep_collisions} collisions)",
+                          flush=True)
+                except Exception as exc:
+                    print(f"[vq2.env] segment save failed: {exc}", flush=True)
+        self._last_obs = obs
+
         p = np.asarray(ego["pos_ned"], float)
         info = {"reason": reason, "gates_passed": self.gates.n_passed,
                 "steps": self._steps,
