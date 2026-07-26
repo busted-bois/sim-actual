@@ -70,7 +70,7 @@ def _pose_xyz(sim: SimInterface):
     return (float(p["body_x_m"]), float(p["body_y_m"]), float(p["body_z_m"]))
 
 
-def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = False):
+def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = True):
     path = _resolve(name)
     d = np.load(path)
     act = d["act"].astype(np.float32)
@@ -127,14 +127,21 @@ def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = Fal
 
         t0 = time.time()
         go_sim = None                       # sim clock captured at the first command
+        guard_fires = 0                     # commands sent WITHOUT reaching their sim-time
+        max_wait = 0.0
+        DEAD_SIM_S = 3.0                    # only escape a TRULY frozen sim clock
         for i in range(n):
             if not sim.data.get("armed", False):
                 sim.arm()
 
-            # ---- wait until the SIM clock reaches this command's recorded offset ----
+            # ---- send when the SIM clock reaches this command's recorded offset ----
+            # STRICT: wait until the sim clock actually crosses the target, so the
+            # command lands at the SAME sim-time every run (the old 0.5 s give-up
+            # fired early at inconsistent sim-times -> the 466 ms run-to-run drift).
+            # Only a multi-second frozen clock breaks the wait, and that's counted.
             if use_sim_time:
                 target = int(sim_us[i]) - base_us          # us since first command
-                wall_guard = time.time()
+                w0 = time.time()
                 while True:
                     cs = _cur_sim_us(sim)
                     if cs is not None:
@@ -142,9 +149,11 @@ def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = Fal
                             go_sim = cs                    # t=0 of the replay, in sim-time
                         if cs - go_sim >= target:
                             break
-                    if time.time() - wall_guard > 0.5:     # sim clock stalled -> don't hang
+                    if time.time() - w0 > DEAD_SIM_S:      # sim clock truly frozen
+                        guard_fires += 1
                         break
-                    time.sleep(0.0005)
+                    time.sleep(0.001)                      # yields GIL so RX keeps updating IMU
+                max_wait = max(max_wait, time.time() - w0)
 
             roll_deg, pitch_deg, yaw_deg, thrust = controller.action_to_attitude(act[i])
             sim.send_attitude_quat_deg(roll_deg, pitch_deg, yaw_deg, thrust)
@@ -170,6 +179,11 @@ def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = Fal
                 time.sleep(float(dts[i]))
         live_gate = sim.data.get("active_gate_index")
         print(f"[rl2-run] replay done. final live gate index = {live_gate}", flush=True)
+        if use_sim_time:
+            print(f"[rl2-run] scheduler: {guard_fires}/{n} commands hit the "
+                  f"{DEAD_SIM_S:.0f}s frozen-sim guard, max single wait {max_wait:.2f}s. "
+                  f"0 guard-fires => the sim-time schedule is deterministic (any "
+                  f"remaining run-to-run diff is the sim itself, not us).", flush=True)
     except KeyboardInterrupt:
         print("\n[rl2-run] stopped.", flush=True)
     finally:
@@ -211,8 +225,9 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="",
                     help="label this replay (saves <name>_replay_<tag>.npz) to keep "
                          "multiple replays of the same save for replay-vs-replay diff")
-    ap.add_argument("--no-yolo", action="store_true",
-                    help="disable YOLO + camera RX during replay (removes GPU/vision "
-                         "load as a variable in the timing-jitter test)")
+    ap.add_argument("--yolo", action="store_true",
+                    help="keep YOLO + camera RX ON during replay. Default is OFF: "
+                         "replay ignores vision, and YOLO's GPU load perturbs sim "
+                         "timing run-to-run.")
     args = ap.parse_args()
-    replay(args.name, wait_race=not args.no_wait, tag=args.tag, no_yolo=args.no_yolo)
+    replay(args.name, wait_race=not args.no_wait, tag=args.tag, no_yolo=not args.yolo)
