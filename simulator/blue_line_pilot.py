@@ -270,6 +270,7 @@ def compute_blueline_guidance(
         # not that the key was missing.
         dbg["cx_cent"] = float(vision.get("cx_centroid", float("nan")))
         dbg["hdg_cent"] = float(vision.get("heading_centroid", float("nan")))
+        dbg["cx_edge"] = float(vision.get("cx_edge", float("nan")))
         dbg["bl_src"] = str(vision.get("source", ""))
         # EMA'd lateral rate for the roll D-term (bounded contribution).
         prev_cx = state.get("prev_cx")
@@ -575,8 +576,8 @@ class BlueLinePilot:
             self._log = open(path, "w", newline="")
             self._log_wr = csv.writer(self._log)
             self._log_wr.writerow(
-                "t mode bl_src cx cx_cent cy hdg_deg hdg_cent_deg dcx turn_mag "
-                "gate_brg gate_rng vX v_target "
+                "t mode bl_src cx cx_cent cx_edge cy hdg_deg hdg_cent_deg dcx "
+                "turn_mag gate_brg gate_rng vX v_target "
                 "pitch_des des_roll yaw_err cmd_roll cmd_pitch cmd_yaw thrust "
                 "att_roll att_pitch gz_dps lost_s n_passed".split()
             )
@@ -604,7 +605,10 @@ class BlueLinePilot:
             gr = dbg.get("gate_range")
             self._log_wr.writerow(
                 [f"{now:.3f}", str(dbg.get("mode", "")), str(dbg.get("bl_src", ""))]
-                + [f"{dbg.get(k, float('nan')):.3f}" for k in ("cx", "cx_cent", "cy")]
+                + [
+                    f"{dbg.get(k, float('nan')):.3f}"
+                    for k in ("cx", "cx_cent", "cx_edge", "cy")
+                ]
                 + [
                     f"{math.degrees(dbg.get('hdg', 0.0)):.2f}",
                     f"{math.degrees(dbg.get('hdg_cent', 0.0)):.2f}",

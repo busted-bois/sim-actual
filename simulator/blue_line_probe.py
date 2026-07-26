@@ -45,10 +45,12 @@ def _jitter(vals: list[float]) -> float:
 class _Stats:
     """Accumulates per-frame estimates from either live or replay input."""
 
+    # Score the estimators themselves, never the flown value: in shadow mode
+    # cx_norm IS the centroid, so comparing it would report zero disagreement.
     _SERIES = (
-        ("cx  edge", "cx_norm"),
+        ("cx  edge", "cx_edge"),
         ("cx  cent", "cx_centroid"),
-        ("hdg edge", "heading_err"),
+        ("hdg edge", "heading_edge"),
         ("hdg cent", "heading_centroid"),
     )
 
@@ -64,10 +66,13 @@ class _Stats:
         if not bl.get("found"):
             return
         self.found += 1
-        for _, key in self._SERIES:
-            self.series[key].append(float(bl[key]))
-        self.rows.append(int(bl["edge_rows"]))
         self.src[str(bl.get("source", "?"))] += 1
+        self.rows.append(int(bl["edge_rows"]))
+        vals = [float(bl.get(key, float("nan"))) for _, key in self._SERIES]
+        if any(v != v for v in vals):
+            return  # edge not computed on this frame — nothing to compare
+        for (_, key), v in zip(self._SERIES, vals):
+            self.series[key].append(v)
 
     def report(self) -> None:
         print("\n=== blue-line estimator A/B ===", flush=True)
@@ -81,14 +86,17 @@ class _Stats:
             return
         # Headline: how often did the edge scan actually track? A high fallback
         # share means the scan is quitting, not that it is estimating badly.
-        edge_n = self.src.get("edge", 0)
+        tracked = self.src.get("edge", 0) + self.src.get("shadow", 0)
         print(
-            f"estimator used: edge={edge_n} "
-            f"({100.0 * edge_n / self.found:.0f}%) "
-            f"centroid-fallback={self.src.get('centroid', 0)} "
+            f"source: {dict(self.src)} — edge tracked {tracked}/{self.found} "
+            f"({100.0 * tracked / self.found:.0f}%), "
+            f"fell back {self.src.get('centroid', 0)} "
             f"({100.0 * self.src.get('centroid', 0) / self.found:.0f}%)",
             flush=True,
         )
+        if not self.series["cx_edge"]:
+            print("edge estimator never ran — BL_INNER_EDGE=0?", flush=True)
+            return
         tracked = [r for r in self.rows if r > 0]
         if tracked:
             print(
@@ -103,7 +111,7 @@ class _Stats:
                 f"jitter={_jitter(vals):.4f}",
                 flush=True,
             )
-        edge, cent = self.series["cx_norm"], self.series["cx_centroid"]
+        edge, cent = self.series["cx_edge"], self.series["cx_centroid"]
         disagree = [abs(a - b) for a, b in zip(edge, cent)]
         print(
             f"|cx_edge - cx_cent|: mean={st.mean(disagree):.4f} "
