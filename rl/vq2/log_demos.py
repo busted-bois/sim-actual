@@ -18,6 +18,7 @@ expert. Run it during a normal race; each run APPENDS to rl/data/vq2/demos.npz.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -27,9 +28,10 @@ import numpy as np
 
 DATA = os.path.join("rl", "data", "vq2")
 DEMOS = os.path.join(DATA, "demos.npz")
+SAVES = os.path.join(DATA, "saves")   # per-run replayable trajectories
 
 
-def main():
+def main(name: str | None = None):
     os.environ.setdefault("AUTO_PILOT", "gp")
     os.environ.setdefault("GP_DISPLAY", "0")
 
@@ -58,9 +60,11 @@ def main():
     controller.set_attitude_quat_deg = _tapped
 
     stacker = ObsStacker()
-    obs_log, act_log = [], []
+    obs_log, act_log, t_log, gate_log = [], [], [], []
     prev_action = np.zeros(4, np.float32)
     started = False
+    if name is None:
+        name = f"demo_{int(time.time())}"
 
     print("Arming GP pilot; start the race. Logging demos after GO (Ctrl+C to stop).",
           flush=True)
@@ -103,6 +107,8 @@ def main():
 
             obs_log.append(obs)
             act_log.append(action)
+            t_log.append(time.time())
+            gate_log.append(int(data.get("active_gate_index", -1) or -1))
             prev_action = action
 
             # stop when the course completes (all gates cleared).
@@ -115,12 +121,31 @@ def main():
         print("\n[log_demos] stopped.", flush=True)
     finally:
         controller.set_attitude_quat_deg = _orig
-        _save(obs_log, act_log)
+        _save_run(name, obs_log, act_log, t_log, gate_log)   # replayable, per-run
+        _save(obs_log, act_log)                              # append to BC bootstrap
         for k in ("ts_loop", "mavlink_rx", "vision_rx"):
             try:
                 comps[k].get_thread_for_join().join(timeout=2.0)
             except Exception:
                 pass
+
+
+def _save_run(name, obs_log, act_log, t_log, gate_log):
+    """Save ONE run as a standalone, replayable trajectory (`rl2-run <name>`)."""
+    if not act_log:
+        return None
+    os.makedirs(SAVES, exist_ok=True)
+    path = os.path.join(SAVES, f"{name}.npz")
+    np.savez(
+        path,
+        obs=np.asarray(obs_log, np.float32),
+        act=np.asarray(act_log, np.float32),
+        t=np.asarray(t_log, np.float64),           # per-step wall-clock (for replay timing)
+        gate_index=np.asarray(gate_log, np.int32),  # active gate at each step
+    )
+    print(f"\n[log_demos] trajectory saved -> {path}  ({len(act_log)} steps)", flush=True)
+    print(f"[log_demos] REPLAY IT WITH:  make rl2-run ARGS=\"{name}\"", flush=True)
+    return path
 
 
 def _save(obs_log, act_log):
@@ -140,4 +165,8 @@ def _save(obs_log, act_log):
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--name", default=None,
+                    help="save name for the replayable trajectory (default: demo_<ts>)")
+    args = ap.parse_args()
+    main(args.name)

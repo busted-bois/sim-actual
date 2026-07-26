@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate
 
 i install:
 	uv sync
@@ -168,9 +168,16 @@ fly-policy:
 rl2-reset-bench:
 	uv run -m rl.vq2.reset --cycles $(or $(CYCLES),10)
 
-# Collect BC demos by taping the proven GP pilot flying the real sim (appends).
+# Collect BC demos by taping the proven GP pilot flying the real sim. Saves a
+# standalone replayable trajectory to rl/data/vq2/saves/<name>.npz AND appends to
+# the BC bootstrap (demos.npz). Name it:  make rl2-log-demos ARGS="--name run1"
 rl2-log-demos:
-	uv run -m rl.vq2.log_demos
+	uv run -m rl.vq2.log_demos $(ARGS)
+
+# Replay a saved trajectory's ACTIONS open-loop (verifies the save reproduces the
+# recorded flight). Start/restart the race, then:  make rl2-run ARGS="<name>"
+rl2-run:
+	uv run -m rl.vq2.run_traj $(ARGS)
 
 # Behaviour-clone a PPO policy on the demos -> rl/data/vq2/policy_bc.zip (no sim).
 rl2-train-bc:
