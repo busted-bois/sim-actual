@@ -1,12 +1,30 @@
 """Classical HSV dual-cyan corridor detection (no YOLO).
 
-Two parallel blue ribbons define left/right track edges. Near-field ROI
-centroids give lateral/vertical corridor error; far ROI gives heading.
+Two parallel blue ribbons define left/right track edges.
+
+Two estimators run on the same mask:
+
+* centroid (legacy) — split the frame at w//2, take each side's blob centroid,
+  corridor mid = midpoint of the two centroids.
+* inner-edge (default) — per-row scanlines track each ribbon's INNER edge from
+  the bottom row upward; corridor mid = midpoint of the inner edges, fitted by
+  least squares over the scanned rows.
+
+Inner edges are the better geometric cue: the centroid of a ribbon moves with
+its apparent THICKNESS, so unequal bloom (one ribbon nearer/brighter) shifts
+the corridor mid even when the drone is centered. An inner edge is a
+cyan->road HUE transition, unlike the outer edge's exposure-sensitive
+cyan->black glow fade. Scanline tracking also drops the fixed w//2 split,
+which mis-assigns pixels whenever the drone banks or the corridor curves.
+
+BL_INNER_EDGE=0 reverts to the centroid estimator. Either way both values are
+reported (cx_norm vs cx_centroid) so a live run is a direct A/B.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -21,6 +39,23 @@ _FAR_FRAC = 0.55  # upper fraction used for heading (from top)
 _MIN_SIDE_AREA = 80.0
 _MIN_TOTAL_AREA = 120.0
 
+# --- inner-edge scanline parameters (all fractions of frame size) ------------
+_SCAN_ROWS = 28  # sampled rows, bottom -> up
+_SCAN_TOP_FRAC = 0.35  # stop here; above the vanishing point there is no ribbon
+_MIN_RUN_FRAC = 0.005  # ignore cyan runs thinner than this (speckle, reflections)
+_MAX_JUMP_FRAC = 0.10  # per-row inner-edge continuity limit
+_MAX_MISS_ROWS = 4  # consecutive unusable rows before the scan stops
+_MIN_FIT_ROWS = 4  # samples needed for a center fit
+_MIN_FIT_SPAN_FRAC = 0.12  # vertical span needed before the slope means anything
+# Row where cx is evaluated = middle of the near band, so BOTH estimators report
+# cx at the same image row and the A/B stays comparable if _NEAR_FRAC is retuned.
+_CX_REF_FRAC = 1.0 - _NEAR_FRAC / 2.0
+
+
+def _norm(v: float, half: float) -> float:
+    """Pixel coord -> normalized image error, -1 .. +1 (clamped)."""
+    return float(np.clip((v - half) / half, -1.5, 1.5))
+
 
 @dataclass(frozen=True)
 class BlueLineEstimate:
@@ -32,6 +67,25 @@ class BlueLineEstimate:
     left_found: bool = False
     right_found: bool = False
     frame_id: int = 0
+    # TODO(inner-edge-ab): cx_centroid/heading_centroid/edge_rows are scaffolding
+    # for the inner-edge-vs-centroid comparison — delete them (and the matching
+    # bl_log columns + probe reads) once the A/B concludes. `source` stays: it is
+    # the only signal that the scan silently fell back to the centroid path.
+    source: str = "centroid"  # "edge" | "centroid"
+    cx_centroid: float = 0.0
+    heading_centroid: float = 0.0
+    edge_rows: int = 0
+    # Per-row scan samples (y, x_left_inner|None, x_right_inner|None, x_center),
+    # for the live overlay only — not published in estimate_to_dict.
+    samples: tuple = field(default=(), repr=False)
+
+
+def _inner_edge_enabled() -> bool:
+    return os.environ.get("BL_INNER_EDGE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
 
 
 def cyan_mask(bgr: np.ndarray) -> np.ndarray:
@@ -72,6 +126,153 @@ def _side_centroids(
     if right is not None:
         right = (right[0] + mid, right[1], right[2])
     return left, right
+
+
+# --- inner-edge scanline estimator -------------------------------------------
+
+
+def _row_runs(row: np.ndarray, min_len: int) -> list[tuple[int, int]]:
+    """Contiguous nonzero runs [start, end] inclusive, ascending, >= min_len.
+
+    Zero-padding both ends makes every rise pair with a fall, so runs touching
+    the frame edge need no special casing.
+    """
+    d = np.diff(np.concatenate(([0], (row > 0).astype(np.int8), [0])))
+    starts = np.flatnonzero(d == 1)
+    ends = np.flatnonzero(d == -1)  # exclusive
+    return [(int(s), int(e) - 1) for s, e in zip(starts, ends) if e - s >= min_len]
+
+
+def _seed_gap(
+    runs: list[tuple[int, int]], center_x: float
+) -> tuple[float, float] | None:
+    """Corridor = the gap BETWEEN two ribbons; seed on the one we fly inside.
+
+    Prefers the inter-run gap containing the image center (the drone normally
+    sits between the ribbons), else the widest gap. Unlike a w//2 split this
+    still works when both ribbons are on the same side of the frame.
+    """
+    gaps = [(float(a[1]), float(b[0])) for a, b in zip(runs, runs[1:]) if b[0] > a[1]]
+    if not gaps:
+        return None
+    return max(gaps, key=lambda g: (g[0] <= center_x <= g[1], g[1] - g[0]))
+
+
+def _nearest(cands: list[float], predicted: float, max_jump: float) -> float | None:
+    """Candidate closest to `predicted`, or None if none is within max_jump."""
+    return min(
+        (c for c in cands if abs(c - predicted) <= max_jump),
+        key=lambda c: abs(c - predicted),
+        default=None,
+    )
+
+
+def _scan_inner_edges(
+    mask: np.ndarray,
+) -> list[tuple[float, float | None, float | None, float]]:
+    """Track both inner edges bottom-up. Returns (y, xl, xr, xc) per row.
+
+    xl/xr are None when that side was not measured on the row (xc is then
+    carried across from the tracked half-width). Continuity against the
+    previous row is what rejects detached blobs — floor reflections, and the
+    gate's own cyan panel near the vanishing point.
+    """
+    h, w = mask.shape[:2]
+    min_len = max(3, int(w * _MIN_RUN_FRAC))
+    max_jump = max(4.0, w * _MAX_JUMP_FRAC)
+    y_top = int(h * _SCAN_TOP_FRAC)
+    y_bot = h - 1
+    step = max(1, (y_bot - y_top) // max(_SCAN_ROWS - 1, 1))
+
+    samples: list[tuple[float, float | None, float | None, float]] = []
+    center_p: float | None = None
+    half_p = 0.0
+    miss = 0
+
+    for y in range(y_bot, y_top - 1, -step):
+        runs = _row_runs(mask[y], min_len)
+        xl = xr = None
+        if center_p is None:
+            gap = _seed_gap(runs, w * 0.5)
+            if gap is not None:
+                xl, xr = gap
+        elif runs:
+            # Predict this row's inner edges from the row below, then take the
+            # nearest candidate on each side.
+            pred_l, pred_r = center_p - half_p, center_p + half_p
+            xl = _nearest([float(r[1]) for r in runs], pred_l, max_jump)
+            xr = _nearest([float(r[0]) for r in runs], pred_r, max_jump)
+            # A single run gives one edge, never both: drop the weaker match.
+            if xl is not None and xr is not None and xr <= xl:
+                if abs(xl - pred_l) <= abs(xr - pred_r):
+                    xr = None
+                else:
+                    xl = None
+
+        if xl is not None and xr is not None:
+            center = 0.5 * (xl + xr)
+            half_p = 0.5 * (xr - xl)
+        elif xl is not None and half_p > 0.0:
+            center = xl + half_p
+        elif xr is not None and half_p > 0.0:
+            center = xr - half_p
+        else:
+            miss += 1
+            if miss >= _MAX_MISS_ROWS:
+                break
+            continue
+
+        miss = 0
+        center_p = center
+        samples.append((float(y), xl, xr, center))
+
+    return samples
+
+
+def _estimate_inner_edge(mask: np.ndarray) -> dict | None:
+    """cx/heading/width from the inner-edge scan, or None if it did not track."""
+    h, w = mask.shape[:2]
+    samples = _scan_inner_edges(mask)
+    if len(samples) < _MIN_FIT_ROWS:
+        return None
+
+    ys = np.array([s[0] for s in samples], dtype=np.float64)
+    xs = np.array([s[3] for s in samples], dtype=np.float64)
+    slope, intercept = np.polyfit(ys, xs, 1)
+
+    y_ref = h * _CX_REF_FRAC
+    mid_x = float(slope * y_ref + intercept)
+
+    # Heading from the fitted slope. The legacy form is
+    # arctan2(far_mid_x - near_mid_x, 0.3h); over a 0.3h baseline a corridor of
+    # slope b (dx per dy, y down) gives dx = -b*0.3h, so this is the SAME
+    # quantity — just least-squares over ~28 rows instead of two centroids.
+    # Pilot gains (K_*_HDG) therefore need no retuning.
+    heading_err = 0.0
+    if float(ys.max() - ys.min()) >= h * _MIN_FIT_SPAN_FRAC:
+        heading_err = float(np.arctan(-slope))
+
+    # Single pass: per-side measurement counts, plus the two-sided sample
+    # closest to y_ref (corridor width is read off that row).
+    n_left = n_right = 0
+    nearest = None
+    for s in samples:
+        n_left += s[1] is not None
+        n_right += s[2] is not None
+        if s[1] is not None and s[2] is not None:
+            if nearest is None or abs(s[0] - y_ref) < abs(nearest[0] - y_ref):
+                nearest = s
+    width_norm = 0.0 if nearest is None else float(abs(nearest[2] - nearest[1]) / w)
+
+    return {
+        "cx_norm": _norm(mid_x, w / 2.0),
+        "heading_err": heading_err,
+        "width_norm": width_norm,
+        "left_found": n_left >= 2,
+        "right_found": n_right >= 2,
+        "rows": len(samples),
+        "samples": tuple(samples),
+    }
 
 
 def detect_blue_lines(
@@ -131,8 +332,8 @@ def detect_blue_lines(
     else:
         alt_y = mid_y
 
-    cx_norm = float(np.clip((mid_x - half_w) / half_w, -1.5, 1.5))
-    cy_norm = float(np.clip((alt_y - half_h) / half_h, -1.5, 1.5))
+    cx_norm = _norm(mid_x, half_w)
+    cy_norm = _norm(alt_y, half_h)
 
     # Heading: vanishing of far mid relative to near mid (image x).
     heading_err = 0.0
@@ -152,6 +353,24 @@ def detect_blue_lines(
                 np.arctan2(right_f[0] - right_n[0], max(right_n[1] - right_f[1], 1.0))
             )
 
+    # cy (altitude) always stays on the centroid path — only the lateral/heading
+    # cues move to inner edges, so a live A/B changes one thing at a time.
+    cx_centroid, heading_centroid = cx_norm, heading_err
+    source = "centroid"
+    edge_rows = 0
+    samples: tuple = ()
+    if _inner_edge_enabled():
+        edge = _estimate_inner_edge(mask)
+        if edge is not None:  # else: keep the centroid result as the backstop
+            cx_norm = edge["cx_norm"]
+            heading_err = edge["heading_err"]
+            width_norm = edge["width_norm"]
+            left_found = edge["left_found"]
+            right_found = edge["right_found"]
+            edge_rows = edge["rows"]
+            samples = edge["samples"]
+            source = "edge"
+
     est = BlueLineEstimate(
         found=True,
         cx_norm=cx_norm,
@@ -161,6 +380,11 @@ def detect_blue_lines(
         left_found=left_found,
         right_found=right_found,
         frame_id=frame_id,
+        source=source,
+        cx_centroid=cx_centroid,
+        heading_centroid=heading_centroid,
+        edge_rows=edge_rows,
+        samples=samples,
     )
     return est, (mask if return_mask else None)
 
@@ -175,6 +399,10 @@ def estimate_to_dict(est: BlueLineEstimate) -> dict:
         "left_found": est.left_found,
         "right_found": est.right_found,
         "frame_id": est.frame_id,
+        "source": est.source,
+        "cx_centroid": est.cx_centroid,
+        "heading_centroid": est.heading_centroid,
+        "edge_rows": est.edge_rows,
     }
 
 
@@ -192,13 +420,27 @@ def annotate_blue_lines(
     h, w = out.shape[:2]
     hud = "no blue line"
     if est.found:
+        # Tracked inner edges + fitted corridor mid, so the scan can be checked
+        # by eye against the ribbons it is supposed to be riding.
+        for y, xl, xr, xc in est.samples:
+            if xl is not None:
+                cv2.circle(out, (int(xl), int(y)), 2, (0, 0, 255), -1)
+            if xr is not None:
+                cv2.circle(out, (int(xr), int(y)), 2, (0, 255, 0), -1)
+            cv2.circle(out, (int(xc), int(y)), 2, (255, 255, 255), -1)
+
         cx = int((est.cx_norm * 0.5 + 0.5) * w)
         cy = int((est.cy_norm * 0.5 + 0.5) * h)
         cv2.circle(out, (cx, cy), 6, (0, 255, 255), -1)
         cv2.line(out, (w // 2, h), (cx, cy), (0, 255, 255), 2)
+        # Legacy centroid mid (magenta) — the live A/B against the yellow edge mid.
+        cxc = int((est.cx_centroid * 0.5 + 0.5) * w)
+        cv2.drawMarker(out, (cxc, cy), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
         hud = (
-            f"BLUE cx={est.cx_norm:+.2f} cy={est.cy_norm:+.2f} "
-            f"hdg={est.heading_err:+.2f} L={int(est.left_found)} R={int(est.right_found)}"
+            f"{est.source.upper()} cx={est.cx_norm:+.2f} (cent {est.cx_centroid:+.2f}) "
+            f"cy={est.cy_norm:+.2f} hdg={est.heading_err:+.2f} "
+            f"(cent {est.heading_centroid:+.2f}) rows={est.edge_rows} "
+            f"L={int(est.left_found)} R={int(est.right_found)}"
         )
     cv2.putText(
         out,
