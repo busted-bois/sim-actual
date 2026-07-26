@@ -63,6 +63,8 @@ def main(name: str | None = None):
     obs_log, act_log, t_log, gate_log = [], [], [], []
     prev_action = np.zeros(4, np.float32)
     started = False
+    flying = False           # latch: skip the countdown pad-hold (thrust ~0)
+    FLIGHT_THRUST_MIN = 0.05
     if name is None:
         name = f"demo_{int(time.time())}"
 
@@ -90,6 +92,15 @@ def main(name: str | None = None):
             est = getattr(pilot, "est", None)
             cmd = last["cmd"]
             if est is None or cmd is None:
+                time.sleep(1 / 90.0)
+                continue
+
+            # Skip the countdown pad-hold: the GP pilot sends (0,0,0,0) until GO,
+            # which would save ~6 s of dead frames. Start recording at the first
+            # real flight command (thrust up) and latch on.
+            if not flying and float(cmd[3]) > FLIGHT_THRUST_MIN:
+                flying = True
+            if not flying:
                 time.sleep(1 / 90.0)
                 continue
 

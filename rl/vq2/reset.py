@@ -26,6 +26,69 @@ from rl import spec
 from rl.sim_interface import SimInterface
 
 
+class RaceGo:
+    """Faithful copy of GPPilot's WAIT_FOR_START -> GO gate (simulator/gp_pilot.py).
+
+    `data["race_started"]` flips at countdown START -- flying then tips the drone
+    over. Real GO waits for a FRESH countdown that has ELAPSED, with the physics
+    clock live:
+      * anchor sim_ms on the first race_status; re-anchor on a sim clock reset
+        (Restart Race), matching the pilot.
+      * race_fresh = start_ms > 0 and start_ms >= anchor  (not a stale finished race)
+      * countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
+      * physics_live = HIGHRES_IMU timestamp still advancing (frozen clock = idle
+        sim; setpoints do nothing and release mid-command tips it over at launch).
+    Prints the same [WAIT] lines as `make control-flight`. Call each tick."""
+
+    CLOCK_RESET_SLACK_MS = 500
+    IMU_FROZEN_S = 2.0
+    DEBUG_EVERY_N = 45
+
+    def __init__(self, debug: bool = True):
+        self._anchor = None
+        self._imu_ts_seen = None
+        self._imu_ts_wall = 0.0
+        self._debug = debug
+        self._tick = 0
+
+    def _physics_live(self, data: dict) -> bool:
+        imu = data.get("imu")
+        now = time.time()
+        if imu is not None:
+            ts = imu.get("time_us") or imu.get("time_usec")
+            if ts != self._imu_ts_seen:
+                self._imu_ts_seen = ts
+                self._imu_ts_wall = now
+        return self._imu_ts_wall > 0.0 and now - self._imu_ts_wall <= self.IMU_FROZEN_S
+
+    def __call__(self, data: dict) -> bool:
+        self._tick += 1
+        physics_live = self._physics_live(data)
+        race = data.get("race_status")
+        if not race:
+            if self._debug and self._tick % self.DEBUG_EVERY_N == 0:
+                print("[WAIT] No race_status yet -- holding...", flush=True)
+            return False
+        sim_ms = int(race.get("sim_boot_time_ms", 0) or 0)
+        start_ms = int(race.get("race_start_boot_time_ms", -1) or -1)
+        if self._anchor is None:
+            self._anchor = sim_ms
+            print(f"[WAIT] Anchor set: sim_ms={sim_ms}", flush=True)
+        if sim_ms < self._anchor - self.CLOCK_RESET_SLACK_MS:
+            print(f"[WAIT] Sim clock reset (sim_ms={sim_ms} < anchor={self._anchor}) "
+                  "-- re-anchoring for the new race.", flush=True)
+            self._anchor = None                      # re-anchor next tick (prints again)
+            return False
+        finish_ns = int(race.get("race_finish_time_ns", -1) or -1)
+        race_fresh = start_ms > 0 and start_ms >= self._anchor
+        countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
+        go = countdown_done and physics_live
+        if self._debug and self._tick % self.DEBUG_EVERY_N == 0:
+            print(f"[WAIT] sim_ms={sim_ms} race_start={start_ms} finish_ns={finish_ns} "
+                  f"fresh={race_fresh} go={go}", flush=True)
+        return go
+
+
 def _est_ready(sim: SimInterface, est: GPEstimation) -> bool:
     """Fresh IMU + camera flowing and GPEstimation producing a finite attitude."""
     if sim.data.get("imu") is None or not sim.data.get("frame"):

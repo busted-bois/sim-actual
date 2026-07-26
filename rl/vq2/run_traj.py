@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from rl.vq2 import controller
+from rl.vq2.reset import RaceGo
 from rl.sim_interface import SimInterface
 
 DATA = os.path.join("rl", "data", "vq2")
@@ -62,17 +63,22 @@ def replay(name: str, wait_race: bool = True):
     sim.data["_quiet_vision"] = True
     print("[rl2-run] connected. Start/Restart the race in the sim...", flush=True)
     try:
-        # Arm and wait for race GO so replay begins where the demo was captured.
+        # Arm, then wait for the REAL GO -- the GPPilot WAIT_FOR_START gate: a
+        # fresh countdown that has ELAPSED with the physics clock live. Waiting on
+        # `race_started` alone starts during the countdown and tips the drone over.
         last_arm = 0.0
         if wait_race:
-            while not sim.data.get("race_started"):
+            print("[rl2-run] armed -- WAIT_FOR_START (start/restart the race)...",
+                  flush=True)
+            go = RaceGo(debug=True)
+            while not go(sim.data):
                 now = time.time()
                 if now - last_arm > 1.0:
                     sim.arm()
                     last_arm = now
-                time.sleep(0.05)
+                time.sleep(1 / 90.0)
         sim.arm()
-        print("[rl2-run] GO -- replaying recorded actions...", flush=True)
+        print("[rl2-run] Countdown complete! Replaying recorded actions...", flush=True)
 
         t0 = time.time()
         for i in range(n):
