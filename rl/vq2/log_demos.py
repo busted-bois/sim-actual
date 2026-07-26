@@ -60,7 +60,8 @@ def main(name: str | None = None):
     controller.set_attitude_quat_deg = _tapped
 
     stacker = ObsStacker()
-    obs_log, act_log, t_log, gate_log = [], [], [], []
+    obs_log, act_log, t_log, gate_log, sim_log = [], [], [], [], []
+    gyro_log, pose_log = [], []          # raw diffable signals (vs the replay trace)
     prev_action = np.zeros(4, np.float32)
     started = False
     flying = False           # latch: skip the countdown pad-hold (thrust ~0)
@@ -119,7 +120,18 @@ def main(name: str | None = None):
             obs_log.append(obs)
             act_log.append(action)
             t_log.append(time.time())
+            # SIM clock (HIGHRES_IMU time_us) -- replay schedules on THIS, not
+            # wall-clock, so it tracks the sim's own physics clock regardless of
+            # how fast wall-time runs.
+            sim_log.append(int((data.get("imu") or {}).get("time_us") or 0))
             gate_log.append(int(data.get("active_gate_index", -1) or -1))
+            _imu = data.get("imu") or {}
+            gyro_log.append((float(_imu.get("gx", float("nan"))),
+                             float(_imu.get("gy", float("nan"))),
+                             float(_imu.get("gz", float("nan")))))
+            pose_log.append((float(pose_est["body_x_m"]), float(pose_est["body_y_m"]),
+                             float(pose_est["body_z_m"])) if pose_est is not None
+                            else (float("nan"), float("nan"), float("nan")))
             prev_action = action
 
             # stop when the course completes (all gates cleared).
@@ -132,7 +144,7 @@ def main(name: str | None = None):
         print("\n[log_demos] stopped.", flush=True)
     finally:
         controller.set_attitude_quat_deg = _orig
-        _save_run(name, obs_log, act_log, t_log, gate_log)   # replayable, per-run
+        _save_run(name, obs_log, act_log, t_log, gate_log, sim_log, gyro_log, pose_log)
         _save(obs_log, act_log)                              # append to BC bootstrap
         for k in ("ts_loop", "mavlink_rx", "vision_rx"):
             try:
@@ -141,7 +153,7 @@ def main(name: str | None = None):
                 pass
 
 
-def _save_run(name, obs_log, act_log, t_log, gate_log):
+def _save_run(name, obs_log, act_log, t_log, gate_log, sim_log, gyro_log, pose_log):
     """Save ONE run as a standalone, replayable trajectory (`rl2-run <name>`)."""
     if not act_log:
         return None
@@ -151,8 +163,11 @@ def _save_run(name, obs_log, act_log, t_log, gate_log):
         path,
         obs=np.asarray(obs_log, np.float32),
         act=np.asarray(act_log, np.float32),
-        t=np.asarray(t_log, np.float64),           # per-step wall-clock (for replay timing)
+        t=np.asarray(t_log, np.float64),            # per-step wall-clock (info/fallback)
+        sim_us=np.asarray(sim_log, np.int64),       # per-step SIM clock (replay schedules on this)
         gate_index=np.asarray(gate_log, np.int32),  # active gate at each step
+        gyro=np.asarray(gyro_log, np.float32),      # raw diffable signals vs the replay
+        gate_pose=np.asarray(pose_log, np.float32),
     )
     print(f"\n[log_demos] trajectory saved -> {path}  ({len(act_log)} steps)", flush=True)
     print(f"[log_demos] REPLAY IT WITH:  make rl2-run ARGS=\"{name}\"", flush=True)
