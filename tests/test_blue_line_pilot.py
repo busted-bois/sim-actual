@@ -17,7 +17,17 @@ from simulator.blue_line_pilot import (
     GateAssist,
     HOLD_YAW_ERR_DEG,
     HOVER_THRUST,
+    KR,
     MAX_SPEED_MPS,
+    REACQ_MIN_FRAMES,
+    REACQ_STABLE_S,
+    REVERSE_ARM_AFTER_GO_S,
+    REVERSE_ARREST_PITCH_DEG,
+    REVERSE_ARREST_S,
+    REVERSE_MAX_S,
+    REVERSE_MIN_S,
+    REVERSE_PITCH_DEG,
+    ReacquireMonitor,
     SEARCH_YAW_ERR_DEG,
     compute_blueline_guidance,
 )
@@ -416,7 +426,9 @@ class ClimbAndWeaveTests(unittest.TestCase):
         self.assertLess(dbg["desired_roll"], dbg0["desired_roll"])
         expected_dcx = DCX_EMA_ALPHA * (0.3 - 0.5) / 0.1
         self.assertAlmostEqual(
-            dbg["desired_roll"] - dbg0["desired_roll"], K_ROLL_DCX * expected_dcx, places=4
+            dbg["desired_roll"] - dbg0["desired_roll"],
+            K_ROLL_DCX * expected_dcx,
+            places=4,
         )
 
     def test_cx_rate_contribution_capped(self):
@@ -654,6 +666,311 @@ class GateAssistTests(unittest.TestCase):
     def test_assist_wide_bearing_rejected(self):
         # |bearing| beyond the half-FOV is a clip artifact, not guidance.
         self.assertIsNone(GateAssist().update(_pose_data(3.0, 4.0), now=0.0))
+
+
+def _collision(delta=0.5, cid=1001, ts=None):
+    import time as _t
+
+    return {
+        "id": cid,
+        "threat_level": 2,
+        "delta": delta,
+        "ts": _t.time() if ts is None else ts,
+        "seq": 1,
+        "type": "gate" if cid == 1001 else "environment",
+    }
+
+
+def _armed_pilot():
+    """A flying pilot with the post-GO collision grace already elapsed."""
+    data = {"armed": True, "race_status": _race(300)}
+    pilot, ctrl = _make_pilot(data)
+    pilot.tick()
+    data["race_status"] = _race(600, start_ms=3289)
+    pilot.tick()
+    assert pilot._phase == "fly"
+    import time as _t
+
+    pilot._fly_since = _t.monotonic() - (REVERSE_ARM_AFTER_GO_S + 1.0)
+    return pilot, ctrl, data
+
+
+def _gate(bearing=0.0, rng=8.0, fid=1, lag=0):
+    return {
+        "bearing_deg": bearing,
+        "range_m": rng,
+        "infer_ms": 40.0,
+        "lag_fr": lag,
+        "frame_id": fid,
+    }
+
+
+def _pose_ok(conf=0.9, reproj=1.0, n_visible=4):
+    return {"conf": conf, "pose": {"reproj_px": reproj, "n_visible": n_visible}}
+
+
+class CollisionTriggerTests(unittest.TestCase):
+    def test_pad_collision_while_waiting_is_drained_never_flies(self):
+        # Ground contact spams this key on the pad; draining in "wait" is what
+        # stops a stale hit from arming the first fly tick.
+        data = {"armed": True, "collision": _collision()}
+        pilot, ctrl = _make_pilot(data)
+        for _ in range(3):
+            data["collision"] = _collision()
+            pilot.tick()
+        self.assertEqual(pilot._phase, "wait")
+        self.assertIsNone(data.get("collision"))
+        self.assertEqual(ctrl.commands[-1], (0.0, 0.0, 0.0, 0.0))
+
+    def test_collision_inside_go_grace_is_ignored(self):
+        pilot, _ctrl, data = _armed_pilot()
+        pilot._fly_since = __import__("time").monotonic()  # just took off
+        data["collision"] = _collision()
+        pilot.tick()
+        self.assertEqual(pilot._phase, "fly")
+        self.assertIsNone(data.get("collision"))
+
+    def test_collision_after_grace_enters_reversing(self):
+        pilot, ctrl, data = _armed_pilot()
+        data["collision"] = _collision()
+        pilot.tick()
+        self.assertEqual(pilot._phase, "reversing")
+        roll, pitch, yaw, thrust = ctrl.commands[-1]
+        self.assertGreater(pitch, 0.0)  # nose-up = reverse
+        self.assertEqual(yaw, 0.0)  # hold heading
+        self.assertGreater(thrust, 0.2)
+        self.assertIsNone(data.get("collision"))
+        self.assertEqual(data["bl_gate_assist"]["mode"], "reverse")
+
+    def test_low_clearance_collision_suppressed(self):
+        # Sitting on the floor: reversing achieves nothing.
+        pilot, _ctrl, data = _armed_pilot()
+        data["local_position_ned"] = {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "vx": 0.0,
+            "vy": 0.0,
+            "vz": 0.0,
+        }
+        data["yaw_rad"] = 0.0
+        pilot._floor_z0 = 0.0
+        data["collision"] = _collision()
+        pilot.tick()
+        self.assertEqual(pilot._phase, "fly")
+
+    def test_cooldown_blocks_immediate_retrigger(self):
+        pilot, _ctrl, data = _armed_pilot()
+        pilot._reverse_end_t = __import__("time").monotonic()
+        data["collision"] = _collision()
+        pilot.tick()
+        self.assertEqual(pilot._phase, "fly")
+
+    def test_reverse_count_capped_per_attempt(self):
+        pilot, _ctrl, data = _armed_pilot()
+        pilot._reverse_count = 99
+        data["collision"] = _collision()
+        pilot.tick()
+        self.assertEqual(pilot._phase, "fly")
+
+    def test_stale_timestamp_collision_ignored(self):
+        pilot, _ctrl, data = _armed_pilot()
+        data["collision"] = _collision(ts=__import__("time").time() - 5.0)
+        pilot.tick()
+        self.assertEqual(pilot._phase, "fly")
+
+
+class ReverseTickTests(unittest.TestCase):
+    def _reversing(self):
+        pilot, ctrl, data = _armed_pilot()
+        data["collision"] = _collision()
+        pilot.tick()
+        assert pilot._phase == "reversing"
+        return pilot, ctrl, data
+
+    def test_openloop_arrests_then_drifts_back(self):
+        pilot, _ctrl, _data = self._reversing()
+        t0 = pilot._reverse_t0
+        pilot._tick_reversing(t0 + 0.1)
+        arrest = pilot._last_reverse_pitch_target
+        pilot._tick_reversing(t0 + REVERSE_ARREST_S + 0.05)
+        drift = pilot._last_reverse_pitch_target
+        self.assertAlmostEqual(arrest, REVERSE_ARREST_PITCH_DEG, places=5)
+        self.assertAlmostEqual(drift, REVERSE_PITCH_DEG, places=5)
+        self.assertLess(drift, arrest)
+
+    def test_levels_pitch_when_reverse_overspeed(self):
+        pilot, _ctrl, data = self._reversing()
+        data["vel_ned"] = (-3.0, 0.0, 0.0)  # 3 m/s backwards, over the 1.5 cap
+        data["yaw_rad"] = 0.0
+        pilot._tick_reversing(pilot._reverse_t0 + 0.1)
+        self.assertAlmostEqual(pilot._last_reverse_pitch_target, 0.0, places=5)
+
+    def test_holds_heading_and_levels_roll(self):
+        pilot, ctrl, data = self._reversing()
+        data["attitude"] = {"roll": np.radians(10.0), "pitch": 0.0, "yaw": 0.0}
+        pilot._cmd_slew.reset()
+        for i in range(40):  # let the 360 deg/s slew settle
+            pilot._tick_reversing(pilot._reverse_t0 + 0.01 * i)
+        roll, _pitch, yaw, _thrust = ctrl.commands[-1]
+        # Leveling command is (0 - roll_meas) * KR; KR = -1, so a +10 deg roll
+        # produces a +10 wire value (this sim's roll sign is inverted).
+        self.assertAlmostEqual(roll, (0.0 - 10.0) * KR, delta=0.5)
+        self.assertEqual(yaw, 0.0)  # heading held, not corrected
+
+    def test_nan_vx_never_exits_on_distance(self):
+        # vX is nan under the VQ2 block, so distance stays pinned at 0 and only
+        # the time cap can end the reverse.
+        pilot, _ctrl, _data = self._reversing()
+        t0 = pilot._reverse_t0
+        for i in range(100):
+            pilot._tick_reversing(t0 + 0.01 * i)  # 1.0 s total, under the cap
+        self.assertEqual(pilot._reverse_dist, 0.0)
+        self.assertEqual(pilot._phase, "reversing")
+
+    def test_min_s_blocks_early_exit(self):
+        pilot, _ctrl, data = self._reversing()
+        data["blue_line"] = {"found": True, "cx_norm": 0.0, "frame_id": 1}
+        pilot._tick_reversing(pilot._reverse_t0 + 0.05)
+        self.assertEqual(pilot._phase, "reversing")
+
+    def test_ongoing_collisions_block_exit(self):
+        pilot, _ctrl, data = self._reversing()
+        t0 = pilot._reverse_t0
+        for i in range(10):  # still hitting things well past REVERSE_MIN_S
+            data["blue_line"] = {"found": True, "cx_norm": 0.0, "frame_id": i}
+            pilot._tick_reversing(t0 + REVERSE_MIN_S + 0.05 * i, col=_collision())
+        self.assertEqual(pilot._phase, "reversing")
+
+    def test_timeout_resumes_fly_and_restarts_ladder(self):
+        pilot, _ctrl, _data = self._reversing()
+        pilot._tick_reversing(pilot._reverse_t0 + REVERSE_MAX_S + 0.01)
+        self.assertEqual(pilot._phase, "fly")
+        self.assertIsNone(pilot._lost_since)
+        self.assertIsNone(pilot._last_vision)
+
+    def test_line_reacquire_resumes(self):
+        pilot, _ctrl, data = self._reversing()
+        t0 = pilot._reverse_t0
+        for i in range(REACQ_MIN_FRAMES + 2):
+            data["blue_line"] = {"found": True, "cx_norm": 0.0, "frame_id": i}
+            pilot._tick_reversing(t0 + REVERSE_MIN_S + 0.1 * i)
+        self.assertEqual(pilot._phase, "fly")
+
+    def test_disarm_during_reverse_aborts_to_wait(self):
+        pilot, ctrl, data = self._reversing()
+        data["armed"] = False
+        pilot._disarm_since = __import__("time").monotonic() - 5.0
+        pilot.tick()
+        self.assertEqual(pilot._phase, "wait")
+        self.assertEqual(ctrl.commands[-1], (0.0, 0.0, 0.0, 0.0))
+
+    def test_hover_trim_survives_reverse(self):
+        pilot, _ctrl, _data = self._reversing()
+        pilot._hover_trim = 0.31
+        pilot._tick_reversing(pilot._reverse_t0 + 0.1)
+        self.assertAlmostEqual(pilot._hover_trim, 0.31, places=6)
+
+
+class ReacquireMonitorTests(unittest.TestCase):
+    def test_single_frame_is_not_clear(self):
+        m = ReacquireMonitor()
+        self.assertFalse(m.update_gate(_gate(fid=1), _pose_ok(), now=0.0))
+
+    def test_repeated_same_frame_id_never_clears(self):
+        # The 32 Hz loop sees each 30 Hz camera frame 2-3x; counting ticks would
+        # make a single frozen frame look like a stable lock.
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(20):
+            clear = m.update_gate(_gate(fid=7), _pose_ok(), now=0.03 * i)
+        self.assertFalse(clear)
+
+    def test_distinct_frames_over_window_is_clear(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 1):
+            clear = m.update_gate(_gate(fid=i), _pose_ok(), now=0.1 * i)
+        self.assertTrue(clear)
+
+    def test_burst_faster_than_stable_window_is_not_clear(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 1):
+            clear = m.update_gate(_gate(fid=i), _pose_ok(), now=0.01 * i)
+        self.assertFalse(clear)  # 4 frames in 40 ms < REACQ_STABLE_S
+
+    def test_gap_resets_streak(self):
+        m = ReacquireMonitor()
+        for i in range(REACQ_MIN_FRAMES - 1):
+            m.update_gate(_gate(fid=i), _pose_ok(), now=0.1 * i)
+        self.assertFalse(m.update_gate(_gate(fid=99), _pose_ok(), now=5.0))
+
+    def test_bearing_jump_resets_streak(self):
+        m = ReacquireMonitor()
+        for i in range(REACQ_MIN_FRAMES - 1):
+            m.update_gate(_gate(bearing=0.0, fid=i), _pose_ok(), now=0.1 * i)
+        self.assertFalse(
+            m.update_gate(_gate(bearing=24.0, fid=50), _pose_ok(), now=0.4)
+        )
+
+    def test_edge_pair_pose_rejected(self):
+        # gate_pnp's edge-pair fallback reports n_visible=2 with a HARDCODED
+        # reproj_px=0.0 — a "perfect" reprojection that means nothing.
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_gate(
+                _gate(fid=i), _pose_ok(reproj=0.0, n_visible=2), now=0.1 * i
+            )
+        self.assertFalse(clear)
+
+    def test_low_conf_rejected(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_gate(_gate(fid=i), _pose_ok(conf=0.3), now=0.1 * i)
+        self.assertFalse(clear)
+
+    def test_peripheral_bearing_rejected(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_gate(_gate(bearing=35.0, fid=i), _pose_ok(), now=0.1 * i)
+        self.assertFalse(clear)
+
+    def test_far_range_rejected(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_gate(_gate(rng=30.0, fid=i), _pose_ok(), now=0.1 * i)
+        self.assertFalse(clear)
+
+    def test_missing_pose_rejected(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_gate(_gate(fid=i), None, now=0.1 * i)
+        self.assertFalse(clear)
+
+    def test_line_edge_sliver_rejected(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 2):
+            clear = m.update_line(
+                {"found": True, "cx_norm": 0.9, "frame_id": i}, now=0.1 * i
+            )
+        self.assertFalse(clear)
+
+    def test_line_needs_distinct_stable_frames(self):
+        m = ReacquireMonitor()
+        clear = False
+        for i in range(REACQ_MIN_FRAMES + 1):
+            clear = m.update_line(
+                {"found": True, "cx_norm": 0.0, "frame_id": i}, now=0.1 * i
+            )
+        self.assertTrue(clear)
+        self.assertGreaterEqual(0.1 * REACQ_MIN_FRAMES, REACQ_STABLE_S)
 
 
 if __name__ == "__main__":

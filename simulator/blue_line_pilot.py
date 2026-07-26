@@ -26,7 +26,7 @@ import time
 import numpy as np
 
 from simulator.gp_pilot import CommandSlew, GP_CONTROL_HZ, HOVER_THRUST, KP, KR, KY
-from simulator.gp_vision import GateEstimateSmoother
+from simulator.gp_vision import GateEstimateSmoother, best_pose_gate
 
 BL_CONTROL_HZ = GP_CONTROL_HZ
 
@@ -136,6 +136,57 @@ GATE_TURN_MAG_MAX = 1.0  # an agreeing gate bearing may brake fully to corner sp
 CLOCK_RESET_SLACK_MS = 500  # sim_boot rewinding beyond this = manual reset
 DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips
 
+# --- Post-collision reverse (mirrors gp_pilot BACKOFF, but time-primary) -----
+# Trigger arming. mavlink_rx applies no throttle/id/severity filter, and the
+# vendor README warns ground contact "fires hundreds of times per second while
+# the drone is on the pad". So the trigger is armed by TIME SINCE GO, plus a
+# floor-clearance veto when telemetry exists (inert when it does not).
+REVERSE_ARM_AFTER_GO_S = 3.0  # pad chatter window; a hit this early is unreversible
+REVERSE_MIN_CLEARANCE_M = 0.7  # NaN under the VQ2 block -> guard inert, never required
+COLLISION_FRESH_S = 0.25  # wall-clock guard on `ts`, belt-and-braces with the pop
+REVERSE_COOLDOWN_S = 2.0  # one reverse per hit, not a reverse loop
+REVERSE_MAX_PER_ATTEMPT = 3  # after this, let the search ladder fly unassisted
+# Severity gate OFF by default: MAVLink defines horizontal_minimum_delta as a
+# DISTANCE (small = severe) but vendor train_controller.py treats the same field
+# as an IMPULSE (large = severe). A threshold with the wrong sign either never
+# fires or always fires — log the real distribution first, then enable.
+REVERSE_MIN_DELTA = 0.0
+
+# Reverse profile. vX is nan in every VQ2-blocked flight (log-verified 748/748
+# rows), so the closed-loop regulator is the bonus path and the open-loop lean
+# is what actually flies. CRUISE_PITCH_DEG=-2.0 gives ~12 km/h forward, so a
+# symmetric +2.0 would not be "low speed": arrest hard first, then drift back.
+REVERSE_ARREST_S = 0.5
+REVERSE_ARREST_PITCH_DEG = 4.0  # = gp_pilot BACKOFF_PITCH_DEG; kills forward momentum
+REVERSE_PITCH_DEG = 1.5  # then a gentle backwards lean
+REVERSE_MAX_SPEED_MPS = 1.5  # ~5.4 km/h cap; only enforceable when vX is real
+REVERSE_DIST_M = 3.0  # secondary exit, only when vX is real
+REVERSE_MIN_S = 0.6  # never bail out under this
+REVERSE_MAX_S = 2.5  # PRIMARY exit — shorter than gp's 4.0: we reverse BLIND
+REVERSE_QUIET_S = 0.25  # never resume while collisions are still arriving
+REVERSE_TRIM_ALPHA = 0.01  # ~3 s tau at 32 Hz; blueline's stand-in for gp's elev_i
+REVERSE_TRIM_MIN = HOVER_THRUST - 0.02
+REVERSE_TRIM_MAX = HOVER_THRUST + 0.06
+
+# Re-acquisition = "sees the next gate CLEARLY". Counted in DISTINCT CAMERA
+# FRAMES, never in control ticks: the loop runs ~32 Hz against a ~30 Hz camera,
+# so tick counting would score one frame two or three times over.
+REACQ_MIN_FRAMES = 4
+REACQ_STABLE_S = 0.25  # ...and the streak must span at least this long
+REACQ_GAP_S = 0.25  # a longer hole restarts the streak (continuous, not cumulative)
+REACQ_MAX_BEARING_DEG = 25.0  # < GateAssist's 45: steerable, not peripheral
+REACQ_MIN_RANGE_M = 3.0  # > GATE_ASSIST_MIN_RANGE_M: margin off the gate we just hit
+REACQ_MAX_RANGE_M = 25.0  # < 35: the 30 m+ band was log-verified PnP noise
+REACQ_MAX_LAG_FR = 3  # inference not badly behind the camera clock
+REACQ_MIN_CONF = 0.60  # > gp_vision MIN_BOX_CONF 0.5
+REACQ_MAX_REPROJ_PX = 6.0  # < gp_vision MAX_REPROJ_PX 10.0
+# Rejects gate_pnp's "edge-pair" fallback, which reports n_visible=2 with a
+# HARDCODED reproj_px=0.0 — a "perfect" reprojection there means nothing.
+REACQ_MIN_N_VISIBLE = 3
+REACQ_BEARING_JITTER_DEG = 15.0  # consecutive accepted frames = the same object
+REACQ_RANGE_JITTER_M = 4.0
+REACQ_LINE_CX_MAX = 0.7  # |cx| beyond this = corridor leaving the FOV, not a lock
+
 
 def _turn_hint_sign(cx: float, hdg_rad: float) -> float:
     hdg_deg = math.degrees(hdg_rad)
@@ -228,6 +279,103 @@ class GateAssist:
             "lag_fr": lag_fr,
             "frame_id": est.get("frame_id"),
         }
+
+
+class ReacquireMonitor:
+    """Stable re-acquisition of the gate / line, for the post-collision reverse.
+
+    A single flickering frame must never end the reverse, so a cue counts as
+    re-acquired only after REACQ_MIN_FRAMES DISTINCT CAMERA FRAMES, spanning at
+    least REACQ_STABLE_S, with no gap longer than REACQ_GAP_S and consistent
+    bearing/range throughout. Distinct frame IDs, not ticks: the control loop
+    runs ~32 Hz against a ~30 Hz camera, so counting ticks would score a single
+    frame two or three times and "stability" would mean nothing.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._gate = {"fid": None, "n": 0, "t0": 0.0, "t": 0.0, "brg": 0.0, "rng": 0.0}
+        self._line = {"fid": None, "n": 0, "t0": 0.0, "t": 0.0}
+
+    @staticmethod
+    def _restart(st: dict, now: float, **kw) -> bool:
+        st.update(n=1, t0=now, t=now, **kw)
+        return False
+
+    def update_gate(self, gate: dict | None, pose: dict | None, now: float) -> bool:
+        """True once a gate has been seen clearly and steadily enough to resume.
+
+        `gate` is GateAssist's output (already YOLO-only, camera-fresh, range and
+        bearing gated); `pose` is best_pose_gate()'s raw pick, used only for the
+        detection-quality fields the smoother throws away.
+        """
+        st = self._gate
+        if gate is None:
+            return False
+        fid = gate.get("frame_id")
+        if fid is not None and fid == st["fid"]:
+            return st["n"] >= REACQ_MIN_FRAMES and now - st["t0"] >= REACQ_STABLE_S
+        brg, rng = float(gate["bearing_deg"]), float(gate["range_m"])
+        lag = gate.get("lag_fr")
+        ok = (
+            abs(brg) <= REACQ_MAX_BEARING_DEG
+            and REACQ_MIN_RANGE_M <= rng <= REACQ_MAX_RANGE_M
+            and (lag is None or lag <= REACQ_MAX_LAG_FR)
+            and _pose_quality_ok(pose)
+        )
+        st["fid"] = fid
+        if not ok:
+            st["n"] = 0
+            return False
+        # Continuity: a phantom that flickers in and out can never accumulate,
+        # because a break restarts the streak at 1 rather than extending it.
+        if (
+            st["n"] == 0
+            or now - st["t"] > REACQ_GAP_S
+            or abs(brg - st["brg"]) > REACQ_BEARING_JITTER_DEG
+            or abs(rng - st["rng"]) > REACQ_RANGE_JITTER_M
+        ):
+            return self._restart(st, now, brg=brg, rng=rng)
+        st.update(n=st["n"] + 1, t=now, brg=brg, rng=rng)
+        return st["n"] >= REACQ_MIN_FRAMES and now - st["t0"] >= REACQ_STABLE_S
+
+    def update_line(self, vision: dict | None, now: float) -> bool:
+        """True once the blue line is back, steadily and not just a corner sliver."""
+        st = self._line
+        if not (vision and vision.get("found")):
+            return False
+        fid = vision.get("frame_id")
+        if fid is not None and fid == st["fid"]:
+            return st["n"] >= REACQ_MIN_FRAMES and now - st["t0"] >= REACQ_STABLE_S
+        st["fid"] = fid
+        if abs(float(vision.get("cx_norm", 0.0))) > REACQ_LINE_CX_MAX:
+            st["n"] = 0
+            return False
+        if st["n"] == 0 or now - st["t"] > REACQ_GAP_S:
+            return self._restart(st, now)
+        st.update(n=st["n"] + 1, t=now)
+        return st["n"] >= REACQ_MIN_FRAMES and now - st["t0"] >= REACQ_STABLE_S
+
+
+def _pose_quality_ok(pose: dict | None) -> bool:
+    """Detection quality from the raw YOLO/PnP pick.
+
+    The smoother's own `reliable`/`pnp_ok` are hardcoded True, so they say
+    nothing; these are the fields that actually carry quality.
+    """
+    if pose is None:
+        return False
+    if float(pose.get("conf", 0.0)) < REACQ_MIN_CONF:
+        return False
+    p = pose.get("pose")
+    if not p:
+        return False
+    return (
+        int(p.get("n_visible", 0)) >= REACQ_MIN_N_VISIBLE
+        and float(p.get("reproj_px", 1e9)) <= REACQ_MAX_REPROJ_PX
+    )
 
 
 def compute_blueline_guidance(
@@ -507,6 +655,22 @@ class BlueLinePilot:
         self._assist_enabled = os.environ.get(
             "BL_GATE_ASSIST", "1"
         ).strip().lower() not in ("0", "false", "no")
+        # Post-collision reverse state.
+        self._reacq = ReacquireMonitor()
+        self._fly_since: float | None = None
+        self._reverse_t0 = 0.0
+        self._reverse_hit_t = 0.0
+        self._reverse_end_t = -1e9
+        self._reverse_dist = 0.0
+        self._reverse_last_t = 0.0
+        self._reverse_count = 0
+        self._last_reverse_pitch_target = 0.0
+        self._floor_z0: float | None = None
+        # Blueline has no elevation integrator; raw HOVER_THRUST sits ~0.006
+        # below true hover, which sank gp's every backoff. Track a slow EMA of
+        # the thrust the cy loop has been commanding and reverse on that.
+        self._hover_trim = HOVER_THRUST
+        self._col_stats = {"n": 0, "ids": {}, "dmin": 1e9, "dmax": -1e9, "t": 0.0}
         # Race-start gate: hold until a fresh race exists, then fly at once.
         self._phase = "wait"
         self._wait_anchor_ms: int | None = None
@@ -558,6 +722,13 @@ class BlueLinePilot:
         self._last_gate_seen_t = 0.0
         self._disarm_since = None
         self._openloop_noted = False
+        self._reacq.reset()
+        self._reverse_count = 0
+        self._reverse_end_t = -1e9
+        self._reverse_dist = 0.0
+        self._floor_z0 = None
+        self._hover_trim = HOVER_THRUST
+        self.data.pop("collision", None)
         self._close_log()
         self.controller.set_control_mode("attitude_quat")
         self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, HOVER_THRUST)
@@ -579,7 +750,7 @@ class BlueLinePilot:
                 "t mode bl_src cx cx_cent cx_edge cy hdg_deg hdg_cent_deg dcx "
                 "turn_mag gate_brg gate_rng vX v_target "
                 "pitch_des des_roll yaw_err cmd_roll cmd_pitch cmd_yaw thrust "
-                "att_roll att_pitch gz_dps lost_s n_passed".split()
+                "att_roll att_pitch gz_dps lost_s n_passed rev_n".split()
             )
             print(f"[blueline] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -623,13 +794,220 @@ class BlueLinePilot:
                 ]
                 + [f"{roll:.3f}", f"{pitch:.3f}", f"{yaw:.3f}", f"{thrust:.4f}"]
                 + [f"{att_roll:.2f}", f"{att_pitch:.2f}", f"{gz_dps:.2f}"]
-                + [f"{lost_s:.2f}", str(self.gates_passed)]
+                + [f"{lost_s:.2f}", str(self.gates_passed), str(self._reverse_count)]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
                 self._log_last_flush = now
         except (OSError, ValueError, KeyError):
             self._close_log()
+
+    # --- collision intake ----------------------------------------------------
+
+    def _drain_collision(self, now_wall: float) -> dict | None:
+        """Pop the collision key — the SINGLE consumer — and fold it into stats.
+
+        Called every tick in BOTH phases, including "wait". Draining while we
+        hold on the pad is what guarantees the key is empty at GO, so ground
+        chatter cannot arm the very first fly tick. mavlink_rx overwrites the
+        key in place and never clears it, so an unconsumed hit would otherwise
+        sit in the dict looking fresh forever.
+        """
+        col = self.data.pop("collision", None)
+        if col is None:
+            return None
+        st = self._col_stats
+        st["n"] += 1
+        cid = col.get("id")
+        st["ids"][cid] = st["ids"].get(cid, 0) + 1
+        d = float(col.get("delta", 0.0))
+        st["dmin"], st["dmax"] = min(st["dmin"], d), max(st["dmax"], d)
+        if now_wall - st["t"] >= 1.0:
+            # Rate-limited: ground contact can arrive hundreds of times a second.
+            print(
+                f"[blueline] COLLISION x{st['n']} phase={self._phase} "
+                f"ids={st['ids']} delta=[{st['dmin']:.3f},{st['dmax']:.3f}] "
+                f"threat={col.get('threat_level')} type={col.get('type')}",
+                flush=True,
+            )
+            st.update(n=0, ids={}, dmin=1e9, dmax=-1e9, t=now_wall)
+        return col
+
+    def _floor_clearance(self) -> float:
+        """Height above the GO-time floor, or nan when position telemetry is off."""
+        src = self.data.get("local_position_ned") or self.data.get("odometry")
+        if src is None or src.get("z") is None:
+            return float("nan")
+        z = float(src["z"])
+        if self._floor_z0 is None:
+            self._floor_z0 = z
+        return self._floor_z0 - z  # NED: z is down
+
+    def _collision_should_reverse(self, col, now: float, now_wall: float) -> bool:
+        if col is None:
+            return False
+        ts = col.get("ts")
+        if ts is not None and now_wall - float(ts) > COLLISION_FRESH_S:
+            return False  # stale packet
+        if self._fly_since is None or now - self._fly_since < REVERSE_ARM_AFTER_GO_S:
+            return False  # still in the pad-chatter window
+        if now - self._reverse_end_t < REVERSE_COOLDOWN_S:
+            return False  # one reverse per hit, not a loop
+        if self._reverse_count >= REVERSE_MAX_PER_ATTEMPT:
+            return False  # stop reversing; let the ladder fly
+        clr = self._floor_clearance()
+        if not math.isnan(clr) and clr < REVERSE_MIN_CLEARANCE_M:
+            return False  # on the ground: reversing achieves nothing
+        if REVERSE_MIN_DELTA > 0.0 and abs(float(col.get("delta", 0.0))) < (
+            REVERSE_MIN_DELTA
+        ):
+            return False  # inert by default — see REVERSE_MIN_DELTA
+        return True
+
+    # --- post-collision reverse ----------------------------------------------
+
+    def _enter_reversing(self, now: float) -> None:
+        self._phase = "reversing"
+        self._reverse_t0 = self._reverse_last_t = self._reverse_hit_t = now
+        self._reverse_dist = 0.0
+        self._reverse_count += 1
+        # Post-impact vision state is garbage: the latched turn_mag, the cx
+        # derivative, the speed-PD history and the smoother's pre-crash target
+        # lock would all pollute the re-acquire. _last_cx/_last_hdg and the gate
+        # hint are deliberately KEPT — we hold heading through the reverse, so
+        # the pre-impact turn direction is still the best hint for the ladder.
+        self._hold = {}
+        self._cmd_slew.reset()
+        self._gate_assist.reset()
+        self._reacq.reset()
+        self._last_vision = None
+        self._lost_since = None
+        self.data.pop("collision", None)
+        print(
+            f"[blueline] COLLISION #{self._reverse_count} — reversing "
+            f"(max {REVERSE_MAX_S:.1f}s) until the gate or line is back",
+            flush=True,
+        )
+
+    def _tick_reversing(self, now: float, col: dict | None = None) -> None:
+        elapsed = now - self._reverse_t0
+        if col is not None:
+            self._reverse_hit_t = now  # still in contact — hold off resuming
+        roll_deg, pitch_deg, _yaw = _read_att_deg(self.data)
+        vX = _read_vx_body(self.data)
+        step_dt = max(1.0 / BL_CONTROL_HZ, now - self._reverse_last_t)
+        self._reverse_last_t = now
+        vx_ok = not math.isnan(vX)
+        if vx_ok:
+            self._reverse_dist += max(0.0, -vX) * step_dt
+
+        # POSITIVE pitch = nose-up = REVERSE (CRUISE_PITCH_DEG=-2.0 is forward).
+        if vx_ok:
+            # gp's 3-band regulator: a fixed nose-up ran away to 20-30 km/h.
+            rev = max(0.0, -vX)
+            if rev > REVERSE_MAX_SPEED_MPS:
+                pitch_target = 0.0
+            elif rev > 0.8 * REVERSE_MAX_SPEED_MPS:
+                pitch_target = 0.3 * REVERSE_PITCH_DEG
+            else:
+                pitch_target = REVERSE_ARREST_PITCH_DEG
+        else:
+            # Open loop (vX dead): arrest the forward run, then drift back.
+            pitch_target = (
+                REVERSE_ARREST_PITCH_DEG
+                if elapsed < REVERSE_ARREST_S
+                else REVERSE_PITCH_DEG
+            )
+
+        self._last_reverse_pitch_target = pitch_target  # inspected by tests/debug
+        pitch_cmd = float(
+            np.clip(
+                (pitch_target - pitch_deg) * KP,
+                -PITCH_WIRE_MAX_DEG,
+                PITCH_WIRE_MAX_DEG,
+            )
+        )
+        roll_cmd = float((0.0 - roll_deg) * KR)  # level
+        yaw_cmd = 0.0  # hold heading — backing up blind while rotating clips things
+
+        vision = self.data.get("blue_line")
+        thrust = self._hover_trim
+        if vision and vision.get("found"):
+            thrust = self._hover_trim - K_THRUST_CY * (
+                float(vision.get("cy_norm", CY_TARGET)) - CY_TARGET
+            )
+        thrust = float(np.clip(thrust, THRUST_MIN, THRUST_MAX))
+
+        gate = (
+            self._gate_assist.update(self.data, now) if self._assist_enabled else None
+        )
+        if gate is not None:
+            self._last_gate_bearing_deg = float(gate["bearing_deg"])
+            self._last_gate_seen_t = now
+        gate_clear = self._reacq.update_gate(gate, best_pose_gate(self.data), now)
+        line_back = self._reacq.update_line(vision, now)
+
+        roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
+            roll_cmd, pitch_cmd, yaw_cmd, thrust
+        )
+        self.controller.set_control_mode("attitude_quat")
+        self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)
+        self.data["bl_gate_assist"] = {
+            "mode": "reverse",
+            "bearing_deg": None if gate is None else gate["bearing_deg"],
+            "range_m": None if gate is None else gate["range_m"],
+            "infer_ms": None if gate is None else gate.get("infer_ms"),
+            "lag_fr": None if gate is None else gate.get("lag_fr"),
+            "hint_sign": None,
+        }
+        imu = self.data.get("imu") or {}
+        self._log_tick(
+            {
+                "mode": "reverse",
+                "pitch_des": pitch_target,
+                "vX": vX,
+                "gate_bearing": None if gate is None else gate["bearing_deg"],
+                "gate_range": None if gate is None else gate["range_m"],
+            },
+            roll_cmd,
+            pitch_cmd,
+            yaw_cmd,
+            thrust,
+            roll_deg,
+            pitch_deg,
+            math.degrees(float(imu.get("gz", float("nan")))),
+            0.0,
+        )
+
+        if elapsed < REVERSE_MIN_S or now - self._reverse_hit_t < REVERSE_QUIET_S:
+            return
+        if gate_clear or line_back:
+            self._resume_flying("gate" if gate_clear else "line", now, elapsed)
+        elif (vx_ok and self._reverse_dist >= REVERSE_DIST_M) or (
+            elapsed >= REVERSE_MAX_S
+        ):
+            # Time-primary: vX is nan under the VQ2 block, so _reverse_dist stays
+            # pinned at 0.0 and a distance-only exit would never fire.
+            self._resume_flying("timeout", now, elapsed)
+
+    def _resume_flying(self, why: str, now: float, elapsed: float) -> None:
+        print(
+            f"[blueline] reverse done ({why}) t={elapsed:.1f}s "
+            f"dist={self._reverse_dist:.1f}m — resuming",
+            flush=True,
+        )
+        self._phase = "fly"
+        self._reverse_end_t = now
+        self._hold = {}
+        self._cmd_slew.reset()
+        self._reacq.reset()
+        # Clearing both re-enters the existing ladder at "hold" next tick, which
+        # then walks to creep/search on its own timers. _gate_assist is NOT reset:
+        # it has been tracking through the reverse and its lock is the freshest
+        # thing we have.
+        self._last_vision = None
+        self._lost_since = None
+        self.data.pop("collision", None)
 
     # --- race-start gating ---------------------------------------------------
 
@@ -652,6 +1030,8 @@ class BlueLinePilot:
         self._disarm_since = None
         self._wait_imu_ts_prev = None
         self._frozen_noted = False
+        self._fly_since = None  # re-arms the post-GO collision grace
+        self._reacq.reset()
         self._close_log()
         self.controller.set_control_mode("attitude_quat")
         self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
@@ -712,6 +1092,7 @@ class BlueLinePilot:
         self.reset_for_attempt()
         self._open_log()
         self._phase = "fly"
+        self._fly_since = time.monotonic()  # arms the collision trigger, +grace
         print("[blueline] GO — race started.", flush=True)
 
     def _should_abort_flying(self) -> str | None:
@@ -747,14 +1128,25 @@ class BlueLinePilot:
 
     def tick(self) -> None:
         self._tick += 1
+        now, now_wall = time.monotonic(), time.time()
         if self._phase == "wait":
+            self._drain_collision(now_wall)  # keep pad chatter from arming GO
             self._tick_wait()
             return
+        # Abort stays FIRST so a hard-crash disarm still wins over a reverse in
+        # progress (the sim disarms on a real crash; you cannot reverse then).
         reason = self._should_abort_flying()
         if reason is not None:
             self._abort_to_wait(reason)
             return
-        now = time.monotonic()
+        col = self._drain_collision(now_wall)
+        if self._phase == "reversing":
+            self._tick_reversing(now, col)
+            return
+        if self._collision_should_reverse(col, now, now_wall):
+            self._enter_reversing(now)
+            self._tick_reversing(now)
+            return
         vision = self.data.get("blue_line")
         if vision and vision.get("found"):
             self._last_vision = vision
@@ -831,6 +1223,15 @@ class BlueLinePilot:
         roll, pitch, yaw, thrust = self._cmd_slew.apply(roll, pitch, yaw, thrust)
         self.controller.set_control_mode("attitude_quat")
         self.controller.set_attitude_quat_deg(roll, pitch, yaw, thrust)
+        # Learn the hover thrust the cy loop has been holding, for the reverse to
+        # fly on. Never reset when entering the reverse — that is the point.
+        self._hover_trim = float(
+            np.clip(
+                self._hover_trim + REVERSE_TRIM_ALPHA * (thrust - self._hover_trim),
+                REVERSE_TRIM_MIN,
+                REVERSE_TRIM_MAX,
+            )
+        )
         self._log_tick(
             dbg, roll, pitch, yaw, thrust, roll_deg, pitch_deg, gz_dps, lost_s
         )

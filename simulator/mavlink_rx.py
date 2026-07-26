@@ -370,8 +370,18 @@ class MAVLinkRX:
             msg.threat_level,
             msg.horizontal_minimum_delta,
         )
+        # ts/seq/type restore what vendor/AndurilGP/mavlink_rx.py carried and this
+        # port dropped. Without ts, freshness depends entirely on a consumer
+        # popping the key — and ground contact spams this handler hundreds of
+        # times a second on the pad, so a stale key would otherwise look fresh
+        # forever. `type` is the vendor's id==1001 heuristic: LOGGED for now, not
+        # gated on, until a real run confirms the ids this sim build sends.
+        self._collision_seq = getattr(self, "_collision_seq", 0) + 1
         self.data["collision"] = {
             "id": msg.id,
             "threat_level": msg.threat_level,
             "delta": msg.horizontal_minimum_delta,
+            "ts": time.time(),
+            "seq": self._collision_seq,
+            "type": "gate" if msg.id == 1001 else "environment",
         }
