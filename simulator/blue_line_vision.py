@@ -79,25 +79,38 @@ class BlueLineEstimate:
     left_found: bool = False
     right_found: bool = False
     frame_id: int = 0
-    # TODO(inner-edge-ab): cx_centroid/heading_centroid/edge_rows are scaffolding
+    # TODO(inner-edge-ab): cx_centroid/cx_edge/heading_*/edge_rows are scaffolding
     # for the inner-edge-vs-centroid comparison — delete them (and the matching
     # bl_log columns + probe reads) once the A/B concludes. `source` stays: it is
     # the only signal that the scan silently fell back to the centroid path.
-    source: str = "centroid"  # "edge" | "centroid"
+    # Both estimates are always reported; `source` says which one cx_norm is.
+    #   "centroid" — edge off, or the scan failed and fell back
+    #   "shadow"   — edge computed and logged, but centroid is being FLOWN
+    #   "edge"     — edge is being flown
+    source: str = "centroid"
     cx_centroid: float = 0.0
     heading_centroid: float = 0.0
+    cx_edge: float = float("nan")
+    heading_edge: float = float("nan")
     edge_rows: int = 0
     # Per-row scan samples (y, x_left_inner|None, x_right_inner|None, x_center),
     # for the live overlay only — not published in estimate_to_dict.
     samples: tuple = field(default=(), repr=False)
 
 
-def _inner_edge_enabled() -> bool:
-    return os.environ.get("BL_INNER_EDGE", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-    )
+def _inner_edge_mode() -> str:
+    """ "off" | "shadow" | "fly" — how the inner-edge estimator is used.
+
+    "shadow" computes it and reports it for the A/B but keeps FLYING the
+    centroid estimate, so a live flight can be scored without handing the
+    control law an estimator that has not earned it yet.
+    """
+    raw = os.environ.get("BL_INNER_EDGE", "1").strip().lower()
+    if raw in ("0", "false", "no"):
+        return "off"
+    if raw in ("shadow", "2"):
+        return "shadow"
+    return "fly"
 
 
 def cyan_mask(bgr: np.ndarray) -> np.ndarray:
@@ -383,20 +396,25 @@ def detect_blue_lines(
     # cy (altitude) always stays on the centroid path — only the lateral/heading
     # cues move to inner edges, so a live A/B changes one thing at a time.
     cx_centroid, heading_centroid = cx_norm, heading_err
+    cx_edge = heading_edge = float("nan")
     source = "centroid"
     edge_rows = 0
     samples: tuple = ()
-    if _inner_edge_enabled():
+    mode = _inner_edge_mode()
+    if mode != "off":
         edge = _estimate_inner_edge(mask)
         if edge is not None:  # else: keep the centroid result as the backstop
+            cx_edge = edge["cx_norm"]
+            heading_edge = edge["heading_err"]
+            edge_rows = edge["rows"]
+            samples = edge["samples"]
+            source = "edge" if mode == "fly" else "shadow"
+        if edge is not None and mode == "fly":
             cx_norm = edge["cx_norm"]
             heading_err = edge["heading_err"]
             width_norm = edge["width_norm"]
             left_found = edge["left_found"]
             right_found = edge["right_found"]
-            edge_rows = edge["rows"]
-            samples = edge["samples"]
-            source = "edge"
 
     est = BlueLineEstimate(
         found=True,
@@ -410,6 +428,8 @@ def detect_blue_lines(
         source=source,
         cx_centroid=cx_centroid,
         heading_centroid=heading_centroid,
+        cx_edge=cx_edge,
+        heading_edge=heading_edge,
         edge_rows=edge_rows,
         samples=samples,
     )
@@ -429,6 +449,8 @@ def estimate_to_dict(est: BlueLineEstimate) -> dict:
         "source": est.source,
         "cx_centroid": est.cx_centroid,
         "heading_centroid": est.heading_centroid,
+        "cx_edge": est.cx_edge,
+        "heading_edge": est.heading_edge,
         "edge_rows": est.edge_rows,
     }
 

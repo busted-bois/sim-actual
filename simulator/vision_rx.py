@@ -18,6 +18,58 @@ _GATE_COLOR = (0, 200, 0)
 _OBSTACLE_COLOR = (0, 0, 255)
 
 
+class _FrameDumper:
+    """Opt-in raw-frame dump for offline estimator replay (BL_DUMP_EVERY=N).
+
+    Off unless BL_DUMP_EVERY is set. PNG encoding costs ~26 ms, which would
+    stall the vision loop mid-flight, so writes happen on a background thread
+    behind a small bounded queue and are DROPPED rather than queued when the
+    writer falls behind — capturing every frame matters far less than never
+    perturbing the flight being measured.
+    """
+
+    def __init__(self, out_dir=os.path.join("runs", "bl_probe", "raw"), maxsize=4):
+        self._every = int(os.environ.get("BL_DUMP_EVERY", "0") or 0)
+        self._n = 0
+        self.dropped = 0
+        if self._every <= 0:
+            return
+        import queue
+
+        os.makedirs(out_dir, exist_ok=True)
+        self._out_dir = out_dir
+        self._q = queue.Queue(maxsize=maxsize)
+        threading.Thread(target=self._writer, daemon=True).start()
+        print(f"[vision] dumping every {self._every}th frame -> {out_dir}/", flush=True)
+
+    def _writer(self):
+        while True:
+            frame_id, img = self._q.get()
+            try:
+                cv2.imwrite(os.path.join(self._out_dir, f"f{frame_id:06d}.png"), img)
+            except Exception:
+                pass
+
+    def maybe(self, frame_id, img):
+        if self._every <= 0:
+            return
+        self._n += 1
+        if self._n % self._every:
+            return
+        try:
+            self._q.put_nowait((frame_id, img.copy()))
+        except Exception:
+            self.dropped += 1
+
+
+# Module-level: the dump is configured process-wide by env var, so it needs no
+# per-instance state. Keeping it off `self` also means process_frame cannot
+# raise AttributeError when VisionRX is built without __init__ (as the tests
+# do) — process_frame's broad except would swallow that and silently drop
+# every downstream detection.
+_DUMPER = _FrameDumper()
+
+
 def _annotate(img, detection, obstacle_px):
     """Return a copy of img with gate and obstacle overlays for live display."""
     out = img.copy()
@@ -155,6 +207,8 @@ class VisionRX:
             from simulator.gate_detector import detect_gate
 
             h, w = img.shape[:2]
+
+            _DUMPER.maybe(frame_id, img)
 
             detection = detect_gate(img, frame_id, sim_time_ns)
 
