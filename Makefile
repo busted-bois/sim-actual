@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -190,10 +190,21 @@ rl2-diff:
 rl2-train-bc:
 	uv run -m rl.vq2.train_bc $(ARGS)
 
-# Train PPO in the REAL VQ2 sim (single instance, real-time -- slow; run unattended).
-# Warm-start:  make rl2-train ARGS="--resume rl/data/vq2/policy_bc.zip"
+# Incremental closed-loop training in the REAL VQ2 sim. BC-inits the policy from
+# ALL accumulated successful segments (+ demos.npz), then flies PPO online; every
+# flight that reaches a NEW gate is saved to success/gate{N}/ as it happens.
+# Resume a checkpoint:  make rl2-train ARGS="--resume rl/data/vq2/vq2_ppo.zip"
 rl2-train:
 	uv run -m rl.vq2.train $(ARGS)
+
+# List accumulated successful trajectories per gate.
+rl2-list-demos:
+	uv run -m rl.vq2.success --list
+
+# Delete ALL stored demonstrations (successes + demos.npz) to rebuild from scratch.
+# Keep the expert bootstrap:  make rl2-reset-demos ARGS="--keep-demos"
+rl2-reset-demos:
+	uv run -m rl.vq2.success --reset $(ARGS)
 
 # Evaluate a trained VQ2 policy in the real sim.
 rl2-eval:

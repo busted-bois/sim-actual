@@ -74,7 +74,8 @@ hours. The reset harness recycles episodes automatically; leave it running.
 make rl2-train ARGS="--resume rl/data/vq2/policy_bc.zip"
 # raw: uv run -m rl.vq2.train --resume rl/data/vq2/policy_bc.zip
 ```
-Options: `--steps 200000` (default), `--seconds 30` (episode cap), `--gates 6`.
+Options: `--steps 200000` (default), `--seconds 30` (episode cap), `--gates 17`
+(the VQ2 course has 17 gates).
 Outputs:
 - checkpoints every ~5k steps → `rl/data/vq2/ckpts/vq2_ppo_<N>_steps.zip`
 - final policy → `rl/data/vq2/vq2_ppo.zip`

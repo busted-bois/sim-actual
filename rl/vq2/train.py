@@ -18,7 +18,7 @@ import os
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
-from rl.vq2.gym_env import VQ2RealEnv
+from rl.vq2.gym_env import DEFAULT_NUM_GATES, VQ2RealEnv
 
 DATA = os.path.join("rl", "data", "vq2")
 
@@ -61,10 +61,34 @@ class EpisodeLog(BaseCallback):
         return True
 
 
+def _bc_dataset():
+    """Accumulated successful segments (preference-weighted) + expert demos.npz."""
+    import numpy as np
+
+    from rl.vq2 import success
+
+    obs, act = success.load_for_bc()
+    parts_o = [obs] if obs is not None else []
+    parts_a = [act] if act is not None else []
+    n_succ = len(obs) if obs is not None else 0
+    if os.path.exists(os.path.join(DATA, "demos.npz")):
+        d = np.load(os.path.join(DATA, "demos.npz"))
+        parts_o.append(d["obs"].astype(np.float32))
+        parts_a.append(d["act"].astype(np.float32))
+    if not parts_o:
+        return None, None, 0, 0
+    obs = np.concatenate(parts_o)
+    act = np.concatenate(parts_a)
+    return obs, act, n_succ, len(obs) - n_succ
+
+
 def train(total_steps: int = 200_000, n_steps: int = 1024, seconds: float = 30.0,
-          gates: int = 6, resume: str | None = None) -> None:
+          gates: int = DEFAULT_NUM_GATES, resume: str | None = None,
+          bc_epochs: int = 40) -> None:
     os.makedirs(os.path.join(DATA, "ckpts"), exist_ok=True)
-    env = VQ2RealEnv(max_seconds=seconds, num_gates=gates)
+    # Closed-loop, online: the policy flies the real sim and saves every segment
+    # that reaches a new gate as it happens.
+    env = VQ2RealEnv(max_seconds=seconds, num_gates=gates, record_success=True)
     if resume and os.path.exists(resume):
         print(f"[vq2.train] resuming from {resume}", flush=True)
         model = PPO.load(resume, env=env, device="cpu",
@@ -78,6 +102,16 @@ def train(total_steps: int = 200_000, n_steps: int = 1024, seconds: float = 30.0
             policy_kwargs=dict(net_arch=[64, 64, 64]), device="cpu",
             tensorboard_log=os.path.join(DATA, "tb"), verbose=1,
         )
+        # Initialize the policy from ALL accumulated successful trajectories
+        # (+ the expert bootstrap) instead of starting from random exploration.
+        from rl.vq2.train_bc import fit_policy
+        obs, act, n_succ, n_demo = _bc_dataset()
+        if obs is not None:
+            print(f"[vq2.train] BC-init on {len(obs)} samples "
+                  f"({n_succ} from successes, {n_demo} from demos)...", flush=True)
+            fit_policy(model.policy, obs, act, epochs=bc_epochs)
+        else:
+            print("[vq2.train] no demos/successes yet -> starting from scratch.", flush=True)
     ckpt = CheckpointCallback(save_freq=n_steps * 5,
                               save_path=os.path.join(DATA, "ckpts"),
                               name_prefix="vq2_ppo")
@@ -96,7 +130,9 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=200_000)
     ap.add_argument("--n-steps", type=int, default=1024)
     ap.add_argument("--seconds", type=float, default=30.0)
-    ap.add_argument("--gates", type=int, default=6)
+    ap.add_argument("--gates", type=int, default=DEFAULT_NUM_GATES)
     ap.add_argument("--resume", type=str, default=None)
+    ap.add_argument("--bc-epochs", type=int, default=40,
+                    help="BC-init epochs on accumulated successes+demos (fresh runs only)")
     args = ap.parse_args()
-    train(args.steps, args.n_steps, args.seconds, args.gates, args.resume)
+    train(args.steps, args.n_steps, args.seconds, args.gates, args.resume, args.bc_epochs)
