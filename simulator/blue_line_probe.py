@@ -1,26 +1,35 @@
 """Passive A/B probe for the blue-line estimators — no MAVLink, no arming.
 
-Reads ONLY the camera stream (UDP 5600) and scores the inner-edge estimator
-against the legacy centroid estimator on identical frames. Safe to run during
-a live race; it never commands the drone.
+Live mode reads ONLY the camera stream (UDP 5600) and scores the inner-edge
+estimator against the legacy centroid estimator on identical frames. Safe to
+run during a live race; it never commands the drone.
 
-    uv run -m simulator.blue_line_probe        (or: make bl-probe)
+    uv run -m simulator.blue_line_probe              (or: make bl-probe)
+    uv run -m simulator.blue_line_probe --replay runs/bl_probe/raw
 
 With the drone PARKED the true corridor offset is constant, so every
-frame-to-frame change in cx is measurement noise — that jitter number is the
-headline result. Annotated PNGs land in runs/bl_probe/ so the tracked inner
-edges can be checked by eye against the ribbons.
+frame-to-frame change in cx is measurement noise. The other headline number is
+the FALLBACK RATE: how often the inner-edge scan failed to track at all and
+silently handed back the centroid estimate.
+
+Live mode saves raw frames to runs/bl_probe/raw so --replay can re-run the
+estimator on the exact same pixels as many times as tuning needs, without a
+race running. Annotated overlays land in runs/bl_probe/.
 """
 
 from __future__ import annotations
 
+import argparse
+import glob
 import os
 import statistics as st
 import time
+from collections import Counter
 
 import cv2
 
 _SECONDS = float(os.environ.get("BL_PROBE_SECONDS", "20"))
+_WAIT_S = float(os.environ.get("BL_PROBE_WAIT", "600"))  # idle wait for a race
 _SAVE_EVERY = int(os.environ.get("BL_PROBE_SAVE_EVERY", "30"))
 _OUT_DIR = os.path.join("runs", "bl_probe")
 _RAW_DIR = os.path.join(_OUT_DIR, "raw")
@@ -33,39 +42,115 @@ def _jitter(vals: list[float]) -> float:
     return st.mean(abs(b - a) for a, b in zip(vals[:-1], vals[1:]))
 
 
-def _summarize(edge: list[float], cent: list[float], hdg_e, hdg_c, rows, n, found):
-    print("\n=== blue-line estimator A/B ===", flush=True)
-    print(f"frames={n} found={found} ({100.0 * found / max(n, 1):.0f}%)", flush=True)
-    if not edge:
-        print("no corridor detected — point the drone down the track", flush=True)
-        return
-    print(f"edge rows tracked: mean={st.mean(rows):.1f} min={min(rows)}", flush=True)
-    for name, vals in (
-        ("cx  edge", edge),
-        ("cx  cent", cent),
-        ("hdg edge", hdg_e),
-        ("hdg cent", hdg_c),
-    ):
-        print(
-            f"{name}: mean={st.mean(vals):+.4f} sd={st.pstdev(vals):.4f} "
-            f"jitter={_jitter(vals):.4f}",
-            flush=True,
-        )
-    disagree = [abs(a - b) for a, b in zip(edge, cent)]
-    print(
-        f"|cx_edge - cx_cent|: mean={st.mean(disagree):.4f} max={max(disagree):.4f}",
-        flush=True,
+class _Stats:
+    """Accumulates per-frame estimates from either live or replay input."""
+
+    _SERIES = (
+        ("cx  edge", "cx_norm"),
+        ("cx  cent", "cx_centroid"),
+        ("hdg edge", "heading_err"),
+        ("hdg cent", "heading_centroid"),
     )
-    je, jc = _jitter(edge), _jitter(cent)
-    if len(edge) >= 2 and jc > 1e-9:
-        verdict = "QUIETER" if je < jc else "NOISIER"
+
+    def __init__(self):
+        self.series: dict[str, list[float]] = {k: [] for _, k in self._SERIES}
+        self.rows: list[int] = []
+        self.src: Counter[str] = Counter()
+        self.n = 0
+        self.found = 0
+
+    def add(self, bl: dict) -> None:
+        self.n += 1
+        if not bl.get("found"):
+            return
+        self.found += 1
+        for _, key in self._SERIES:
+            self.series[key].append(float(bl[key]))
+        self.rows.append(int(bl["edge_rows"]))
+        self.src[str(bl.get("source", "?"))] += 1
+
+    def report(self) -> None:
+        print("\n=== blue-line estimator A/B ===", flush=True)
         print(
-            f"\n-> inner-edge cx is {verdict}: {je / jc:.2f}x centroid jitter",
+            f"frames={self.n} found={self.found} "
+            f"({100.0 * self.found / max(self.n, 1):.0f}%)",
             flush=True,
         )
+        if not self.found:
+            print("no corridor detected — point the drone down the track", flush=True)
+            return
+        # Headline: how often did the edge scan actually track? A high fallback
+        # share means the scan is quitting, not that it is estimating badly.
+        edge_n = self.src.get("edge", 0)
+        print(
+            f"estimator used: edge={edge_n} "
+            f"({100.0 * edge_n / self.found:.0f}%) "
+            f"centroid-fallback={self.src.get('centroid', 0)} "
+            f"({100.0 * self.src.get('centroid', 0) / self.found:.0f}%)",
+            flush=True,
+        )
+        tracked = [r for r in self.rows if r > 0]
+        if tracked:
+            print(
+                f"edge rows when engaged: mean={st.mean(tracked):.1f} "
+                f"min={min(tracked)} max={max(tracked)}",
+                flush=True,
+            )
+        for label, key in self._SERIES:
+            vals = self.series[key]
+            print(
+                f"{label}: mean={st.mean(vals):+.4f} sd={st.pstdev(vals):.4f} "
+                f"jitter={_jitter(vals):.4f}",
+                flush=True,
+            )
+        edge, cent = self.series["cx_norm"], self.series["cx_centroid"]
+        disagree = [abs(a - b) for a, b in zip(edge, cent)]
+        print(
+            f"|cx_edge - cx_cent|: mean={st.mean(disagree):.4f} "
+            f"max={max(disagree):.4f}",
+            flush=True,
+        )
+        je, jc = _jitter(edge), _jitter(cent)
+        if len(edge) >= 2 and jc > 1e-9:
+            verdict = "QUIETER" if je < jc else "NOISIER"
+            print(
+                f"\n-> inner-edge cx is {verdict}: {je / jc:.2f}x centroid jitter",
+                flush=True,
+            )
 
 
-def main():
+def _replay(src_dir: str) -> None:
+    """Re-run the estimator over saved raw frames — no sim needed."""
+    from simulator.blue_line_vision import (
+        annotate_blue_lines,
+        detect_blue_lines,
+        estimate_to_dict,
+    )
+
+    paths = sorted(glob.glob(os.path.join(src_dir, "*.png")))
+    if not paths:
+        print(f"[bl-probe] no frames in {src_dir}", flush=True)
+        return
+    out_dir = os.path.join(src_dir, "annotated")
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"[bl-probe] replaying {len(paths)} frames from {src_dir}", flush=True)
+
+    stats = _Stats()
+    for i, path in enumerate(paths):
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        est, mask = detect_blue_lines(img, i, return_mask=True)
+        stats.add(estimate_to_dict(est))
+        cv2.imwrite(
+            os.path.join(out_dir, os.path.basename(path)[:-4] + ".jpg"),
+            annotate_blue_lines(img, est, mask),
+        )
+    stats.report()
+    print(f"overlays -> {out_dir}/", flush=True)
+
+
+def _live() -> None:
     os.environ.setdefault("SKIP_YOLO", "1")  # probe only needs the HSV path
     from simulator.vision_rx import VisionRX
 
@@ -74,12 +159,21 @@ def main():
     os.makedirs(_RAW_DIR, exist_ok=True)
     print(f"[bl-probe] listening {_SECONDS:.0f}s — frames -> {_OUT_DIR}/", flush=True)
 
-    edge: list[float] = []
-    cent: list[float] = []
-    hdg_e: list[float] = []
-    hdg_c: list[float] = []
-    rows: list[int] = []
-    n = found = saved = 0
+    # The sim only streams while a race is running, so start the capture clock
+    # on the FIRST frame rather than on wall time — otherwise the window
+    # silently expires before the race is started and nothing is captured.
+    deadline = time.monotonic() + _WAIT_S
+    while data.get("blue_line") is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if data.get("blue_line") is None:
+        print(
+            f"[bl-probe] no frames in {_WAIT_S:.0f}s — is a race running?", flush=True
+        )
+        return
+    print(f"[bl-probe] frames arriving — capturing {_SECONDS:.0f}s", flush=True)
+
+    stats = _Stats()
+    saved = 0
     last_fid = None
     t_end = time.monotonic() + _SECONDS
     try:
@@ -91,24 +185,17 @@ def main():
                 time.sleep(0.002)
                 continue
             last_fid = bl["frame_id"]
-            n += 1
-            if bl.get("found"):
-                found += 1
-                edge.append(float(bl["cx_norm"]))
-                cent.append(float(bl["cx_centroid"]))
-                hdg_e.append(float(bl["heading_err"]))
-                hdg_c.append(float(bl["heading_centroid"]))
-                rows.append(int(bl["edge_rows"]))
+            stats.add(bl)
             frame = data.get("frame")
             if (
                 frame is not None
                 and frame["frame_id"] == last_fid
-                and n % _SAVE_EVERY == 0
+                and stats.n % _SAVE_EVERY == 0
             ):
-                # Raw frame stays lossless PNG — it is the offline replay input,
-                # so the estimator can be re-run on the exact same pixels. The
-                # annotated copy is only for eyeballing, and PNG-encoding it here
-                # blinds the poll loop for ~26 ms, so it goes out as JPEG.
+                # Raw frame stays lossless PNG — it is the --replay input, so the
+                # estimator can be re-run on the exact same pixels. The annotated
+                # copy is only for eyeballing, and PNG-encoding it here blinds the
+                # poll loop for ~26 ms, so it goes out as JPEG.
                 saved += 1
                 cv2.imwrite(
                     os.path.join(_RAW_DIR, f"f{last_fid:06d}.png"), frame["img"]
@@ -116,10 +203,9 @@ def main():
                 ann = frame.get("annotated")
                 if ann is not None:
                     cv2.imwrite(os.path.join(_OUT_DIR, f"f{last_fid:06d}.jpg"), ann)
-            if n % 60 == 0:
-                src = bl.get("source")
+            if stats.n % 60 == 0:
                 print(
-                    f"[bl-probe] n={n} src={src} "
+                    f"[bl-probe] n={stats.n} src={bl.get('source')} "
                     f"cx_edge={bl.get('cx_norm', 0):+.3f} "
                     f"cx_cent={bl.get('cx_centroid', 0):+.3f} "
                     f"rows={bl.get('edge_rows')}",
@@ -127,8 +213,22 @@ def main():
                 )
     except KeyboardInterrupt:
         pass
-    _summarize(edge, cent, hdg_e, hdg_c, rows, n, found)
-    print(f"saved {saved} annotated frames to {_OUT_DIR}/", flush=True)
+    stats.report()
+    print(f"saved {saved} raw frames to {_RAW_DIR}/", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--replay",
+        metavar="DIR",
+        help="score saved raw frames instead of the live camera stream",
+    )
+    args = ap.parse_args()
+    if args.replay:
+        _replay(args.replay)
+        return
+    _live()
     os._exit(0)  # hard-exit past the non-daemon VisionRX receiver thread
 
 

@@ -43,8 +43,20 @@ _MIN_TOTAL_AREA = 120.0
 _SCAN_ROWS = 28  # sampled rows, bottom -> up
 _SCAN_TOP_FRAC = 0.35  # stop here; above the vanishing point there is no ribbon
 _MIN_RUN_FRAC = 0.005  # ignore cyan runs thinner than this (speckle, reflections)
+# ...and wider than this. A ribbon is THIN in every row (measured 9-13 px at
+# 640 wide, even at the bottom of frame); the lit track surface between the
+# ribbons also passes the cyan mask on ~24% of live frames and shows up as one
+# 276-395 px blob that swallows the corridor. Width is what separates them.
+_MAX_RUN_FRAC = 0.15
 _MAX_JUMP_FRAC = 0.10  # per-row inner-edge continuity limit
 _MAX_MISS_ROWS = 4  # consecutive unusable rows before the scan stops
+# A corridor gap narrower than this is not the corridor. On frames where the
+# lit track surface itself passes the cyan mask, the ribbons and the floor
+# merge into one blob and the only remaining "gaps" are slivers at the frame
+# edge — seeding on one of those put the corridor centre on a ribbon and
+# produced the +-0.5 cx excursions (24% of live frames). Refusing to seed
+# there falls back to the centroid estimate, which survives a filled corridor.
+_MIN_SEED_GAP_FRAC = 0.10
 _MIN_FIT_ROWS = 4  # samples needed for a center fit
 _MIN_FIT_SPAN_FRAC = 0.12  # vertical span needed before the slope means anything
 # Row where cx is evaluated = middle of the near band, so BOTH estimators report
@@ -131,28 +143,38 @@ def _side_centroids(
 # --- inner-edge scanline estimator -------------------------------------------
 
 
-def _row_runs(row: np.ndarray, min_len: int) -> list[tuple[int, int]]:
-    """Contiguous nonzero runs [start, end] inclusive, ascending, >= min_len.
+def _row_runs(row: np.ndarray, min_len: int, max_len: int) -> list[tuple[int, int]]:
+    """Ribbon-plausible runs [start, end] inclusive, ascending.
 
-    Zero-padding both ends makes every rise pair with a fall, so runs touching
-    the frame edge need no special casing.
+    Keeps contiguous nonzero runs whose width is in [min_len, max_len] — see
+    _MIN_RUN_FRAC / _MAX_RUN_FRAC. Zero-padding both ends makes every rise pair
+    with a fall, so runs touching the frame edge need no special casing.
     """
     d = np.diff(np.concatenate(([0], (row > 0).astype(np.int8), [0])))
     starts = np.flatnonzero(d == 1)
     ends = np.flatnonzero(d == -1)  # exclusive
-    return [(int(s), int(e) - 1) for s, e in zip(starts, ends) if e - s >= min_len]
+    return [
+        (int(s), int(e) - 1)
+        for s, e in zip(starts, ends)
+        if min_len <= e - s <= max_len
+    ]
 
 
 def _seed_gap(
-    runs: list[tuple[int, int]], center_x: float
+    runs: list[tuple[int, int]], center_x: float, min_gap: float
 ) -> tuple[float, float] | None:
     """Corridor = the gap BETWEEN two ribbons; seed on the one we fly inside.
 
     Prefers the inter-run gap containing the image center (the drone normally
     sits between the ribbons), else the widest gap. Unlike a w//2 split this
-    still works when both ribbons are on the same side of the frame.
+    still works when both ribbons are on the same side of the frame. Gaps
+    narrower than min_gap are rejected outright — see _MIN_SEED_GAP_FRAC.
     """
-    gaps = [(float(a[1]), float(b[0])) for a, b in zip(runs, runs[1:]) if b[0] > a[1]]
+    gaps = [
+        (float(a[1]), float(b[0]))
+        for a, b in zip(runs, runs[1:])
+        if b[0] - a[1] >= min_gap
+    ]
     if not gaps:
         return None
     return max(gaps, key=lambda g: (g[0] <= center_x <= g[1], g[1] - g[0]))
@@ -179,6 +201,7 @@ def _scan_inner_edges(
     """
     h, w = mask.shape[:2]
     min_len = max(3, int(w * _MIN_RUN_FRAC))
+    max_len = int(w * _MAX_RUN_FRAC)
     max_jump = max(4.0, w * _MAX_JUMP_FRAC)
     y_top = int(h * _SCAN_TOP_FRAC)
     y_bot = h - 1
@@ -190,10 +213,10 @@ def _scan_inner_edges(
     miss = 0
 
     for y in range(y_bot, y_top - 1, -step):
-        runs = _row_runs(mask[y], min_len)
+        runs = _row_runs(mask[y], min_len, max_len)
         xl = xr = None
         if center_p is None:
-            gap = _seed_gap(runs, w * 0.5)
+            gap = _seed_gap(runs, w * 0.5, w * _MIN_SEED_GAP_FRAC)
             if gap is not None:
                 xl, xr = gap
         elif runs:
@@ -218,7 +241,11 @@ def _scan_inner_edges(
             center = xr - half_p
         else:
             miss += 1
-            if miss >= _MAX_MISS_ROWS:
+            # Rows before the seed do not count toward the abort: the ribbons
+            # can start well above the bottom of the frame (nose-down view, or
+            # a bloomed bottom band), and giving up there means never reaching
+            # them at all. After seeding, a miss streak is a genuine end-of-line.
+            if samples and miss >= _MAX_MISS_ROWS:
                 break
             continue
 
