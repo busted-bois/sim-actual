@@ -360,6 +360,85 @@ class GuidanceSignTests(unittest.TestCase):
         self.assertAlmostEqual(roll_cmd, 0.0, places=5)
 
 
+class ClimbAndWeaveTests(unittest.TestCase):
+    """Baseline fine-tune: unstarve the gate-2 climb (turn_mag no longer cuts
+    thrust so hard) + damp the cx weave with a bounded lateral-rate term."""
+
+    def _low(self, cx=0.0, hdg=0.0, cy=-0.4):
+        # Drone LOW in the corridor (cy negative) → needs to climb.
+        return {"found": True, "cx_norm": cx, "cy_norm": cy, "heading_err": hdg}
+
+    def test_climb_authority_restored_when_turning(self):
+        # With turn_mag high AND the drone low, thrust must now climb harder
+        # than the old 0.7-attenuation would have (35% -> 70% authority).
+        from simulator.blue_line_pilot import HOVER_THRUST, K_THRUST_CY, CY_TARGET
+
+        # A hard corner drives turn_mag to 1.0; drone is low → wants thrust up.
+        vis = self._low(cx=0.0, hdg=0.6)  # big heading = real corner, tm→1
+        _, _, _, thrust, dbg = compute_blueline_guidance(vision=vis, lost_s=0.0)
+        self.assertGreater(dbg["turn_mag"], 0.9)
+        cy_err = self._low()["cy_norm"] - CY_TARGET
+        old = HOVER_THRUST - K_THRUST_CY * cy_err * (1.0 - 0.7 * dbg["turn_mag"])
+        self.assertGreater(thrust, old)  # more climb than the old attenuation
+
+    def test_straight_thrust_unchanged(self):
+        # turn_mag→0 on a straight: the attenuation change is a no-op, so the
+        # level-leg (gate 1) behavior is byte-identical.
+        from simulator.blue_line_pilot import HOVER_THRUST, K_THRUST_CY, CY_TARGET
+
+        vis = self._low(cx=0.0, hdg=0.0)
+        _, _, _, thrust, dbg = compute_blueline_guidance(vision=vis, lost_s=0.0)
+        self.assertAlmostEqual(dbg["turn_mag"], 0.0, places=6)
+        cy_err = vis["cy_norm"] - CY_TARGET
+        self.assertAlmostEqual(thrust, HOVER_THRUST - K_THRUST_CY * cy_err, places=6)
+
+    def test_turn_mag_denoised(self):
+        # Same cx weave, hdg dead: turn_mag is lower than the old 0.7 scale.
+        vis = {"found": True, "cx_norm": 0.4, "cy_norm": 0.05, "heading_err": 0.0}
+        _, _, _, _, dbg = compute_blueline_guidance(vision=vis, lost_s=0.0)
+        self.assertAlmostEqual(dbg["turn_mag"], 0.4 / 1.1, places=3)
+        self.assertLess(dbg["turn_mag"], 0.4 / 0.7)  # was the old value
+
+    def test_cx_rate_damping_opposes_convergence(self):
+        # cx falling (drone converging on the corridor) → D-term trims the
+        # bank down so the correction doesn't overshoot into the weave.
+        from simulator.blue_line_pilot import DCX_EMA_ALPHA, K_ROLL_DCX
+
+        vis = {"found": True, "cx_norm": 0.3, "cy_norm": 0.05, "heading_err": 0.0}
+        state = {"prev_cx": 0.5, "dcx_ema": 0.0}
+        _, _, _, _, dbg = compute_blueline_guidance(
+            vision=vis, lost_s=0.0, state=state, dt=0.1
+        )
+        _, _, _, _, dbg0 = compute_blueline_guidance(
+            vision={"found": True, "cx_norm": 0.3, "cy_norm": 0.05, "heading_err": 0.0},
+            lost_s=0.0,
+        )
+        self.assertLess(dbg["desired_roll"], dbg0["desired_roll"])
+        expected_dcx = DCX_EMA_ALPHA * (0.3 - 0.5) / 0.1
+        self.assertAlmostEqual(
+            dbg["desired_roll"] - dbg0["desired_roll"], K_ROLL_DCX * expected_dcx, places=4
+        )
+
+    def test_cx_rate_contribution_capped(self):
+        from simulator.blue_line_pilot import DCX_ROLL_MAX_DEG, K_ROLL_CX
+
+        # A one-tick cx teleport must add at most the cap to the bank.
+        vis = {"found": True, "cx_norm": 0.1, "cy_norm": 0.05, "heading_err": 0.0}
+        state = {"prev_cx": -0.9, "dcx_ema": 0.0}
+        _, _, _, _, dbg = compute_blueline_guidance(
+            vision=vis, lost_s=0.0, state=state, dt=1.0 / 32.0
+        )
+        self.assertAlmostEqual(
+            dbg["desired_roll"], K_ROLL_CX * 0.1 + DCX_ROLL_MAX_DEG, places=4
+        )
+
+    def test_loss_resets_cx_rate_state(self):
+        state = {"prev_cx": 0.5, "dcx_ema": -1.0}
+        compute_blueline_guidance(vision=None, lost_s=1.0, state=state)
+        self.assertNotIn("prev_cx", state)
+        self.assertEqual(state["dcx_ema"], 0.0)
+
+
 class SpeedTuningTests(unittest.TestCase):
     @unittest.skipIf(
         bool(os.environ.get("BL_CRUISE_KMH")), "BL_CRUISE_KMH override active"
