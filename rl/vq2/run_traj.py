@@ -70,7 +70,7 @@ def _pose_xyz(sim: SimInterface):
     return (float(p["body_x_m"]), float(p["body_y_m"]), float(p["body_z_m"]))
 
 
-def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = True):
+def replay(name: str, wait_race: bool = True, tag: str = "", no_yolo: bool = False):
     path = _resolve(name)
     d = np.load(path)
     act = d["act"].astype(np.float32)
@@ -225,9 +225,8 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="",
                     help="label this replay (saves <name>_replay_<tag>.npz) to keep "
                          "multiple replays of the same save for replay-vs-replay diff")
-    ap.add_argument("--yolo", action="store_true",
-                    help="keep YOLO + camera RX ON during replay. Default is OFF: "
-                         "replay ignores vision, and YOLO's GPU load perturbs sim "
-                         "timing run-to-run.")
+    ap.add_argument("--no-yolo", action="store_true",
+                    help="disable YOLO + camera RX during replay (removes GPU/vision "
+                         "load as a variable in the timing-jitter test)")
     args = ap.parse_args()
-    replay(args.name, wait_race=not args.no_wait, tag=args.tag, no_yolo=not args.yolo)
+    replay(args.name, wait_race=not args.no_wait, tag=args.tag, no_yolo=args.no_yolo)
