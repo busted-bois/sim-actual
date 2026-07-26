@@ -39,6 +39,13 @@ K_ROLL_CX = 36.0
 K_ROLL_HDG = 0.55  # deg bank per deg heading_err
 K_YAW_CX = 40.0
 K_YAW_HDG = 1.2  # deg yaw_err per deg heading_err
+# Lateral-rate (cx) damping on roll: the baseline has yaw-rate (gz) damping but
+# NONE on the roll-induced TRANSLATION that the gz gyro can't see — log-verified
+# cx +-0.4 weave at ~0.68 sign-flips/s. EMA'd d(cx)/dt, hard-capped so it only
+# damps the weave and can never dominate the bank command.
+K_ROLL_DCX = 6.0  # deg bank per (cx unit / s)
+DCX_EMA_ALPHA = 0.35
+DCX_ROLL_MAX_DEG = 8.0
 # Yaw-rate damping from the IMU z-gyro (streams in EVERY sim mode). This
 # sim's gyros are sign-inverted (flightlab signs + log-verified: commanding
 # right yields negative gz), so actual right-yaw rate = -gz and the damping
@@ -84,7 +91,11 @@ K_SPEED_D = 0.6
 UNTRUSTED_VX_MPS = 0.4
 
 _TURN_HDG_SCALE_DEG = 20.0
-_TURN_CX_SCALE = 0.7
+# De-noised: hdg is dead (0) most of the flight, so turn_mag was driven almost
+# entirely by cx WEAVE noise (>0.7 for 77% of track time), permanently braking
+# AND — via the thrust attenuation below — starving the gate-2 climb. Raised
+# 0.7->1.1 so weave contributes less; the |hdg| term still flags real corners.
+_TURN_CX_SCALE = 1.1
 # Corner state persistence: raw turn_mag whipsaws with per-frame vision noise
 # (log-verified 2.22<->3.33 v_target flicker mid-turn); latch the peak and
 # decay it slowly so the brake holds through the whole corner.
@@ -241,13 +252,26 @@ def compute_blueline_guidance(
     dbg: dict = {"mode": "lost"}
     found = bool(vision and vision.get("found"))
 
-    cx = hdg_rad = cy = 0.0
+    cx = hdg_rad = cy = dcx = 0.0
     turn_mag = 0.0
+    if not found:
+        # Rate state must not bridge a loss: a re-acquire cx jump would fire a
+        # huge one-tick D spike otherwise.
+        state.pop("prev_cx", None)
+        state["dcx_ema"] = 0.0
     if found:
         cx = float(vision.get("cx_norm", 0.0))
         cy = float(vision.get("cy_norm", 0.0))
         hdg_rad = float(vision.get("heading_err", 0.0))
         hdg_deg = math.degrees(hdg_rad)
+        # EMA'd lateral rate for the roll D-term (bounded contribution).
+        prev_cx = state.get("prev_cx")
+        dcx_raw = 0.0 if prev_cx is None else (cx - prev_cx) / max(dt, 1e-3)
+        state["prev_cx"] = cx
+        dcx = DCX_EMA_ALPHA * dcx_raw + (1.0 - DCX_EMA_ALPHA) * float(
+            state.get("dcx_ema", 0.0)
+        )
+        state["dcx_ema"] = dcx
         turn_mag = float(
             np.clip(
                 abs(hdg_deg) / _TURN_HDG_SCALE_DEG + abs(cx) / _TURN_CX_SCALE,
@@ -257,7 +281,9 @@ def compute_blueline_guidance(
         )
         desired_roll = float(
             np.clip(
-                K_ROLL_CX * cx + K_ROLL_HDG * hdg_deg,
+                K_ROLL_CX * cx
+                + K_ROLL_HDG * hdg_deg
+                + np.clip(K_ROLL_DCX * dcx, -DCX_ROLL_MAX_DEG, DCX_ROLL_MAX_DEG),
                 -MAX_BANK_DEG,
                 MAX_BANK_DEG,
             )
@@ -417,9 +443,13 @@ def compute_blueline_guidance(
     )
     yaw_cmd = float(yaw_err * KY)
 
+    # Attenuation cut 0.7->0.3: the noise-pinned turn_mag was running the climb
+    # correction at ~35% authority, and gate 2 is the STEEPEST-climb leg (log:
+    # thrust never left 0.30 while the drone sat 0.5 low). Identical on straights
+    # (turn_mag->0), so gate 1 (a level leg) is unaffected. K_THRUST_CY untouched.
     thrust = float(
         np.clip(
-            hover_thrust - K_THRUST_CY * cy_err * (1.0 - 0.7 * turn_mag),
+            hover_thrust - K_THRUST_CY * cy_err * (1.0 - 0.3 * turn_mag),
             THRUST_MIN,
             THRUST_MAX,
         )
@@ -429,6 +459,7 @@ def compute_blueline_guidance(
         cx=cx,
         cy=cy,
         hdg=hdg_rad,
+        dcx=dcx,
         gate_bearing=None if gate is None else float(gate["bearing_deg"]),
         gate_range=None if gate is None else float(gate["range_m"]),
         turn_mag=turn_mag,
@@ -537,7 +568,7 @@ class BlueLinePilot:
             self._log = open(path, "w", newline="")
             self._log_wr = csv.writer(self._log)
             self._log_wr.writerow(
-                "t mode cx cy hdg_deg turn_mag gate_brg gate_rng vX v_target "
+                "t mode cx cy hdg_deg dcx turn_mag gate_brg gate_rng vX v_target "
                 "pitch_des des_roll yaw_err cmd_roll cmd_pitch cmd_yaw thrust "
                 "att_roll att_pitch gz_dps lost_s n_passed".split()
             )
@@ -568,6 +599,7 @@ class BlueLinePilot:
                 + [f"{dbg.get(k, float('nan')):.3f}" for k in ("cx", "cy")]
                 + [
                     f"{math.degrees(dbg.get('hdg', 0.0)):.2f}",
+                    f"{dbg.get('dcx', 0.0):.3f}",
                     f"{dbg.get('turn_mag', 0.0):.3f}",
                     "" if gb is None else f"{gb:.2f}",
                     "" if gr is None else f"{gr:.2f}",
