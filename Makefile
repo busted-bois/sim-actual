@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight blueline free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo train-blueline-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view bl-probe auto auto-gp control-flight blueline free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo train-blueline-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -50,6 +50,12 @@ auto-gp: control-flight
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
 view:
 	uv run -m simulator.vision_view
+
+# Passive blue-line estimator A/B: inner-edge vs legacy centroid on identical
+# frames. No MAVLink, no arming. Park the drone facing the corridor -- residual
+# cx motion is then pure measurement noise. BL_PROBE_SECONDS overrides.
+bl-probe:
+	uv run -m simulator.blue_line_probe
 
 # Kill a stale make auto/make sim client still holding UDP 14550
 free-port:
