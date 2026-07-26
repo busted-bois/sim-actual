@@ -145,6 +145,23 @@ class InnerEdgeTests(unittest.TestCase):
         self.assertTrue(est.left_found)
         self.assertFalse(est.right_found)
 
+    def test_bloomed_corridor_floor_does_not_capture_the_scan(self):
+        """The lit track surface passes the cyan mask on ~24% of live frames.
+
+        Captured f000052 had runs (100,109) ribbon / (173,449) BLOOM / (527,540)
+        ribbon: the blob fills the corridor, leaving only slivers beside it, and
+        the scan seeded on a sliver and reported cx -0.53. A ribbon is thin, so
+        width is what tells them apart.
+        """
+        img = _frame()
+        h = img.shape[0]
+        _draw_ribbons(img, 200, 440)
+        # Bloom blob spanning most of the corridor, as observed live.
+        cv2.rectangle(img, (233, int(h * 0.55)), (409, h - 5), _CYAN_BGR, -1)
+        est, _ = detect_blue_lines(img, frame_id=16)
+        self.assertTrue(est.found)
+        self.assertAlmostEqual(est.cx_norm, 0.0, delta=0.10)
+
     def test_detached_reflection_inside_corridor_is_rejected(self):
         """A blob floating in the corridor must not become an inner edge."""
         img = _frame()
