@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight bluevision free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_blue_line_pilot -v
 
 sim:
 	uv run main.py
@@ -40,6 +40,10 @@ control-flight:
 
 # Back-compat alias for the original AndurilGP-style entry name.
 auto-gp: control-flight
+
+# Same GP flight as control-flight; centroid blue-line post-gate + SEARCH cue.
+# Gate center-lock on by default (GP_CENTER_LOCK=0 for old bearing law).
+bluevision: control-flight
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
