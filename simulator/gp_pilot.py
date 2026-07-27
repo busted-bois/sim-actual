@@ -698,8 +698,8 @@ class CommandSlew:
     the response smooth without touching the guidance gains.
     """
 
-    def __init__(self, hz: float = GP_CONTROL_HZ):
-        self._max_step_deg = CMD_SLEW_DEG_S / hz
+    def __init__(self, hz: float = GP_CONTROL_HZ, deg_s: float = CMD_SLEW_DEG_S):
+        self._max_step_deg = deg_s / hz
         self._max_step_thrust = THRUST_SLEW_PER_S / hz
         self.reset()
 
