@@ -62,7 +62,8 @@ class VQ2RealEnv(gym.Env):
         # Fly through the PROVEN auto_gp.py stack (GP pilot lifecycle: arm/GO/re-arm
         # + robust control loop) with the policy overriding the steering. Set
         # use_gp_flight=False (or VQ2_GP_FLIGHT=0) to use the bare SimInterface.
-        if use_gp_flight and os.environ.get("VQ2_GP_FLIGHT", "1") != "0":
+        self._gp_flight = use_gp_flight and os.environ.get("VQ2_GP_FLIGHT", "1") != "0"
+        if self._gp_flight:
             from rl.vq2.gp_flight import GPFlightInterface
             self.sim = GPFlightInterface(ip=ip, mav_port=mav_port)
         else:
@@ -120,14 +121,21 @@ class VQ2RealEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         reset_episode(self.sim, self.est, settle_s=0.5)
-        # Optionally hold until the race GO (drone flying = countdown elapsed) so
-        # the policy always starts from the same settled state with the race live.
+        # Hold until a FRESH race GO so every episode starts from the same settled,
+        # race-live state. Two phases so we don't latch the PREVIOUS episode's
+        # stale flying=True (which started episodes mid-teleport -> berserk flights):
+        #   1) wait for the pilot to LEAVE flying (it detects the teleport clock
+        #      reset and drops to WAIT/countdown),
+        #   2) then wait for it to RE-ENTER flying (countdown elapsed = fresh GO).
         if self._wait_go and hasattr(self.sim, "flying"):
             t0 = time.time()
+            while self.sim.flying() and time.time() - t0 < 5.0:
+                time.sleep(0.05)      # phase 1: old flight must end first
+            t0 = time.time()
             while not self.sim.flying() and time.time() - t0 < self._go_timeout_s:
-                time.sleep(0.05)
+                time.sleep(0.05)      # phase 2: wait for the new countdown's GO
             waited = time.time() - t0
-            print(f"[vq2.env] GO after {waited:.1f}s "
+            print(f"[vq2.env] fresh GO after {waited:.1f}s "
                   f"({'flying' if self.sim.flying() else 'timeout -> immediate-go'})",
                   flush=True)
         self.gates.reset(self.sim)
@@ -153,10 +161,15 @@ class VQ2RealEnv(gym.Env):
     def step(self, action):
         action = np.clip(np.asarray(action, np.float32), -1.0, 1.0)
 
-        # act: policy -> absolute attitude (deg) -> quat wire (the SAME channel
-        # the GP pilot flies on), held for one decision tick.
-        roll_deg, pitch_deg, yaw_deg, th = controller.action_to_attitude(action)
-        self.sim.send_attitude_quat_deg(roll_deg, pitch_deg, yaw_deg, th)
+        # act: RESIDUAL RL -- the policy's action is a small correction ADDED to
+        # the GP base command (stable-by-construction). Fallback path (bare
+        # SimInterface) sends absolute attitude as before.
+        if self._gp_flight:
+            dr, dp, dy, dth = controller.action_to_residual(action)
+            self.sim.send_residual_deg(dr, dp, dy, dth)
+        else:
+            roll_deg, pitch_deg, yaw_deg, th = controller.action_to_attitude(action)
+            self.sim.send_attitude_quat_deg(roll_deg, pitch_deg, yaw_deg, th)
         time.sleep(_DT)
 
         # observe.

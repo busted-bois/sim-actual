@@ -7,15 +7,26 @@ from __future__ import annotations
 
 import argparse
 
-from stable_baselines3 import PPO
+import numpy as np
 
+from rl import spec
 from rl.vq2.gym_env import DEFAULT_NUM_GATES, VQ2RealEnv
 
 
 def evaluate(model_path: str, episodes: int = 5, seconds: float = 30.0,
-             gates: int = DEFAULT_NUM_GATES) -> None:
+             gates: int = DEFAULT_NUM_GATES, zero_action: bool = False) -> None:
     env = VQ2RealEnv(max_seconds=seconds, num_gates=gates)
-    model = PPO.load(model_path, device="cpu")
+    if zero_action:
+        # STAGE-3a check: run the FULL env loop (reset/step/gate-count/terminate)
+        # with a ZERO residual, so the GP base flies. Verifies the pipeline works
+        # on the stable base before any learning. No model needed.
+        model = None
+        print("[vq2.eval] ZERO-ACTION mode: GP base flies (zero residual) through "
+              "the full env loop.", flush=True)
+    else:
+        from stable_baselines3 import PPO
+        model = PPO.load(model_path, device="cpu")
+    zero = np.zeros(spec.ACTION_DIM, np.float32)
     passed_hist = []
     try:
         for ep in range(episodes):
@@ -29,7 +40,10 @@ def evaluate(model_path: str, episodes: int = 5, seconds: float = 30.0,
             max_fwd = 0.0              # farthest forward from spawn
             alt_lo, alt_hi = float("inf"), float("-inf")
             while not done:
-                action, _ = model.predict(obs, deterministic=True)
+                if model is None:
+                    action = zero
+                else:
+                    action, _ = model.predict(obs, deterministic=True)
                 obs, r, terminated, truncated, info = env.step(action)
                 total += r
                 done = terminated or truncated
@@ -53,7 +67,6 @@ def evaluate(model_path: str, episodes: int = 5, seconds: float = 30.0,
     finally:
         env.close()
     if passed_hist:
-        import numpy as np
         print(f"\n[vq2.eval] gates passed: mean={np.mean(passed_hist):.1f} "
               f"max={max(passed_hist)} over {episodes} episodes", flush=True)
 
@@ -64,5 +77,9 @@ if __name__ == "__main__":
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("--gates", type=int, default=DEFAULT_NUM_GATES)
+    ap.add_argument("--zero-action", action="store_true",
+                    help="ignore the model and send zero residual (GP base flies) -- "
+                         "verifies the full env loop on the stable base")
     args = ap.parse_args()
-    evaluate(args.model, args.episodes, args.seconds, args.gates)
+    evaluate(args.model, args.episodes, args.seconds, args.gates,
+             zero_action=args.zero_action)
