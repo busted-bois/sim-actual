@@ -27,7 +27,8 @@ OSC_K = 0.01                  # - per ‖roll/pitch rate cmd‖² (attitude osci
 RATE_K = 0.005               # - per ‖ang-rate cmd‖² (excessive angular rate)
 TIME_K = 0.01                 # - per step (finish quickly)
 COLLISION_PEN = -20.0
-SOFT_COLLISION_PEN = -0.3     # - proximity warning (NOT terminal; nudge away)
+SOFT_COLLISION_PEN = -0.02    # - proximity warning (fires constantly near gates;
+                              #   keep tiny so approaching a gate isn't punished)
 OOB_PEN = -20.0
 CRASH_PEN = -20.0
 TIMEOUT_PEN = -5.0

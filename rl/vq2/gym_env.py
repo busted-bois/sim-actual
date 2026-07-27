@@ -35,11 +35,21 @@ _DT = 1.0 / DECISION_HZ
 # The VQ2 course has 17 gates (NOT 6).
 DEFAULT_NUM_GATES = 17
 
-# MAVLink COLLISION.threat_level: 0 NONE, 1 LOW, 2 HIGH. The sim streams these as
-# PROXIMITY warnings near structures (the working GP pilot ignores low ones and
-# keeps flying); only a HIGH-threat event is treated as a real crash. Override
-# with env var VQ2_HARD_THREAT to recalibrate once we see live values.
+# MAVLink COLLISION is a PROXIMITY stream, not a crash flag. MEASURED: threat=2
+# events fire at horizontal_minimum_delta ~2.5-3 m -- i.e. 3 m AWAY from the gate
+# frame, which the drone MUST approach to thread the 1.5 m opening. The proven GP
+# pilot ignores collisions and flies through. So a collision terminates the
+# episode ONLY on actual CONTACT: delta below VQ2_CONTACT_DELTA_M. Default 0.0
+# disables collision-termination entirely (flip / out-of-bounds / timeout catch
+# real crashes); set e.g. VQ2_CONTACT_DELTA_M=0.3 to re-enable contact-only kills.
 HARD_THREAT = int(os.environ.get("VQ2_HARD_THREAT", "2"))
+CONTACT_DELTA_M = float(os.environ.get("VQ2_CONTACT_DELTA_M", "0.0"))
+
+# The estimator attitude/position is unreliable (esp. right after a teleport, and
+# it drifts). Don't let a transient glitch end the episode: ignore flip/OOB for a
+# grace window while it settles, and require the signal to persist a few steps.
+RESET_GRACE_STEPS = int(os.environ.get("VQ2_RESET_GRACE", "15"))
+TERM_DEBOUNCE = int(os.environ.get("VQ2_TERM_DEBOUNCE", "5"))
 
 
 class VQ2RealEnv(gym.Env):
@@ -47,9 +57,16 @@ class VQ2RealEnv(gym.Env):
 
     def __init__(self, max_seconds: float = 30.0, num_gates: int = DEFAULT_NUM_GATES,
                  ip: str = "127.0.0.1", mav_port: int = 14550,
-                 record_success: bool = False):
+                 record_success: bool = False, use_gp_flight: bool = True):
         super().__init__()
-        self.sim = SimInterface(ip=ip, mav_port=mav_port)
+        # Fly through the PROVEN auto_gp.py stack (GP pilot lifecycle: arm/GO/re-arm
+        # + robust control loop) with the policy overriding the steering. Set
+        # use_gp_flight=False (or VQ2_GP_FLIGHT=0) to use the bare SimInterface.
+        if use_gp_flight and os.environ.get("VQ2_GP_FLIGHT", "1") != "0":
+            from rl.vq2.gp_flight import GPFlightInterface
+            self.sim = GPFlightInterface(ip=ip, mav_port=mav_port)
+        else:
+            self.sim = SimInterface(ip=ip, mav_port=mav_port)
         self.sim.data["_quiet_vision"] = True   # silence per-frame [vision] GATE spam
         self.est = GPEstimation(self.sim.data)
         self.est.start()
@@ -63,6 +80,14 @@ class VQ2RealEnv(gym.Env):
 
         self.action_space = spaces.Box(-1.0, 1.0, (spec.ACTION_DIM,), np.float32)
         self.observation_space = spaces.Box(-10.0, 10.0, (POLICY_OBS_DIM,), np.float32)
+
+        # Wait for the race GO (countdown elapsed) before handing control to the
+        # policy, so every episode starts from the same settled post-countdown
+        # state with the race live. VQ2_WAIT_GO=0 disables (start immediately) to
+        # A/B whether it changes the learned routes. Falls back to immediate-go
+        # after `go_timeout_s` (a teleport may not issue a fresh countdown).
+        self._wait_go = os.environ.get("VQ2_WAIT_GO", "1") != "0"
+        self._go_timeout_s = float(os.environ.get("VQ2_GO_TIMEOUT_S", "8.0"))
 
         self._steps = 0
         self._prev_action = np.zeros(spec.ACTION_DIM, np.float32)
@@ -95,6 +120,16 @@ class VQ2RealEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         reset_episode(self.sim, self.est, settle_s=0.5)
+        # Optionally hold until the race GO (drone flying = countdown elapsed) so
+        # the policy always starts from the same settled state with the race live.
+        if self._wait_go and hasattr(self.sim, "flying"):
+            t0 = time.time()
+            while not self.sim.flying() and time.time() - t0 < self._go_timeout_s:
+                time.sleep(0.05)
+            waited = time.time() - t0
+            print(f"[vq2.env] GO after {waited:.1f}s "
+                  f"({'flying' if self.sim.flying() else 'timeout -> immediate-go'})",
+                  flush=True)
         self.gates.reset(self.sim)
         self._steps = 0
         self._prev_action = np.zeros(spec.ACTION_DIM, np.float32)
@@ -109,6 +144,7 @@ class VQ2RealEnv(gym.Env):
         self._seg_rew, self._seg_simus, self._seg_gidx = [], [], []
         self._ep_max_gate = 0
         self._ep_collisions = 0
+        self._flip_streak = self._oob_streak = 0
         ego, pose_est, conf = self._read()
         obs = self.stacker.reset(self._frame(ego, pose_est, conf, self._prev_action))
         self._last_obs = obs                 # the obs the policy will condition on
@@ -137,14 +173,22 @@ class VQ2RealEnv(gym.Env):
         self._last_collision = col
         threat = int(col[1]) if col else 0
         delta = float(col[2]) if col else -1.0
-        collision = col_evt and threat >= HARD_THREAT
-        soft_collision = col_evt and not collision
+        # Only ACTUAL contact ends the episode; proximity warnings (delta ~3 m,
+        # which you must pass through to thread a gate) are a soft nudge.
+        contact = (col_evt and threat >= HARD_THREAT
+                   and 0.0 <= delta < CONTACT_DELTA_M)
+        collision = contact
+        soft_collision = col_evt and not contact
         if col_evt:
             self._n_hard += int(collision)
             self._n_soft += int(soft_collision)
             self._last_threat, self._last_delta = threat, delta
-        flipped = self._flipped(ego)
-        oob = self._out_of_bounds(ego)
+        # estimator-based crash signals -- debounced + grace-windowed (see above).
+        self._flip_streak = self._flip_streak + 1 if self._flipped(ego) else 0
+        self._oob_streak = self._oob_streak + 1 if self._out_of_bounds(ego) else 0
+        past_grace = self._steps > RESET_GRACE_STEPS
+        flipped = past_grace and self._flip_streak >= TERM_DEBOUNCE
+        oob = past_grace and self._oob_streak >= TERM_DEBOUNCE
         timeout = self._steps >= self.max_steps
 
         # distance to the currently-visible gate (for progress shaping).
