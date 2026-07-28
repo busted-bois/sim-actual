@@ -48,10 +48,9 @@ BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
 # Δ is expressed in the *current gate* frame (map quat), not AHRS — GyroAHRS
 # yaw is unreferenced and was rotating NED Δ into random body axes (CSV:
 # bx collapsed by ~λ|Δx| → wild bank). Vision-aligned: gate frame ≈ body.
-# Default OFF: live logs showed map gate axes put ~24 m along-track onto
-# "right", yanking body-y by ~λ·24. Code path kept for λ>0 experiments.
-LOOKAHEAD_LAMBDA = 0.0
-LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·lateral / λ·vert when λ>0
+# Small default: start curving toward next gate before reaching current.
+LOOKAHEAD_LAMBDA = 0.2
+LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·thru / λ·lateral / λ·vert
 # Cross-track: bank bias from e_signed = (p_rel × dhat)_z (vision/gate-frame).
 # Negated into roll so +by (gate right) adds +bank toward the path/gate.
 K_CROSS = 0.3  # deg per meter CTE
@@ -126,6 +125,11 @@ UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
 MAX_GATE_BX_M = 22.0
 MAX_ABS_BZ_M = 10.0
 ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
+E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
+# G1 refine: fade λ near throat; don't sideways-yank a centered hole.
+LOOKAHEAD_FADE_NEAR_M = 5.0  # λ→0 by this range (pass current gate first)
+LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
+CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat lookahead)
 
 
 class Phase(Enum):
@@ -157,7 +161,11 @@ def gate_segment_delta_ned(
 def path_dhat_body(
     delta_ned: np.ndarray | None, gate_quat: np.ndarray | None
 ) -> np.ndarray | None:
-    """Unit path direction in gate frame (≈ body when vision-aligned)."""
+    """Unit path direction in gate frame (≈ body when vision-aligned).
+
+    Returns None if map path is mostly *lateral* in gate frame — that case
+    produced e_signed≈bx (~11) while by≈0 (pass-gate-v1 log).
+    """
     if delta_ned is None or gate_quat is None:
         return None
     from rl.spec import quat_to_R
@@ -171,7 +179,10 @@ def path_dhat_body(
     hn = float(np.linalg.norm(dhat))
     if hn < 1e-9:
         return None
-    return dhat / hn
+    dhat = dhat / hn
+    if abs(float(dhat[0])) < abs(float(dhat[1])):
+        return None
+    return dhat
 
 
 def cross_track_error(
@@ -193,12 +204,12 @@ def apply_lookahead_body(
     delta_ned: np.ndarray | None,
     lam: float,
 ) -> tuple[float, float, float, float]:
-    """Bias aim toward next gate: gate-frame lateral + vertical only.
+    """Bias aim to p_lookahead = p_cur + λ (p_next − p_cur) in gate frame.
 
     Map quats often put the long along-track Δ on gate-"right" (live log:
     delta_gate≈[-2.1, +23.6, -5.1]). Adding that to body-y yanked ~8 m
-    sideways. Use the *smaller* horizontal gate-frame component as lateral,
-    clamp offsets, leave bx unchanged.
+    sideways. Use the *larger* horizontal gate-frame component as thru
+    (along-track) and the *smaller* as lateral; clamp all three offsets.
     """
     if lam <= 0.0 or delta_ned is None or gate_quat is None:
         return bx, by, bz, 0.0
@@ -206,15 +217,23 @@ def apply_lookahead_body(
 
     R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))  # gate → world
     dg = R_wg.T @ np.asarray(delta_ned, dtype=float)
-    # Horizontal gate axes: thru=dg[0], right=dg[1]. Along-track is the large one.
-    if abs(float(dg[1])) >= abs(float(dg[0])):
-        lateral = float(dg[0])
+    # Horizontal: larger-mag = along-track (thru), smaller-mag = lateral.
+    g0, g1 = float(dg[0]), float(dg[1])
+    if abs(g1) >= abs(g0):
+        along, lateral = g1, g0
     else:
-        lateral = float(dg[1])
+        along, lateral = g0, g1
     vert = float(dg[2])
-    lat_off = float(np.clip(lam * lateral, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M))
-    vert_off = float(np.clip(lam * vert, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M))
-    ax = bx
+    thru_off = float(
+        np.clip(lam * along, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
+    )
+    lat_off = float(
+        np.clip(lam * lateral, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
+    )
+    vert_off = float(
+        np.clip(lam * vert, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
+    )
+    ax = bx + thru_off
     ay = by + lat_off
     az = bz + vert_off
     if ax <= 0.1:
@@ -259,20 +278,38 @@ def compute_guidance(
     vision_valid = False
     reliable = False
     bx = by = bz = float("nan")
+    bx_raw = by_raw = bz_raw = float("nan")
     vis_frame_id = None
     lam_used = 0.0
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
         bz = float(vision.get("body_z_m", float("nan")))
+        bx_raw, by_raw, bz_raw = bx, by, bz
         vis_frame_id = vision.get("frame_id")
         if not any(math.isnan(v) for v in (bx, by, bz)) and bx > 0.1:
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
+            # Fade λ near throat (plan stays; G1 needs hole first).
+            # post-fix: by_raw≈0.04 → by_la≈−0.38 wrong-way bank → by→0.8.
+            lam_eff = float(lookahead_lambda)
+            if lam_eff > 0.0 and not math.isnan(bx_raw):
+                fade = float(
+                    np.clip(
+                        (bx_raw - LOOKAHEAD_FADE_NEAR_M)
+                        / max(LOOKAHEAD_FADE_FAR_M - LOOKAHEAD_FADE_NEAR_M, 1e-3),
+                        0.0,
+                        1.0,
+                    )
+                )
+                lam_eff *= fade
             bx, by, bz, lam_used = apply_lookahead_body(
-                bx, by, bz, gate_quat, delta_ned, float(lookahead_lambda)
+                bx, by, bz, gate_quat, delta_ned, lam_eff
             )
+            # Centered on hole: keep raw by — only thru/vert may curve.
+            if abs(by_raw) < CENTERED_BY_M:
+                by = by_raw
             if bx <= 0.1:
                 vision_valid = False
                 lam_used = 0.0
@@ -285,14 +322,16 @@ def compute_guidance(
     elev_rate = 0.0
     elev_updated = False
     if vision_valid and vis_frame_id is not None:
-        # Anduril body_z includes camera down-tilt; elev uses tilt-compensated
-        # bz_elev (optical-axis → 0) instead of AHRS-projected gate_pD.
-        bz_elev = bz
+        # Elev from RAW vision (pre-lookahead). Inflated bx from thru_off made
+        # optical elev climb when already high (pass-gate-v1).
+        bz_elev = float(bz_raw)
         if (vision or {}).get("source") == "anduril":
-            bz_elev = bz - math.tan(math.radians(CAM_TILT_DEG)) * max(bx, 0.1)
+            bz_elev = bz_raw - math.tan(math.radians(CAM_TILT_DEG)) * max(
+                bx_raw, 0.1
+            )
         state["last_elev_err"] = float(bz_elev)
         elev_updated = True
-        if bx > MIN_BX_FOR_ELEV:
+        if bx_raw > MIN_BX_FOR_ELEV:
             prev_fid = state.get("prev_elev_frame_id")
             if prev_fid is not None and 0 < vis_frame_id - prev_fid <= 3:
                 dt_e = (vis_frame_id - prev_fid) / 30.0
@@ -456,9 +495,13 @@ def compute_guidance(
     e_signed = 0.0
     ecross = np.zeros(3)
     if vision_valid:
+        # CTE on raw vision (hole). Lateral map dhat → e_signed≈bx≈11
+        # (pass-gate-v1); reject → bearing-only. Clip leftover map CTE.
+        # No optical fallback: e_signed=-by would double-count bearing bank.
         dhat_b = path_dhat_body(delta_ned, gate_quat)
         if dhat_b is not None:
-            ecross, e_signed = cross_track_error(bx, by, bz, dhat_b)
+            ecross, e_signed = cross_track_error(bx_raw, by_raw, bz_raw, dhat_b)
+            e_signed = float(np.clip(e_signed, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
             # vcorrection → bank: negate so +by banks toward gate/path.
             desired_roll = float(
                 np.clip(
@@ -487,6 +530,61 @@ def compute_guidance(
     # Falling: never keep commanding descend (post-gate ghost sink).
     if vD > ANTI_SINK_VD_MPS:
         thrust = max(thrust, float(hover_thrust) + 0.02)
+
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+
+        _n = int(state.get("_dbg_n", 0))
+        if vision_valid and _n % 10 == 0:
+            with open("debug-89f5ba.log", "a", encoding="utf-8") as _df:
+                _df.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "89f5ba",
+                            "runId": "g1-v1-restore",
+                            "hypothesisId": "baseline",
+                            "location": "gp_pilot.py:compute_guidance",
+                            "message": "thru_gate",
+                            "timestamp": int(_time.time() * 1000),
+                            "data": {
+                                "flying_t": float(flying_t)
+                                if not math.isnan(flying_t)
+                                else None,
+                                "bx_raw": float(bx_raw)
+                                if not math.isnan(bx_raw)
+                                else None,
+                                "by_raw": float(by_raw)
+                                if not math.isnan(by_raw)
+                                else None,
+                                "bz_raw": float(bz_raw)
+                                if not math.isnan(bz_raw)
+                                else None,
+                                "bx": float(bx),
+                                "by": float(by),
+                                "bz": float(bz),
+                                "lam": float(lam_used),
+                                "bearing": float(bearing_body),
+                                "desired_roll": float(desired_roll),
+                                "e_signed": float(e_signed),
+                                "elev_err": float(elev_err),
+                                "thrust": float(thrust),
+                                "hover": float(hover_thrust),
+                                "vX": float(vX) if not math.isnan(vX) else None,
+                                "v_target": float(v_target)
+                                if not math.isnan(v_target)
+                                else None,
+                                "blend": float(blend),
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+        state["_dbg_n"] = _n + 1
+    except Exception:
+        pass
+    # #endregion
 
     dbg = {
         "bearing_deg": bearing_body,
