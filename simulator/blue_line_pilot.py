@@ -68,7 +68,26 @@ DCX_ROLL_MAX_DEG = 8.0
 K_YAW_D_GZ = 0.12  # deg of yaw_err per deg/s of raw gz
 
 K_PITCH_CY = 8.0
-K_THRUST_CY = 0.10
+# Climb authority, raised 0.10 -> 0.22 after flying UNDER gates 2 and 3.
+# Measured over 4044 logged track rows: the drone sat below the corridor in 53%
+# of frames, yet thrust NEVER exceeded 0.348 (p90 0.307) against a THRUST_MAX of
+# 0.55 — the ceiling was never approached, so the gain was the limiter, not the
+# clamp. Peak climb trim ever commanded was +0.078 over hover. At 0.22 a typical
+# -0.6 cy error trims +0.13 (thrust 0.40), still well inside the clamp.
+K_THRUST_CY = 0.22
+# The turn attenuation on the climb term is GONE (was 0.7, then 0.3). Gates 2
+# and 3 follow the left-hander, so it cut climb authority exactly where the
+# drone is going under. Nothing else scaled climb with cornering.
+# Bank FF ceiling: 26 deg (MAX_BANK_DEG) costs ~0.030 of lift at hover, so this
+# only ever restores what the bank took.
+BANK_THRUST_FF_MAX = 0.08
+# Vertical gate servo (thrust per metre of gate-height error), bounded well
+# under the cy term so a bad PnP z can nudge but never fly the drone.
+K_GATE_Z_THRUST = 0.02
+GATE_Z_THRUST_MAX = 0.04
+# Vertical rate damping, so the raised climb P does not turn into porpoising.
+K_THRUST_DCY = 0.05  # thrust per (cy unit / s)
+DCY_THRUST_MAX = 0.06  # damping only — must never dominate the P term
 
 CRUISE_PITCH_DEG = -2.0
 CREEP_PITCH_DEG = -0.5
@@ -76,6 +95,10 @@ SEARCH_YAW_ERR_DEG = 35.0
 HOLD_YAW_ERR_DEG = 12.0
 LOSS_HOLD_S = 0.2
 SEARCH_AFTER_S = 0.5
+# data["blue_line"] keeps found=True when vision_rx stalls, so the pilot used to
+# steer on frozen frames — log-measured stalls hit 64 control ticks (~2 s).
+# Mirrors GATE_ASSIST_FRAME_TIMEOUT_S; ~5 missed frames at the measured 12.5 Hz.
+BL_VISION_STALE_S = 0.4
 
 # Wire-command slew for this pilot. GP's 90 deg/s (1.5 deg/tick at a nominal
 # 60 Hz) halves again at the real ~32 Hz loop rate — log-verified: the corner
@@ -117,6 +140,9 @@ _TURN_CX_SCALE = 1.1
 # (log-verified 2.22<->3.33 v_target flicker mid-turn); latch the peak and
 # decay it slowly so the brake holds through the whole corner.
 TURN_MAG_DECAY_PER_S = 0.8  # latched turn_mag full->0 in 1.25 s
+# ...and a matching RISE cap, so no single frame can slam the brake on. 0->full
+# in 0.4 s: a real corner still brakes hard, a one-frame artefact cannot.
+TURN_MAG_RISE_PER_S = 2.5
 # Open-loop corner brake for sessions with no velocity telemetry (vX nan —
 # the speed-PD is dead there): nose-up by this much at full turn_mag.
 OPEN_BRAKE_DEG = 3.5  # full corner: pitch_des = -2 + 3.5 = +1.5 (real brake)
@@ -148,6 +174,19 @@ GATE_BIAS_ROLL_GAIN = 0.25
 GATE_BIAS_ROLL_MAX_DEG = 9.0
 GATE_TURN_MAG_BEARING_DEG = 20.0  # |bearing|/this adds turn_mag → early slow-down
 GATE_TURN_MAG_MAX = 1.0  # an agreeing gate bearing may brake fully to corner speed
+
+# --- Gate commit / punch-through ---------------------------------------------
+# Everything blinds at once at the gate mouth: GateAssist floors at 2.5 m, the
+# YOLO tracker goes blind under YOLO_NEAR_BX_M=2.0 and holds a 10-frame
+# cooldown, and the corridor rails sweep out of the FOV. The pilot answered
+# that with hold -> creep -> search, i.e. a +-35 deg yaw sweep at the exact
+# moment it should be flying straight through — log-verified hesitation.
+# Commit instead: freeze steering on the last good command, hold cruise pitch,
+# kill the brake, and forbid the search ladder until the gate is behind us.
+GATE_COMMIT_WINDOW_S = 0.6  # ~= YOLO_PASS_COOLDOWN_FR (10 frames) at ~12.5 Hz
+GATE_COMMIT_ARM_RANGE_M = 4.0  # arm while the gate is still resolvable
+GATE_COMMIT_ARM_BEARING_DEG = 12.0  # ...and lined up; a wild bearing is no pass
+GATE_COMMIT_READY_MEMORY_S = 0.6  # sighting older than this no longer arms
 
 # --- Race-start gating (GP semantics: only a FRESH countdown flies) ----------
 CLOCK_RESET_SLACK_MS = 500  # sim_boot rewinding beyond this = manual reset
@@ -207,6 +246,15 @@ class GateAssist:
     def reset(self) -> None:
         self._smoother.reset()
 
+    @property
+    def threading(self) -> bool:
+        """True while the smoother is blind because a gate is right there.
+
+        The estimate goes None at the gate mouth by design; this says WHY, so
+        the pilot can tell "gate underneath us" from "nothing detected".
+        """
+        return self._smoother.yolo_tracker.threading_gate
+
     def update(self, data: dict, now: float) -> dict | None:
         pose = data.get("pose")
         frame = data.get("frame")
@@ -241,6 +289,7 @@ class GateAssist:
         return {
             "bearing_deg": bearing_deg,
             "range_m": rng,
+            "body_z_m": bz,  # gate centre height vs us; drives the climb trim
             "infer_ms": est.get("infer_ms"),
             "lag_fr": lag_fr,
             "frame_id": est.get("frame_id"),
@@ -262,21 +311,39 @@ def compute_blueline_guidance(
     gate: dict | None = None,
     gate_hint_sign: float | None = None,
     gz_dps: float = float("nan"),
+    commit: bool = False,
 ) -> tuple[float, float, float, float, dict]:
-    """Vision + IMU → attitude-quat wire cmds (GP encoding)."""
+    """Vision + IMU → attitude-quat wire cmds (GP encoding).
+
+    `commit` = a gate is right in front of us: hold the last good steering and
+    fly through. See GATE_COMMIT_WINDOW_S.
+    """
     if state is None:
         state = {}
     dbg: dict = {"mode": "lost"}
     found = bool(vision and vision.get("found"))
 
-    cx = hdg_rad = cy = dcx = 0.0
+    cx = hdg_rad = cy = dcx = dcy = 0.0
     turn_mag = 0.0
     if not found:
         # Rate state must not bridge a loss: a re-acquire cx jump would fire a
         # huge one-tick D spike otherwise.
         state.pop("prev_cx", None)
+        state.pop("prev_cy", None)
         state["dcx_ema"] = 0.0
-    if found:
+        state["dcy_ema"] = 0.0
+    if commit:
+        # Gate right there. Steering is FROZEN on the last good track command —
+        # the rails have left the FOV and any fresh estimate at this range is
+        # the gate's own edge, not the corridor. Cruise straight through.
+        dbg["mode"] = "commit"
+        desired_roll = float(state.get("last_roll", 0.0))
+        yaw_err = float(state.get("last_yaw", 0.0))
+        cy = float(vision.get("cy_norm", CY_TARGET)) if found else CY_TARGET
+        v_target = CRUISE_SPEED_MPS
+        # A corner brake latched on approach must NOT ride through the gate.
+        state["turn_mag_lat"] = 0.0
+    elif found:
         cx = float(vision.get("cx_norm", 0.0))
         cy = float(vision.get("cy_norm", 0.0))
         hdg_rad = float(vision.get("heading_err", 0.0))
@@ -294,13 +361,36 @@ def compute_blueline_guidance(
         dbg["width"] = float(vision.get("width_norm", 0.0))
         dbg["single_rail"] = bool(vision.get("single_rail", False))
         # EMA'd lateral rate for the roll D-term (bounded contribution).
-        prev_cx = state.get("prev_cx")
-        dcx_raw = 0.0 if prev_cx is None else (cx - prev_cx) / max(dt, 1e-3)
-        state["prev_cx"] = cx
-        dcx = DCX_EMA_ALPHA * dcx_raw + (1.0 - DCX_EMA_ALPHA) * float(
-            state.get("dcx_ema", 0.0)
-        )
-        state["dcx_ema"] = dcx
+        # Differencing must be per CAMERA FRAME, not per control tick: control
+        # runs 32.6 Hz against ~12.5 Hz vision (log-measured 2.6 ticks per new
+        # frame, worst case 64). Dividing a frame-to-frame step by the control
+        # period overstated the rate ~2.6x, and the repeat ticks fed 0 into the
+        # EMA in between. No frame_id (older callers) = previous behaviour.
+        fid = vision.get("frame_id")
+        frame_dt = float(state.get("frame_dt", 0.0)) + dt
+        if fid is not None and fid == state.get("prev_fid"):
+            # Same measurement: carries no new rate information. Hold the EMA
+            # rather than diluting it with a fabricated zero.
+            state["frame_dt"] = frame_dt
+            dcx = float(state.get("dcx_ema", 0.0))
+            dcy = float(state.get("dcy_ema", 0.0))
+        else:
+            prev_cx = state.get("prev_cx")
+            prev_cy = state.get("prev_cy")
+            dcx_raw = 0.0 if prev_cx is None else (cx - prev_cx) / max(frame_dt, 1e-3)
+            dcy_raw = 0.0 if prev_cy is None else (cy - prev_cy) / max(frame_dt, 1e-3)
+            state["prev_cx"] = cx
+            state["prev_cy"] = cy
+            state["prev_fid"] = fid
+            state["frame_dt"] = 0.0
+            dcx = DCX_EMA_ALPHA * dcx_raw + (1.0 - DCX_EMA_ALPHA) * float(
+                state.get("dcx_ema", 0.0)
+            )
+            dcy = DCX_EMA_ALPHA * dcy_raw + (1.0 - DCX_EMA_ALPHA) * float(
+                state.get("dcy_ema", 0.0)
+            )
+            state["dcx_ema"] = dcx
+            state["dcy_ema"] = dcy
         turn_mag = float(
             np.clip(
                 abs(hdg_deg) / _TURN_HDG_SCALE_DEG + abs(cx) / _TURN_CX_SCALE,
@@ -374,6 +464,10 @@ def compute_blueline_guidance(
                 dbg["gate_bias"] = True
         v_target = 0.0  # set after the turn_mag latch below
         dbg["mode"] = "track"
+        # Remembered for the gate commit: the last steering taken on a real
+        # corridor lock is what we fly through the gate on.
+        state["last_roll"] = desired_roll
+        state["last_yaw"] = yaw_err
     elif gate is not None:
         # Line lost but a fresh YOLO gate is in view: steer at the gate instead
         # of blind-searching. Corner crawl — this is real guidance, not a hunt.
@@ -417,8 +511,15 @@ def compute_blueline_guidance(
     # Latch the corner state: raw turn_mag whipsaws with per-frame vision noise
     # and drops to 0 on line loss — decay instead, so the brake holds through
     # the whole corner and across YOLO detection gaps (log-verified whipsaw).
+    # Symmetric limiter. The decay latch (below) was here already; the RISE cap
+    # is new — turn_mag was previously unbounded upward, so a single frame of
+    # bad heading slammed a full brake that the slow decay then held for 1.25 s,
+    # straight through a gate (log: cx=+0.001 hdg=+55.9 -> pitch_des +1.5 nose
+    # up). At 2.5/s a real corner still brakes fully in 0.4 s.
+    prev_tm = float(state.get("turn_mag_lat", 0.0))
+    turn_mag = min(turn_mag, prev_tm + TURN_MAG_RISE_PER_S * dt)
     turn_mag = float(
-        max(turn_mag, float(state.get("turn_mag_lat", 0.0)) - TURN_MAG_DECAY_PER_S * dt)
+        np.clip(max(turn_mag, prev_tm - TURN_MAG_DECAY_PER_S * dt), 0.0, 1.0)
     )
     state["turn_mag_lat"] = turn_mag
     if dbg["mode"] == "track":
@@ -436,7 +537,9 @@ def compute_blueline_guidance(
 
     # Speed-PD → desired pitch (always when vX known); hard cap 25 km/h.
     if math.isnan(vX):
-        pitch_des = CRUISE_PITCH_DEG if found else CREEP_PITCH_DEG
+        # Commit cruises even with no corridor lock — creeping is what makes it
+        # hesitate in the gate mouth.
+        pitch_des = CRUISE_PITCH_DEG if (found or commit) else CREEP_PITCH_DEG
         pitch_des = pitch_des - K_PITCH_CY * cy_err * (1.0 - 0.5 * turn_mag)
         if turn_mag > 0.0:
             # No velocity feedback: brake open-loop. The old +1.5 deg*turn_mag
@@ -471,13 +574,43 @@ def compute_blueline_guidance(
     )
     yaw_cmd = float(yaw_err * KY)
 
-    # Attenuation cut 0.7->0.3: the noise-pinned turn_mag was running the climb
-    # correction at ~35% authority, and gate 2 is the STEEPEST-climb leg (log:
-    # thrust never left 0.30 while the drone sat 0.5 low). Identical on straights
-    # (turn_mag->0), so gate 1 (a level leg) is unaffected. K_THRUST_CY untouched.
+    # Vertical gate servo: bounded thrust trim toward the SEEN gate's centre
+    # height. cy only knows where the painted corridor sits in frame; on a
+    # climbing leg the corridor cue can be satisfied while the drone is still
+    # below the gate opening — which is how it flies UNDER gates 2 and 3.
+    # Body FRD: gate above us -> bz negative -> positive (climb) trim.
+    gate_z_trim = 0.0
+    if gate is not None and gate.get("body_z_m") is not None:
+        gate_z_trim = float(
+            np.clip(
+                -K_GATE_Z_THRUST * float(gate["body_z_m"]),
+                -GATE_Z_THRUST_MAX,
+                GATE_Z_THRUST_MAX,
+            )
+        )
+
+    # Bank-angle thrust feed-forward: lift ~ cos(bank), so a hard turn sinks
+    # unless the collective is trimmed for it. Gates 2 and 3 sit right after the
+    # left-hander, so this is altitude lost exactly where it is being missed.
+    # Pure feed-forward off the commanded/achieved bank — it cannot porpoise.
+    bank_deg = max(abs(roll_deg), abs(desired_roll))
+    bank_ff = float(
+        np.clip(
+            hover_thrust * (1.0 / math.cos(math.radians(bank_deg)) - 1.0),
+            0.0,
+            BANK_THRUST_FF_MAX,
+        )
+    )
+
+    # Vertical rate damping. The climb P gain more than doubled, and cy already
+    # swung p10 -0.56 / p90 +0.57 around the target at the OLD gain, so raising
+    # P alone would just oscillate harder. Same frame-gated EMA as the cx rate,
+    # hard-capped so it only damps and can never drive the climb.
+    dcy_trim = float(np.clip(-K_THRUST_DCY * dcy, -DCY_THRUST_MAX, DCY_THRUST_MAX))
+
     thrust = float(
         np.clip(
-            hover_thrust - K_THRUST_CY * cy_err * (1.0 - 0.3 * turn_mag),
+            hover_thrust - K_THRUST_CY * cy_err + dcy_trim + gate_z_trim + bank_ff,
             THRUST_MIN,
             THRUST_MAX,
         )
@@ -488,6 +621,9 @@ def compute_blueline_guidance(
         cy=cy,
         hdg=hdg_rad,
         dcx=dcx,
+        dcy=dcy,
+        gate_z_trim=gate_z_trim,
+        bank_ff=bank_ff,
         gate_bearing=None if gate is None else float(gate["bearing_deg"]),
         gate_range=None if gate is None else float(gate["range_m"]),
         turn_mag=turn_mag,
@@ -524,6 +660,11 @@ class BlueLinePilot:
         self._gate_assist = GateAssist()
         self._last_gate_bearing_deg: float | None = None
         self._last_gate_seen_t = 0.0
+        self._commit_until: float | None = None
+        self._commit_ready_t: float | None = None
+        self._commit_n_passed = 0
+        self._vision_fid = None
+        self._vision_fid_t: float | None = None
         self._assist_enabled = os.environ.get(
             "BL_GATE_ASSIST", "1"
         ).strip().lower() not in ("0", "false", "no")
@@ -576,9 +717,19 @@ class BlueLinePilot:
         self._gate_assist.reset()
         self._last_gate_bearing_deg = None
         self._last_gate_seen_t = 0.0
+        self._commit_until = None
+        self._commit_ready_t = None
+        self._commit_n_passed = 0
+        self._vision_fid = None
+        self._vision_fid_t = None
         self._disarm_since = None
         self._openloop_noted = False
         self._close_log()
+        # The sim teleports the drone on restart, which invalidates the ESKF's
+        # gyro-integrated attitude and its whole velocity history.
+        est = getattr(self.controller, "estimator", None)
+        if est is not None:
+            est.reset()
         self.controller.set_control_mode("attitude_quat")
         self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, HOVER_THRUST)
 
@@ -596,8 +747,8 @@ class BlueLinePilot:
             self._log = open(path, "w", newline="")
             self._log_wr = csv.writer(self._log)
             self._log_wr.writerow(
-                "t mode cx cy hdg_deg conf width single_rail dcx turn_mag "
-                "gate_brg gate_rng vX v_target "
+                "t mode cx cy hdg_deg conf width single_rail dcx dcy "
+                "gate_z_trim bank_ff turn_mag gate_brg gate_rng vX v_target "
                 "pitch_des des_roll yaw_err cmd_roll cmd_pitch cmd_yaw thrust "
                 "att_roll att_pitch gz_dps lost_s n_passed".split()
             )
@@ -632,6 +783,9 @@ class BlueLinePilot:
                     f"{dbg.get('width', float('nan')):.3f}",
                     str(int(bool(dbg.get("single_rail", False)))),
                     f"{dbg.get('dcx', 0.0):.3f}",
+                    f"{dbg.get('dcy', 0.0):.3f}",
+                    f"{dbg.get('gate_z_trim', 0.0):.4f}",
+                    f"{dbg.get('bank_ff', 0.0):.4f}",
                     f"{dbg.get('turn_mag', 0.0):.3f}",
                     "" if gb is None else f"{gb:.2f}",
                     "" if gr is None else f"{gr:.2f}",
@@ -649,6 +803,67 @@ class BlueLinePilot:
                 self._log_last_flush = now
         except (OSError, ValueError, KeyError):
             self._close_log()
+
+    # --- vision freshness ----------------------------------------------------
+
+    def _vision_is_fresh(self, vision: dict | None, now: float) -> bool:
+        """False once data["blue_line"] stops advancing — see BL_VISION_STALE_S.
+
+        found=True persists in the shared dict when vision_rx stalls, so nothing
+        ever marked the estimate lost: log-measured gaps reached 64 control
+        ticks (~2 s) of steering on one frozen frame, gates included.
+        """
+        if vision is None:
+            return False
+        fid = vision.get("frame_id")
+        if fid is None:
+            return True  # no frame clock (tests / older producers): trust it
+        if fid != self._vision_fid:
+            self._vision_fid = fid
+            self._vision_fid_t = now
+            return True
+        if self._vision_fid_t is None:
+            self._vision_fid_t = now
+            return True
+        return now - self._vision_fid_t <= BL_VISION_STALE_S
+
+    # --- gate commit ---------------------------------------------------------
+
+    def _update_gate_commit(
+        self, gate: dict | None, threading_gate: bool, now: float
+    ) -> bool:
+        """Latch 'fly straight through the gate' — see GATE_COMMIT_WINDOW_S."""
+        # Disarm FIRST so an expiring window cannot immediately re-arm itself.
+        if self._commit_until is not None:
+            passed = self.gates_passed > self._commit_n_passed
+            if passed or now >= self._commit_until:
+                self._commit_until = None
+                # The gate we just threaded must never arm another commit.
+                self._commit_ready_t = None
+                if passed:
+                    self._gate_assist.reset()
+            else:
+                return True
+
+        # A gate seen close AND lined up is the one we are about to thread.
+        if (
+            gate is not None
+            and float(gate["range_m"]) <= GATE_COMMIT_ARM_RANGE_M
+            and abs(float(gate["bearing_deg"])) <= GATE_COMMIT_ARM_BEARING_DEG
+        ):
+            self._commit_ready_t = now
+
+        # Arm the moment it blanks — that blanking IS the gate arriving, not a
+        # detection failure, so hunting for the line here is exactly wrong.
+        if (
+            self._commit_ready_t is not None
+            and now - self._commit_ready_t <= GATE_COMMIT_READY_MEMORY_S
+            and (threading_gate or gate is None)
+        ):
+            self._commit_until = now + GATE_COMMIT_WINDOW_S
+            self._commit_n_passed = self.gates_passed
+            return True
+        return False
 
     # --- race-start gating ---------------------------------------------------
 
@@ -775,6 +990,8 @@ class BlueLinePilot:
             return
         now = time.monotonic()
         vision = self.data.get("blue_line")
+        if not self._vision_is_fresh(vision, now):
+            vision = None
         if vision and vision.get("found"):
             self._last_vision = vision
             self._last_cx = float(vision.get("cx_norm", 0.0))
@@ -797,9 +1014,11 @@ class BlueLinePilot:
         gate = (
             self._gate_assist.update(self.data, now) if self._assist_enabled else None
         )
+        threading_gate = self._assist_enabled and self._gate_assist.threading
         if gate is not None:
             self._last_gate_bearing_deg = float(gate["bearing_deg"])
             self._last_gate_seen_t = now
+        commit = self._update_gate_commit(gate, threading_gate, now)
         # Recently-lost gate still tells us which way the course bends — its
         # bearing sign beats _turn_hint_sign's heuristic (default-right) search.
         gate_hint_sign = None
@@ -838,6 +1057,7 @@ class BlueLinePilot:
             gate=gate,
             gate_hint_sign=gate_hint_sign,
             gz_dps=gz_dps,
+            commit=commit,
         )
         self.data["bl_gate_assist"] = {
             "mode": dbg.get("mode"),

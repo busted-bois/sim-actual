@@ -160,6 +160,9 @@ class Controller:
         self.data = data
         self.system_boot_ms = system_boot_ms
         self.control_mode = "motor"
+        # Optional StateEstimator; setup_components attaches one so the ESKF
+        # sees commanded thrust. None = no estimator (tests, harnesses).
+        self.estimator = None
         # Per-pilot command rate: spec VADR-TS-003 4.4 caps it below 100 Hz.
         # Default 90 (IBVS/others); GPPilot lowers it to the original 60.
         self.control_hz = CONTROL_HZ
@@ -239,6 +242,11 @@ class Controller:
                 self.arm()
         else:
             self._disarm_ticks = 0
+
+        # The ESKF integrates COMMANDED thrust (this sim's accelerometer is only
+        # trustworthy on the ground), so it must see every collective we send.
+        if self.estimator is not None:
+            self.estimator.thrust_cmd = float(self._thrust)
 
         if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)
