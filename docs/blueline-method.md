@@ -18,7 +18,7 @@ the later parts are line-by-line.
 > `BlueLinePilot` rows of §5, and §6's `test_blue_line_pilot.py` row describe
 > other branches only. Here the corridor's four scalars feed
 > `GPPilot.TrackVirtualGate` (no-gate fallback) and `_course_direction_cue`
-> (post-pass SEARCH direction); flight is `make control-flight` → `GPPilot`
+> (post-pass SEARCH direction); flight is `make classical blue` → `GPPilot`
 > with the unmodified `rl_failed101` control law. See §1.1.
 
 ---
@@ -107,7 +107,10 @@ make blueline   # blueline / blueline-2: alias of `make sim`
 make bl-probe   # blueline-2 only: passive estimator A/B, never commands the drone
 
 # classical+blueline (this branch) — GPPilot, corridor as fallback + search cue:
-make control-flight   # or `make bluevision` / `make auto-gp`, same target
+make classical blue   # the branch's flight; `classical` and `blue` are two
+                      # goals sharing one prerequisite, so auto_gp.py runs once
+make classical-blue   # same, hyphenated
+make control-flight   # same target again (also `make auto-gp`)
 ```
 
 `auto_blueline.py` sets `AUTO_PILOT=blueline`, arms, opens the vision window,
