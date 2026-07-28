@@ -8,16 +8,27 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from simulator.gp_pilot import (
+    AIM_V_PX,
     ELEV_I_SEED,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
     MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
+    TRACK_LAT_GAIN,
+    TRACK_LOOKAHEAD_M,
+    TrackVirtualGate,
+    _course_direction_cue,
     _fresh_hold_state,
     compute_guidance,
 )
-from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
+from simulator.gp_vision import (
+    CX,
+    _yolo_pose_estimate,
+    gate_body_from_pinhole,
+    gate_image_center,
+    vision_gate_estimate,
+)
 from simulator.gyro_ahrs import GyroAHRS, euler_to_quat
 
 
@@ -164,15 +175,16 @@ class GuidanceTests(unittest.TestCase):
         self.assertGreater(low, safe)
         self.assertGreater(low, HOVER_THRUST + ELEV_I_SEED)
 
-    def test_floor_guard_suppressed_when_gate_below(self):
-        # A fresh gate genuinely below us (intended descent) must NOT trip the
-        # floor guard — otherwise the descending course can't be flown.
+    def test_floor_hard_min_wins_over_gate_below(self):
+        # Clearance under 1.0 m: climb even if a gate is "below" — never scrape.
+        from simulator.gp_pilot import FLOOR_HARD_MIN_M
+
         state = _fresh_hold_state()
         vision = {
             "frame_id": 5,
             "body_x_m": 10.0,
             "body_y_m": 0.0,
-            "body_z_m": 2.0,  # gate 2 m below → descend toward it
+            "body_z_m": 2.0,  # gate below
             "normal_body": None,
         }
         _rr, _pr, _yr, thrust, dbg = compute_guidance(
@@ -185,10 +197,174 @@ class GuidanceTests(unittest.TestCase):
             vision_vel=None,
             state=state,
             vX=2.0,
-            floor_clearance_m=0.2,  # low, but a gate is below → not a fall
+            floor_clearance_m=0.2,
         )
         self.assertGreater(dbg["elev_err"], 0.3)
-        self.assertLess(thrust, HOVER_THRUST)  # descend command preserved
+        self.assertLess(0.2, FLOOR_HARD_MIN_M)
+        self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_floor_soft_assist_between_hard_and_clearance(self):
+        from simulator.gp_pilot import FLOOR_CLEARANCE_M, FLOOR_HARD_MIN_M
+
+        state = _fresh_hold_state()
+        mid = (FLOOR_HARD_MIN_M + FLOOR_CLEARANCE_M) / 2.0  # ~1.25 m
+
+        def blind_thrust(clearance):
+            _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=None,
+                vision_vel=None,
+                state=dict(state),
+                vX=2.0,
+                floor_clearance_m=clearance,
+            )
+            return thrust
+
+        soft = blind_thrust(mid)
+        high = blind_thrust(2.0)
+        self.assertGreater(soft, high)
+        self.assertGreater(soft, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_floor_guard_inert_above_clearance(self):
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            floor_clearance_m=2.0,
+        )
+        self.assertAlmostEqual(thrust, HOVER_THRUST + ELEV_I_SEED, places=5)
+
+    def test_floor_soft_allows_gate_descend_above_hard_min(self):
+        # Between 1.0–1.5 m with gate below: intended descend may proceed
+        # (soft band only; hard min already cleared).
+        from simulator.gp_pilot import FLOOR_HARD_MIN_M
+
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 5,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": 2.0,
+            "normal_body": None,
+        }
+        clearance = FLOOR_HARD_MIN_M + 0.2  # 1.2 m
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            floor_clearance_m=clearance,
+        )
+        self.assertGreater(dbg["elev_err"], 0.3)
+        self.assertLess(thrust, HOVER_THRUST)
+
+    def test_nan_agl_does_not_rocket(self):
+        # No AGL: must NOT force pad climb (that rocketed to 70+ km/h live).
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            flying_t=0.5,
+            floor_clearance_m=float("nan"),
+        )
+        self.assertTrue(math.isnan(dbg["agl"]))
+        self.assertAlmostEqual(thrust, HOVER_THRUST + ELEV_I_SEED, places=5)
+
+    def test_floor_climb_suppressed_when_climbing_fast(self):
+        # AGL low but already climbing hard: floor boost must stay off.
+        from simulator.gp_pilot import FLOOR_CLIMB_CAP
+
+        state = _fresh_hold_state()
+
+        def thrust_at(vD):
+            _rr, _pr, _yr, thrust, _dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=vD,
+                vision=None,
+                vision_vel=None,
+                state=dict(state),
+                vX=2.0,
+                floor_clearance_m=0.2,
+            )
+            return thrust
+
+        pad = thrust_at(0.0)
+        climbing = thrust_at(-2.0)  # faster than MAX_FLOOR_CLIMB_MPS
+        self.assertGreater(pad, HOVER_THRUST + ELEV_I_SEED)
+        self.assertLess(pad - (HOVER_THRUST + ELEV_I_SEED), FLOOR_CLIMB_CAP + 1e-6)
+        # Floor boost off; D-term may cut below hover while climbing.
+        self.assertLess(climbing, pad)
+        self.assertLessEqual(climbing, HOVER_THRUST + ELEV_I_SEED + 1e-6)
+
+    def test_takeoff_no_dive_under_hard_min(self):
+        # Under hard min with cruise speed: pitch_des must not dive below trim.
+        from simulator.gp_pilot import (
+            DESIRED_PITCH_DEG,
+            FLOOR_HARD_MIN_M,
+            PITCH_DES_MIN_DEG,
+        )
+
+        state = _fresh_hold_state()
+        # High vX shortfall would normally command a dive toward PITCH_DES_MIN.
+        _rr, _pr, _yr, _thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=1.0,  # trusted, below cruise → dive demand
+            flying_t=5.0,  # past lean ramp
+            floor_clearance_m=0.2,
+        )
+        self.assertLess(0.2, FLOOR_HARD_MIN_M)
+        self.assertGreaterEqual(dbg["pitch_des_deg"], DESIRED_PITCH_DEG)
+        self.assertGreater(dbg["pitch_des_deg"], PITCH_DES_MIN_DEG)
+        self.assertAlmostEqual(dbg["agl"], 0.2, places=5)
+
+    def test_agl_logged_in_dbg(self):
+        state = _fresh_hold_state()
+        _rr, _pr, _yr, _thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=None,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+            floor_clearance_m=1.25,
+        )
+        self.assertAlmostEqual(dbg["agl"], 1.25, places=5)
 
     def test_elev_integral_trims_persistent_low_offset(self):
         # Drone stuck 0.5 m below gate centre (hover-trim mismatch): the I-term
@@ -539,7 +715,7 @@ class GuidanceTests(unittest.TestCase):
         self.assertLess(dbg["pitch_des_deg"], DESIRED_PITCH_DEG)
 
     def test_speed_loop_slows_near_gate(self):
-        from simulator.gp_pilot import THRU_SPEED_MPS
+        from simulator.gp_pilot import CRUISE_SPEED_MPS, THRU_SPEED_MPS
 
         state = _fresh_hold_state()
         vision = {
@@ -561,7 +737,7 @@ class GuidanceTests(unittest.TestCase):
             state=state,
             vX=2.2,
         )
-        self.assertLess(dbg["v_target"], 1.6)
+        self.assertLess(dbg["v_target"], CRUISE_SPEED_MPS - 0.5)
         self.assertGreaterEqual(dbg["v_target"], THRU_SPEED_MPS - 0.05)
 
     def test_hard_brake_when_over_max_speed(self):
@@ -1239,8 +1415,72 @@ class GpRaceGateTests(unittest.TestCase):
             ]
             self.assertGreater(abs(pitch_cmd), 5.0)
             self.assertAlmostEqual(roll_cmd, 0.0, delta=0.5)
-            self.assertGreater(thrust, 0.2)
-            self.assertLess(thrust, 0.4)
+            # No baro/NED → DR AGL≈0 → mild floor boost (capped, not rocket).
+            self.assertGreater(thrust, HOVER_THRUST)
+            self.assertLess(thrust, HOVER_THRUST + 0.15)
+        finally:
+            pilot.shutdown()
+
+    def test_baro_agl_climbs_near_pad(self):
+        """VQ2 path: pressure_alt AGL drives floor climb when NED absent."""
+        from simulator.gp_pilot import FLOOR_HARD_MIN_M, HOVER_THRUST, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            data["imu"] = {"time_us": 1, "pressure_alt": 100.0}
+            self._go_flying(ctrl, data, pilot)
+            # Still on pad: pa == pa0 → AGL 0 → hard-min climb.
+            data["imu"] = {"time_us": 2, "pressure_alt": 100.0}
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            self.assertIsNotNone(pilot._pa0)
+            thrust_pad = ctrl.set_attitude_quat_deg.call_args[0][3]
+            self.assertGreater(thrust_pad, HOVER_THRUST + 0.04)
+            self.assertLess(thrust_pad, HOVER_THRUST + 0.15)
+
+            # Climbed above hard min: soft band only, thrust closer to hover.
+            data["imu"] = {
+                "time_us": 3,
+                "pressure_alt": 100.0 + FLOOR_HARD_MIN_M + 1.0,
+            }
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot.tick()
+            thrust_high = ctrl.set_attitude_quat_deg.call_args[0][3]
+            self.assertLess(thrust_high, thrust_pad)
+        finally:
+            pilot.shutdown()
+
+    def test_dr_agl_climbs_near_pad(self):
+        """No baro/NED: est.pos_ned DR AGL drives mild floor climb."""
+        from simulator.gp_pilot import HOVER_THRUST, Phase
+
+        ctrl, data, pilot = self._pilot()
+        try:
+            self._go_flying(ctrl, data, pilot)
+            ctrl.set_attitude_quat_deg.reset_mock()
+            pilot.tick()  # latch _dr_z0 at 0, AGL 0 → hard-min boost
+            self.assertEqual(pilot.phase, Phase.FLYING)
+            self.assertIsNotNone(pilot._dr_z0)
+            thrust_pad = ctrl.set_attitude_quat_deg.call_args[0][3]
+            self.assertGreater(thrust_pad, HOVER_THRUST + 0.04)
+            self.assertLess(thrust_pad, HOVER_THRUST + 0.15)
+
+            # Fake climb in DR: z_ned decreases (up) → AGL rises → boost drops.
+            with patch.object(pilot.est, "snapshot") as snap_fn:
+                snap = {
+                    "att_deg": (0.0, 0.0, 0.0),
+                    "quat": np.array([1.0, 0.0, 0.0, 0.0]),
+                    "pos_ned": np.array([0.0, 0.0, -2.0]),
+                    "vel_ned": np.array([0.0, 0.0, 0.0]),
+                    "vel_body": np.array([2.0, 0.0, 0.0]),
+                    "rates_body_dps": np.array([0.0, 0.0, 0.0]),
+                }
+                snap_fn.return_value = snap
+                ctrl.set_attitude_quat_deg.reset_mock()
+                pilot.tick()
+                thrust_high = ctrl.set_attitude_quat_deg.call_args[0][3]
+            self.assertLess(thrust_high, thrust_pad)
         finally:
             pilot.shutdown()
 
@@ -1710,6 +1950,289 @@ class EstimatorResilienceTests(unittest.TestCase):
                 self.assertGreater(abs(yaw), 0.5)
             finally:
                 est.stop()
+
+
+class TrackVirtualGateBluelineTests(unittest.TestCase):
+    """Blue-line centroid fuses ahead of detect_track in the ribbon fallback."""
+
+    def test_prefers_blue_line_over_track(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 7},
+            "blue_line": {
+                "found": True,
+                "cx_norm": 0.4,
+                "heading_err": 0.0,
+                "left_found": True,
+                "right_found": True,
+                "frame_id": 7,
+            },
+        }
+        with patch("simulator.gp_pilot.detect_track") as det:
+            out = vg.synth(data)
+            det.assert_not_called()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "blueline")
+        self.assertAlmostEqual(out["body_x_m"], TRACK_LOOKAHEAD_M)
+        self.assertAlmostEqual(out["body_y_m"], 0.4 * TRACK_LAT_GAIN)
+        self.assertEqual(vg._last["offset"], 0.4)
+
+    def test_falls_back_to_track_when_blue_line_missing(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 3},
+            "blue_line": {"found": False, "frame_id": 3},
+        }
+        fake = {"offset": -0.2, "angle": 0.0, "strength": 0.75}
+        with patch("simulator.gp_pilot.detect_track", return_value=fake) as det:
+            out = vg.synth(data)
+            det.assert_called_once()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "track")
+        self.assertAlmostEqual(out["body_y_m"], -0.2 * TRACK_LAT_GAIN)
+
+    def test_course_cue_prefers_blueline_over_gate(self):
+        bl = {
+            "found": True,
+            "cx_norm": -0.4,
+            "left_found": True,
+            "right_found": True,
+        }
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        cue = _course_direction_cue(bl, gate, {"offset": 0.5})
+        self.assertEqual(cue, -1.0)
+
+    def test_course_cue_falls_back_to_gate_then_track(self):
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        self.assertEqual(_course_direction_cue(None, gate, None), 1.0)
+        self.assertEqual(
+            _course_direction_cue({"found": False}, None, {"offset": -0.3}),
+            -1.0,
+        )
+
+
+class GateCenterLockTests(unittest.TestCase):
+    """Image-plane center-lock: keep gate at CX / CY (true image centre)."""
+
+    def _level_quat(self):
+        return euler_to_quat(0.0, 0.0, 0.0)
+
+    def test_gate_image_center_from_box(self):
+        g = {"box": [100.0, 50.0, 200.0, 150.0], "conf": 0.9}
+        uv = gate_image_center(g)
+        self.assertEqual(uv, (150.0, 100.0))
+
+    def test_yolo_estimate_fills_u_v(self):
+        data = {
+            "frame": {"frame_id": 5},
+            "pose": {
+                "frame_id": 5,
+                "gates": [
+                    {
+                        "conf": 0.9,
+                        "box": [280.0, 100.0, 360.0, 200.0],
+                        "pose": {
+                            "gate_pos_body": [8.0, 0.5, -0.2],
+                            "normal_body": [1.0, 0.0, 0.0],
+                            "reproj_px": 2.0,
+                            "method": "ippe",
+                        },
+                    }
+                ],
+            },
+        }
+        est = _yolo_pose_estimate(data)
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est["u_px"], 320.0)
+        self.assertAlmostEqual(est["v_px"], 150.0)
+
+    def test_yolo_uv_falls_back_to_gate_target(self):
+        data = {
+            "frame": {"frame_id": 5},
+            "gate_target": {
+                "detected": True,
+                "u_px": 310.0,
+                "v_px": 200.0,
+                "frame_id": 5,
+            },
+            "pose": {
+                "frame_id": 5,
+                "gates": [
+                    {
+                        "conf": 0.9,
+                        # no box/keypoints → gate_image_center fails
+                        "pose": {
+                            "gate_pos_body": [8.0, 0.0, 0.0],
+                            "normal_body": [1.0, 0.0, 0.0],
+                            "reproj_px": 2.0,
+                            "method": "ippe",
+                        },
+                    }
+                ],
+            },
+        }
+        est = _yolo_pose_estimate(data)
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est["u_px"], 310.0)
+        self.assertAlmostEqual(est["v_px"], 200.0)
+
+    def test_no_climb_when_gate_near_image_center(self):
+        """Live log: cy≈217 with old AIM_V≈296 caused endless climb."""
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 20,
+            "body_x_m": 6.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "u_px": CX,
+            "v_px": 217.0,
+            "reliable": True,
+            "source": "yolo",
+            "normal_body": None,
+        }
+        with patch.dict("os.environ", {"GP_CENTER_LOCK": "1"}, clear=False):
+            _r, _p, _y, thrust, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                vX=2.0,
+            )
+        self.assertTrue(dbg["center_lock"])
+        self.assertLess(abs(dbg["elev_err"]), 0.35)
+        self.assertLess(thrust, HOVER_THRUST + ELEV_I_SEED + 0.05)
+
+    def test_center_lock_yaws_toward_gate_right_of_aim(self):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 10,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,  # body says centered — pixel must win
+            "body_z_m": 0.0,
+            "u_px": CX + 80.0,
+            "v_px": AIM_V_PX,
+            "reliable": True,
+            "source": "yolo",
+            "normal_body": None,
+        }
+        with patch.dict("os.environ", {"GP_CENTER_LOCK": "1"}, clear=False):
+            _r, _p, yaw, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                vX=2.0,
+            )
+        self.assertTrue(dbg["center_lock"])
+        self.assertGreater(dbg["bearing_deg"], 0.0)
+        self.assertGreater(dbg["desired_roll"], 0.0)
+        # KY is negative (Anduril wire sign): positive bearing → negative yaw cmd.
+        self.assertLess(yaw, 0.0)
+
+    def test_center_lock_thrust_up_when_gate_above_aim(self):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 11,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": 2.0,  # body says gate below — pixel must win
+            "u_px": CX,
+            "v_px": AIM_V_PX - 80.0,
+            "reliable": True,
+            "source": "yolo",
+            "normal_body": None,
+        }
+        with patch.dict("os.environ", {"GP_CENTER_LOCK": "1"}, clear=False):
+            _r, _p, _y, thrust, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                vX=2.0,
+            )
+        self.assertTrue(dbg["center_lock"])
+        self.assertLess(dbg["elev_err"], 0.0)
+        self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_center_lock_off_uses_body_bearing(self):
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 12,
+            "body_x_m": 10.0,
+            "body_y_m": 3.0,
+            "body_z_m": 0.0,
+            "u_px": CX,  # pixels centered
+            "v_px": AIM_V_PX,
+            "reliable": True,
+            "source": "yolo",
+            "normal_body": None,
+        }
+        with patch.dict("os.environ", {"GP_CENTER_LOCK": "0"}, clear=False):
+            _r, _p, yaw, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                vX=2.0,
+            )
+        self.assertFalse(dbg["center_lock"])
+        self.assertGreater(dbg["bearing_deg"], 0.0)
+        self.assertLess(yaw, 0.0)
+
+    def test_best_pose_picks_nearest_not_centered_far(self):
+        from simulator.gp_vision import best_pose_gate
+
+        data = {
+            "pose": {
+                "frame_id": 1,
+                "gates": [
+                    {
+                        "conf": 0.99,
+                        "pose": {
+                            "gate_pos_body": np.array([20.0, 0.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 1.0,
+                        },
+                    },
+                    {
+                        "conf": 0.55,
+                        "pose": {
+                            "gate_pos_body": np.array([5.0, 3.0, 0.0]),
+                            "normal_body": np.array([-1.0, 0.0, 0.0]),
+                            "reproj_px": 2.0,
+                        },
+                    },
+                ],
+            }
+        }
+        g = best_pose_gate(data)
+        self.assertAlmostEqual(float(g["pose"]["gate_pos_body"][0]), 5.0)
 
 
 if __name__ == "__main__":

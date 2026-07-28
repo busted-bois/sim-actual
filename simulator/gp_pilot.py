@@ -22,11 +22,24 @@ import numpy as np
 
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
+    CX,
+    CY,
+    FX,
+    IMG_H,
     GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
 )
 from simulator.track_line import detect_track
+
+# Image-plane center-lock (GP_CENTER_LOCK=0 restores body-bearing law).
+# Aim at true image centre (CX, CY). IBVS AIM_V≈296 (cam-tilt) caused runaway
+# climb: live gates sit near cy≈217, so ey was always negative → thrust up.
+AIM_U_PX = CX
+AIM_V_PX = CY
+CENTER_ELEV_M = 1.0  # |ey|=1 → 1 m elev_err for thrust P (was 2.0 — too hot)
+CENTER_EY_DEADZONE = 0.08  # ~14 px — ignore tiny vertical error
+CENTER_EY_CLAMP = 0.6  # cap so one frame cannot max climb/descend
 
 # --- Blue-track-line fallback -------------------------------------------------
 # The VQ2 course is marked by a glowing cyan floor ribbon that is visible to the
@@ -36,7 +49,8 @@ from simulator.track_line import detect_track
 # through the starvation windows that stall every pilot after a gate or two.
 # Defaults are env-overridable for live tuning (GP_TRACK_*). Shorter lookahead +
 # higher lateral gain = tighter tracing of the ribbon (corrects offset sooner);
-# too tight oscillates. 4 m / 3.5 is a moderate-tight starting point.
+# too tight oscillates. 4 m / 3.5 is the proven moderate-tight baseline
+# (faster/tighter defaults undershot gate 1 — climb/approach need cruise 2.2).
 TRACK_LOOKAHEAD_M = 4.0  # virtual target forward distance (body x)
 TRACK_LAT_GAIN = 3.5  # m of body-y per unit image offset (normalized -1..1)
 TRACK_ANGLE_GAIN = 0.8  # weight on the ribbon-heading lookahead term (curves)
@@ -95,14 +109,38 @@ def _gate_usable(vision) -> bool:
     return _plausible_gate(vision)
 
 
-class TrackVirtualGate:
-    """Turn the blue-ribbon detection into a virtual gate for compute_guidance.
+def _course_direction_cue(blue_line, vision, track_last) -> float | None:
+    """Lateral course-direction cue for post-pass SEARCH (-1 left, +1 right).
 
-    A point TRACK_LOOKAHEAD_M ahead, offset in body-y by where the ribbon sits
+    Prefer blueline cx so the cue stays primed while a gate is still locked;
+    never used to override gate steering — only SEARCH when blind.
+    """
+    if (
+        blue_line is not None
+        and blue_line.get("found")
+        and (blue_line.get("left_found") or blue_line.get("right_found"))
+        and abs(float(blue_line.get("cx_norm", 0.0))) > 0.15
+    ):
+        return math.copysign(1.0, float(blue_line["cx_norm"]))
+    if _gate_usable(vision) and abs(vision["body_y_m"]) > 0.4:
+        return math.copysign(1.0, vision["body_y_m"])
+    if track_last is not None and abs(track_last.get("offset", 0.0)) > 0.15:
+        return math.copysign(1.0, track_last["offset"])
+    return None
+
+
+class TrackVirtualGate:
+    """Turn ribbon / dual-cyan corridor detection into a virtual gate.
+
+    A point TRACK_LOOKAHEAD_M ahead, offset in body-y by where the corridor sits
     (near offset + a heading-projected lookahead), held level (body_z=0). Feeding
     it as `vision` makes the proven guidance bank to CENTER the ribbon and cruise
-    forward — no new control law, no velocity estimate. detect_track runs only on
-    a NEW camera frame (~30 Hz, ~2 ms) and the result is cached between ticks."""
+    forward — no new control law.
+
+    Preference order per camera frame:
+      1. data["blue_line"] centroid corridor (vision_rx, always on)
+      2. detect_track single-ribbon bands (fallback)
+    """
 
     def __init__(self):
         self._last_fid = None
@@ -122,29 +160,10 @@ class TrackVirtualGate:
         self._last_fid = None
         self._last = None
 
-    def synth(self, data) -> dict | None:
-        frame = data.get("frame")
-        if not frame or frame.get("img") is None:
-            return None
-        fid = frame.get("frame_id")
-        if fid != self._last_fid:
-            self._last_fid = fid
-            try:
-                self._last = detect_track(frame["img"])
-            except Exception:
-                self._last = None
-        t = self._last
-        if t is None or t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
-            return None
-        # Offset (near-ribbon lateral position) is the reliable signal. The
-        # heading (angle) is only trustworthy with enough bands: the up-tilted
-        # camera sees little of the floor ribbon, so most detections are 2-4
-        # bands where `angle` saturates near +-pi/2 and points the WRONG way
-        # (live: a=+1.09 at s=0.33 banked +14 deg RIGHT into a LEFT curve). Use it
-        # only above TRACK_ANGLE_MIN_STRENGTH.
-        by = t["offset"] * self.lat_gain
-        if float(t["strength"]) >= TRACK_ANGLE_MIN_STRENGTH:
-            ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
+    def _vg_from_offset_angle(self, offset, angle, strength, fid, source, use_angle):
+        by = float(offset) * self.lat_gain
+        if use_angle:
+            ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(angle)))
             by += math.tan(ang) * self.lookahead * self.angle_gain
         return {
             "body_x_m": self.lookahead,
@@ -152,11 +171,75 @@ class TrackVirtualGate:
             "body_z_m": 0.0,
             "frame_id": fid,
             "reliable": True,
-            "source": "track",
+            "source": source,
             "normal_body": None,
             "method": None,
-            "strength": float(t["strength"]),
+            "strength": float(strength),
         }
+
+    def synth(self, data) -> dict | None:
+        frame = data.get("frame")
+        if not frame or frame.get("img") is None:
+            return None
+        fid = frame.get("frame_id")
+
+        if fid != self._last_fid:
+            self._last_fid = fid
+            self._last = None
+            # Prefer dual-cyan centroid corridor already computed in vision_rx.
+            bl = data.get("blue_line")
+            if (
+                bl is not None
+                and bl.get("found")
+                and bl.get("frame_id") == fid
+                and (bl.get("left_found") or bl.get("right_found"))
+            ):
+                both = bool(bl.get("left_found")) and bool(bl.get("right_found"))
+                self._last = {
+                    "offset": float(bl["cx_norm"]),
+                    "angle": float(bl.get("heading_err", 0.0)),
+                    "strength": 1.0 if both else 0.5,
+                    "source": "blueline",
+                    "both": both,
+                }
+            else:
+                try:
+                    t = detect_track(frame["img"])
+                except Exception:
+                    t = None
+                if t is not None:
+                    t = dict(t)
+                    t["source"] = "track"
+                self._last = t
+
+        t = self._last
+        if t is None:
+            return None
+        if t.get("source") == "blueline":
+            return self._vg_from_offset_angle(
+                t["offset"],
+                t["angle"],
+                t["strength"],
+                fid,
+                "blueline",
+                use_angle=bool(t.get("both")),
+            )
+        if t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
+            return None
+        # Offset (near-ribbon lateral position) is the reliable signal. The
+        # heading (angle) is only trustworthy with enough bands: the up-tilted
+        # camera sees little of the floor ribbon, so most detections are 2-4
+        # bands where `angle` saturates near +-pi/2 and points the WRONG way
+        # (live: a=+1.09 at s=0.33 banked +14 deg RIGHT into a LEFT curve). Use it
+        # only above TRACK_ANGLE_MIN_STRENGTH.
+        return self._vg_from_offset_angle(
+            t["offset"],
+            t["angle"],
+            t["strength"],
+            fid,
+            "track",
+            use_angle=float(t["strength"]) >= TRACK_ANGLE_MIN_STRENGTH,
+        )
 
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
@@ -213,13 +296,16 @@ BLIND_VD_CLAMP_MPS = 1.5
 # hover trim (no further cut), so gravity alone can't push the sink much past
 # the cap and the loop gets to converge on centre instead of diving through it.
 MAX_DESCENT_RATE_MPS = 0.8
-# Floor safety net for the flat arena floor. The drone starts on the pad and
-# the descending course keeps every gate above that floor, so GO-time NED z is
-# a valid ground reference. Below this clearance above it, blend climb thrust
-# in; suppressed while a fresh gate still sits below us (that descent is
-# intended). Inert without position telemetry (alt blocked / offline harness).
-FLOOR_CLEARANCE_M = 0.8
+# Floor safety net for the flat arena floor. Prefer NED/odom AGL; under VQ2
+# (those msgs blocked) fall back to IMU pressure_alt, then est.pos_ned DR.
+# Hard min 1.0 m AGL: never touch the deck (gate-below cannot override).
+# Soft band: climb assist below 1.5 m toward a 1–2 m hover.
+# Climb-rate suppress + boost cap: stop AGL-stuck-at-0 from rocketing.
+FLOOR_HARD_MIN_M = 1.0
+FLOOR_CLEARANCE_M = 1.5
 FLOOR_CLIMB_THRUST = 0.06
+FLOOR_CLIMB_CAP = 0.10  # max thrust above hover+elev_i from floor boost
+MAX_FLOOR_CLIMB_MPS = 1.2  # suppress floor boost when climbing faster (vD < -this)
 # 2.5 (was 3.0): take the frozen elevation sample as late as the 20°-tilted
 # camera geometry allows, so the through-gate thrust servo runs on fresher data.
 MIN_BX_FOR_ELEV = 2.5
@@ -253,22 +339,25 @@ DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips mid-flight
 
 # Closed-loop forward speed. Hard cap 10 km/h — always-on IMU regulation
 # (not gated on vision) so lost-lock cannot open-loop dive to 20–30 km/h.
-MAX_SPEED_MPS = 10.0 / 3.6  # ≈2.78 m/s
-CRUISE_SPEED_MPS = 2.2
-THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
-BLIND_CRAWL_MPS = 1.0  # no gate in view
-SLOWDOWN_START_M = 5.0
+# Closed-loop forward speed. Cap raised so cruise can sit near ~12 km/h;
+# live 3–5 km/h was THRU/BLIND crawl dominating under center-lock error.
+MAX_SPEED_MPS = 14.0 / 3.6  # ≈3.89 m/s (~14 km/h)
+CRUISE_SPEED_MPS = 3.1  # ~11.2 km/h straight approaches
+THRU_SPEED_MPS = 2.0  # ~7.2 km/h near-gate / weak-detection
+BLIND_CRAWL_MPS = 1.6  # ~5.8 km/h no gate — still crawl, not free-dive
+SLOWDOWN_START_M = 4.0  # hold cruise longer; start easing closer in
 # Don't cruise into a gate that isn't vertically converged: scale the cruise
 # margin down as |elev_err| grows so the (slow) elevation loop gets more time
 # per metre. Full cruise at <=0.25 m of error, pure THRU crawl at >=1.25 m.
-VERT_SETTLED_ERR_M = 0.25
-VERT_SLOW_ERR_M = 1.25
+VERT_SETTLED_ERR_M = 0.40
+VERT_SLOW_ERR_M = 1.50
 # Lateral analog: slow down when the gate needs a big turn so the swing-over has
 # time to finish before the crossing, instead of barreling through the opening
 # sideways and clipping an edge (gate-4 turn: 4 m offset at 2.5 m/s -> 2.3 m/s
 # overshoot -> edge). Full cruise within LAT_SETTLED bearing, crawl beyond SLOW.
-LAT_SETTLED_BEARING_DEG = 6.0
-LAT_SLOW_BEARING_DEG = 18.0
+# Wider band so small center-lock pixel error doesn't pin THRU all approach.
+LAT_SETTLED_BEARING_DEG = 10.0
+LAT_SLOW_BEARING_DEG = 28.0
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -291,6 +380,15 @@ WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 # saturates PITCH_DES_MIN and open-loop dives to 20–30 km/h.
 LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
 UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
+
+
+def _center_lock_enabled() -> bool:
+    """Image-plane gate centering (default on). GP_CENTER_LOCK=0 → bearing law."""
+    return os.environ.get("GP_CENTER_LOCK", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
 
 
 class Phase(Enum):
@@ -335,6 +433,8 @@ def compute_guidance(
     reliable = False
     bx = by = bz = float("nan")
     vis_frame_id = None
+    u_px = v_px = float("nan")
+    center_lock = False
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
@@ -344,6 +444,17 @@ def compute_guidance(
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
+        try:
+            u_px = float(vision.get("u_px"))
+            v_px = float(vision.get("v_px"))
+        except (TypeError, ValueError):
+            u_px = v_px = float("nan")
+        center_lock = (
+            _center_lock_enabled()
+            and vision_valid
+            and math.isfinite(u_px)
+            and math.isfinite(v_px)
+        )
 
     if vision_valid and vision.get("track_break"):
         # The smoother switched gates: previous frames describe a DIFFERENT
@@ -360,12 +471,23 @@ def compute_guidance(
     elev_rate = 0.0
     elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
     if elev_fresh:
-        qw, qx, qy, qz = quat
-        gate_pD = (
-            2 * (qx * qz - qw * qy) * bx
-            + 2 * (qy * qz + qw * qx) * by
-            + (1 - 2 * (qx * qx + qy * qy)) * bz
-        )
+        if center_lock:
+            # Pixel elev vs true image centre. Deadzone + clamp stop runaway climb
+            # when the gate is already near mid-frame (live: cy≈217).
+            ey = (v_px - AIM_V_PX) / (IMG_H * 0.5)
+            if abs(ey) < CENTER_EY_DEADZONE:
+                ey = 0.0
+            else:
+                ey = math.copysign(abs(ey) - CENTER_EY_DEADZONE, ey)
+            ey = float(np.clip(ey, -CENTER_EY_CLAMP, CENTER_EY_CLAMP))
+            gate_pD = ey * CENTER_ELEV_M
+        else:
+            qw, qx, qy, qz = quat
+            gate_pD = (
+                2 * (qx * qz - qw * qy) * bx
+                + 2 * (qy * qz + qw * qx) * by
+                + (1 - 2 * (qx * qx + qy * qy)) * bz
+            )
         prev_fid = state.get("prev_elev_frame_id")
         if prev_fid is not None and 0 < vis_frame_id - prev_fid <= VIS_DERIV_MAX_GAP_FR:
             dt_e = (vis_frame_id - prev_fid) / 30.0
@@ -435,7 +557,13 @@ def compute_guidance(
     gate_tilt_deg = float("nan")
 
     if vision_valid:
-        bearing_body = float(np.clip(math.degrees(math.atan2(by, bx)), -25.0, 25.0))
+        if center_lock:
+            # Image bearing to aim point (deg) — keep gate at CX / AIM_V.
+            bearing_body = float(
+                np.clip(math.degrees(math.atan2(u_px - AIM_U_PX, FX)), -25.0, 25.0)
+            )
+        else:
+            bearing_body = float(np.clip(math.degrees(math.atan2(by, bx)), -25.0, 25.0))
         blend = float(np.clip(bx / PERP_BLEND_DIST, 0.0, 1.0))
         if not reliable:
             # Weak Anduril hint: servo descend/yaw only — don't bank hard.
@@ -453,24 +581,30 @@ def compute_guidance(
             state["prev_bearing_body"] = bearing_body
             state["prev_bearing_frame_id"] = vis_frame_id
 
-        nb = vision.get("normal_body")
-        if nb is not None:
-            tilt_raw = gate_tilt_deg_from_normal(nb)
-            ema = state.get("gate_tilt_ema")
-            state["gate_tilt_ema"] = (
-                tilt_raw
-                if ema is None
-                else TILT_EMA_ALPHA * tilt_raw + (1.0 - TILT_EMA_ALPHA) * ema
-            )
-            gate_tilt_deg = state["gate_tilt_ema"]
-        else:
+        if center_lock:
+            # Pure pixel centering: no gate-tilt mix (that fights image lock).
+            yaw_err = float(np.clip(bearing_body, -12.0, 12.0))
             state["gate_tilt_ema"] = None
-
-        yaw_bearing = float(np.clip(bearing_body, -12.0, 12.0))
-        if not math.isnan(gate_tilt_deg):
-            yaw_err = blend * yaw_bearing + (1.0 - blend) * gate_tilt_deg
+            gate_tilt_deg = float("nan")
         else:
-            yaw_err = yaw_bearing
+            nb = vision.get("normal_body")
+            if nb is not None:
+                tilt_raw = gate_tilt_deg_from_normal(nb)
+                ema = state.get("gate_tilt_ema")
+                state["gate_tilt_ema"] = (
+                    tilt_raw
+                    if ema is None
+                    else TILT_EMA_ALPHA * tilt_raw + (1.0 - TILT_EMA_ALPHA) * ema
+                )
+                gate_tilt_deg = state["gate_tilt_ema"]
+            else:
+                state["gate_tilt_ema"] = None
+
+            yaw_bearing = float(np.clip(bearing_body, -12.0, 12.0))
+            if not math.isnan(gate_tilt_deg):
+                yaw_err = blend * yaw_bearing + (1.0 - blend) * gate_tilt_deg
+            else:
+                yaw_err = yaw_bearing
     else:
         state["gate_tilt_ema"] = None
         state["prev_bearing_body"] = None
@@ -571,6 +705,12 @@ def compute_guidance(
         # used to open-loop to 30–40 km/h after Restart Race.
         if abs(vX) < UNTRUSTED_VX_MPS:
             pitch_des_deg = max(pitch_des_deg, DESIRED_PITCH_DEG)
+        # Pad / scrape: no dive while under hard min AGL.
+        if (
+            not math.isnan(floor_clearance_m)
+            and floor_clearance_m < FLOOR_HARD_MIN_M
+        ):
+            pitch_des_deg = max(pitch_des_deg, DESIRED_PITCH_DEG)
         state["min_dive_s"] = 0.0
     pitch_cmd_deg = float(
         np.clip(
@@ -580,16 +720,20 @@ def compute_guidance(
         )
     )
     if vision_valid:
-        # Predictive lateral aim: null where the gate will be at the crossing
-        # given current sideslip, not its instantaneous bearing. t_lead grows at
-        # close range (bx/vX) so drift is reversed BEFORE the blind zone; capped
-        # because vY, though vision-fused, is not exact.
-        vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
-        t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
-        by_pred = by - vY * t_lead
-        bearing_ctrl = float(
-            np.clip(math.degrees(math.atan2(by_pred, bx)), -25.0, 25.0)
-        )
+        if center_lock:
+            # Keep image error as the bank target (already in bearing_body).
+            bearing_ctrl = bearing_body
+        else:
+            # Predictive lateral aim: null where the gate will be at the crossing
+            # given current sideslip, not its instantaneous bearing. t_lead grows at
+            # close range (bx/vX) so drift is reversed BEFORE the blind zone; capped
+            # because vY, though vision-fused, is not exact.
+            vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
+            t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
+            by_pred = by - vY * t_lead
+            bearing_ctrl = float(
+                np.clip(math.degrees(math.atan2(by_pred, bx)), -25.0, 25.0)
+            )
         p_lat = K_BEARING * bearing_ctrl * blend
         d_lat_term = K_LAT_D * d_lat * blend
         desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
@@ -624,13 +768,19 @@ def compute_guidance(
     if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
         hover_floor = (hover_thrust + float(state.get("elev_i", 0.0))) / tilt
         thrust = max(thrust, hover_floor)
-    # Floor safety net: below FLOOR_CLEARANCE_M above the arena floor, blend in
-    # climb thrust so an overshoot below a low gate (or an open-loop blind sink)
-    # can't touch the ground. Suppressed while a fresh gate still sits below us
-    # (>0.3 m): that descent is the intended course, not a fall.
-    if not math.isnan(floor_clearance_m) and floor_clearance_m < FLOOR_CLEARANCE_M:
+    # Floor safety: hold 1–2 m AGL. Hard min (1.0 m) always wins over gate-below
+    # descend so we never scrape the deck chasing a low opening. No blind
+    # takeoff boost — that rocketed to 70+ km/h when AGL stayed NaN.
+    climbing_fast = not math.isnan(vD) and vD < -MAX_FLOOR_CLIMB_MPS
+    if (
+        not math.isnan(floor_clearance_m)
+        and floor_clearance_m < FLOOR_CLEARANCE_M
+        and not climbing_fast
+    ):
         gate_below = elev_fresh and float(state.get("last_elev_err", 0.0)) > 0.3
-        if not gate_below:
+        under_hard = floor_clearance_m < FLOOR_HARD_MIN_M
+        # Soft band only: allow intended gate descent if still ≥ hard min.
+        if under_hard or not gate_below:
             floor_frac = float(
                 np.clip(
                     (FLOOR_CLEARANCE_M - floor_clearance_m) / FLOOR_CLEARANCE_M,
@@ -638,11 +788,10 @@ def compute_guidance(
                     1.0,
                 )
             )
-            climb_t = (
-                hover_thrust
-                + float(state.get("elev_i", 0.0))
-                + FLOOR_CLIMB_THRUST * floor_frac
-            ) / tilt
+            elev_i = float(state.get("elev_i", 0.0))
+            boost = FLOOR_CLIMB_THRUST * (1.5 if under_hard else 1.0)
+            boost = min(boost * floor_frac, FLOOR_CLIMB_CAP)
+            climb_t = (hover_thrust + elev_i + boost) / tilt
             thrust = max(thrust, climb_t)
     thrust = float(np.clip(thrust, 0.0, 1.0))
 
@@ -662,8 +811,12 @@ def compute_guidance(
         "v_target": v_target,
         "pitch_des_deg": pitch_des_deg,
         "elev_i": float(state.get("elev_i", 0.0)),
+        "agl": floor_clearance_m,
         "source": (vision or {}).get("source", ""),
         "infer_ms": (vision or {}).get("infer_ms"),
+        "center_lock": center_lock,
+        "u_px": u_px,
+        "v_px": v_px,
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -770,6 +923,8 @@ class GPPilot:
         self._flying_since: float | None = None
         self._go_start_ms: int | None = None
         self._floor_z0: float | None = None  # GO-time NED z = flat-floor level
+        self._pa0: float | None = None  # GO-time pressure_alt = pad (VQ2 AGL)
+        self._dr_z0: float | None = None  # GO-time est.pos_ned z (DR AGL)
         self._tick = 0
         self._est_started = False
         self._last_arm_attempt = 0.0
@@ -832,6 +987,8 @@ class GPPilot:
         self._flying_since = None
         self._go_start_ms = None
         self._floor_z0 = None
+        self._pa0 = None
+        self._dr_z0 = None
         self._close_log()
 
     def _open_log(self) -> None:
@@ -844,7 +1001,7 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des elev_i source gate".split()
+                "pitch_des elev_i agl source gate".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -867,6 +1024,7 @@ class GPPilot:
             vt = dbg.get("v_target", float("nan"))
             pd = dbg.get("pitch_des_deg", float("nan"))
             ei = dbg.get("elev_i", 0.0) or 0.0
+            agl = dbg.get("agl", float("nan"))
             src = str(dbg.get("source", "") or "")
             self._log_wr.writerow(
                 [f"{now:.3f}"]
@@ -876,7 +1034,7 @@ class GPPilot:
                 + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
                 + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
                 + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}"]
-                + [f"{ei:.4f}", src, str(self.n_passed)]
+                + [f"{ei:.4f}", f"{agl:.3f}", src, str(self.n_passed)]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -1057,29 +1215,29 @@ class GPPilot:
         if active > self.n_passed:
             self.n_passed = active
 
-        # Blue-ribbon fallback: engage ONLY when no usable gate (a pure safety
-        # net). The earlier post-pass OVERRIDE was reverted — with the up-tilted
-        # camera the ribbon heading is too weak to reliably steer turns, and
-        # forcing it over a good gate banked the wrong way. Gate-following (with
-        # phantom rejection + predictive aim) is what reached 4 gates.
+        # Blue-ribbon fallback: engage ONLY when no usable gate AND we have
+        # already cleared at least one gate. Before gate 1, a corridor VG with
+        # body_z=0 holds altitude and undershoots the elevated opening (live:
+        # hit bottom of gate 1). Post-pass starvation is where the ribbon helps.
+        # Do NOT override a usable gate (weak ribbon heading banked wrong).
         self._track_active = False
-        if track_vg is not None and not _gate_usable(vision):
+        if (
+            track_vg is not None
+            and not _gate_usable(vision)
+            and self.n_passed >= 1
+        ):
             vision = track_vg
             vision_vel = None
             self._track_active = True
 
-        # Track the lateral direction the course is trending (neg = left) from a
-        # usable gate's bearing or the ribbon offset, to steer the post-pass
-        # search the right way. (offset<0 = ribbon left = course turns left.)
-        cue = None
-        if _gate_usable(vision) and abs(vision["body_y_m"]) > 0.4:
-            cue = math.copysign(1.0, vision["body_y_m"])
-        elif (
-            self._trackline is not None
-            and self._trackline._last is not None
-            and abs(self._trackline._last.get("offset", 0.0)) > 0.15
-        ):
-            cue = math.copysign(1.0, self._trackline._last["offset"])
+        # Track the lateral direction the course is trending (neg = left) so
+        # post-pass SEARCH arcs the right way. Prefer blueline cx even while a
+        # gate is locked so the cue is primed the moment lock drops — do NOT
+        # override gate steering with the ribbon (that banked wrong on curves).
+        track_last = (
+            self._trackline._last if self._trackline is not None else None
+        )
+        cue = _course_direction_cue(self.data.get("blue_line"), vision, track_last)
         if cue is not None:
             self._course_cue += SEARCH_CUE_ALPHA * (cue - self._course_cue)
 
@@ -1118,11 +1276,10 @@ class GPPilot:
                 vision_vel = None
                 self._search_active = True
 
-        # Flat-floor clearance for the floor safety net. Capture GO-time NED z
-        # (drone on the pad = ground) once, then track height above it. z0
-        # persists across backoffs — the floor doesn't move — and is cleared
-        # only on a full race reset. Absent telemetry leaves clearance NaN
-        # (guard inert).
+        # Flat-floor clearance for the floor safety net. Prefer NED/odom; under
+        # VQ2 those msgs are blocked so try IMU pressure_alt, then est.pos_ned
+        # dead-reckon (zeros at GO). Refs persist across backoffs; cleared on
+        # race reset. Absent all three → NaN (floor guard inert — no blind rocket).
         floor_clearance = float("nan")
         lp = self.data.get("local_position_ned") or self.data.get("odometry")
         if lp is not None and lp.get("z") is not None:
@@ -1130,6 +1287,19 @@ class GPPilot:
             if self._floor_z0 is None:
                 self._floor_z0 = z_down
             floor_clearance = self._floor_z0 - z_down
+        else:
+            imu = self.data.get("imu")
+            pa = imu.get("pressure_alt") if imu is not None else None
+            if pa is not None and math.isfinite(float(pa)):
+                pa_f = float(pa)
+                if self._pa0 is None:
+                    self._pa0 = pa_f
+                floor_clearance = pa_f - self._pa0
+            else:
+                z_dr = float(snap["pos_ned"][2])
+                if self._dr_z0 is None:
+                    self._dr_z0 = z_dr
+                floor_clearance = self._dr_z0 - z_dr
 
         roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
@@ -1173,7 +1343,13 @@ class GPPilot:
             steer = (
                 "SEARCH"
                 if self._search_active
-                else ("TRACK" if self._track_active else src)
+                else (
+                    "BLUELINE"
+                    if self._track_active
+                    and vision is not None
+                    and vision.get("source") == "blueline"
+                    else ("TRACK" if self._track_active else src)
+                )
             )
             trk = self._trackline._last if self._trackline is not None else None
             trk_s = (

@@ -26,12 +26,7 @@ MAX_REPROJ_PX = 10.0
 # 5 (not 3): inference sits right at the 3-frame boundary, which made the
 # source alternate yolo<->anduril nearly every tick (log-verified sawtooth).
 YOLO_STALE_GAP_FR = 5  # pose packet this many frames behind the camera = stale
-BEARING_COST_M_PER_RAD = 5.0  # nearest-ahead pick: range + this per rad off-axis
-# Only ever consider the N nearest gates. A gate 3-4 course-lengths out can
-# briefly outscore the one dead ahead at handoff (big box, low bearing) and
-# yank the aim toward it while we're threading the near gate — the log-verified
-# gate-2 clip. The next gate we could legitimately switch to is always the
-# nearest or 2nd-nearest, so the far ones are pure distractors: drop them.
+# Only ever consider the N nearest gates. Far gates distract while threading.
 MAX_GATES_CONSIDERED = 2
 # Pass-through suppression (Anduril-tracker parity for the YOLO path).
 YOLO_NEAR_BX_M = 2.0  # gate centre closer than this → threading it: go blind
@@ -57,17 +52,13 @@ def gate_body_from_pinhole(
 
 
 def best_pose_gate(data: dict) -> dict | None:
-    """Quality-filtered YOLO gate most likely to be the NEXT gate.
+    """Quality-filtered YOLO gate: always the nearest in-front gate by range.
 
-    Highest-confidence is the wrong pick at gate handoff — a big far gate can
-    outscore the one dead ahead. Pick the nearest gate with a mild bearing
-    penalty (BEARING_COST_M_PER_RAD) so the chase stays on the course line.
+    Far/background gates must not win — center-lock and approach need the
+    closest opening. Bearing is only a tie-break when two gates are within 1 m.
     """
     pose_pkt = data.get("pose") or {}
     gates = pose_pkt.get("gates") or []
-    # Collect valid, in-front gates with their range, then restrict to the
-    # MAX_GATES_CONSIDERED nearest before scoring — a far gate is never a
-    # legitimate next target and only serves to distract the selector.
     candidates = []
     for g in gates:
         p = g.get("pose")
@@ -84,16 +75,39 @@ def best_pose_gate(data: dict) -> dict | None:
             continue
         rng = float(np.linalg.norm(gb))
         candidates.append((rng, g, gb))
+    if not candidates:
+        return None
     candidates.sort(key=lambda c: c[0])
-    best = None
-    best_cost = float("inf")
-    for rng, g, gb in candidates[:MAX_GATES_CONSIDERED]:
-        bearing = abs(math.atan2(gb[1], gb[0]))
-        cost = rng + BEARING_COST_M_PER_RAD * bearing
-        if cost < best_cost:
-            best_cost = cost
-            best = g
-    return best
+    # Consider only the nearest few; pick min range, bearing tie-break ≤1 m.
+    pool = candidates[:MAX_GATES_CONSIDERED]
+    nearest_rng = pool[0][0]
+    tied = [c for c in pool if c[0] <= nearest_rng + 1.0]
+    best = min(tied, key=lambda c: (c[0], abs(math.atan2(c[2][1], c[2][0]))))
+    return best[1]
+
+
+_KP_CONF = 0.7  # inner-corner confidence for opening centre
+
+
+def gate_image_center(g: dict) -> tuple[float, float] | None:
+    """Opening centre in pixels: inner keypoints when confident, else bbox mid."""
+    box = g.get("box")
+    kxy = g.get("keypoints")
+    kcf = g.get("keypoint_conf")
+    if kxy is not None and kcf is not None:
+        kxy = np.asarray(kxy, dtype=np.float64)
+        kcf = np.asarray(kcf, dtype=np.float64)
+        if kxy.ndim == 2 and kxy.shape[0] >= 4 and kcf.shape[0] >= 4:
+            inner = kxy[:4]
+            ok = kcf[:4] > _KP_CONF
+            if int(ok.sum()) >= 2 and np.isfinite(inner[ok]).all():
+                ctr = inner[ok].mean(axis=0)
+                return float(ctr[0]), float(ctr[1])
+    if box is not None:
+        b = np.asarray(box, dtype=np.float64).reshape(-1)
+        if b.size >= 4 and np.isfinite(b).all():
+            return float((b[0] + b[2]) * 0.5), float((b[1] + b[3]) * 0.5)
+    return None
 
 
 def _yolo_pose_estimate(data: dict) -> dict | None:
@@ -110,6 +124,15 @@ def _yolo_pose_estimate(data: dict) -> dict | None:
         return None
     p = g["pose"]
     gb = np.asarray(p["gate_pos_body"], dtype=np.float64).reshape(3)
+    uv = gate_image_center(g)
+    u_px = float(uv[0]) if uv is not None else None
+    v_px = float(uv[1]) if uv is not None else None
+    # YOLO sometimes lacks box/kpts; HSV gate_target still has solid cx/cy.
+    if u_px is None or v_px is None:
+        gt = data.get("gate_target") or {}
+        if gt.get("detected") and gt.get("u_px") is not None and gt.get("v_px") is not None:
+            u_px = float(gt["u_px"])
+            v_px = float(gt["v_px"])
     return {
         "frame_id": fid,
         "body_x_m": float(gb[0]),
@@ -118,8 +141,8 @@ def _yolo_pose_estimate(data: dict) -> dict | None:
         "pnp_ok": True,
         "pnp_rvec": None,
         "normal_body": np.asarray(p["normal_body"], dtype=np.float64).reshape(3),
-        "u_px": None,
-        "v_px": None,
+        "u_px": u_px,
+        "v_px": v_px,
         "reliable": True,
         "source": "yolo",
         # PnP method: "edge-pair" is a single-edge fallback whose normal is a
