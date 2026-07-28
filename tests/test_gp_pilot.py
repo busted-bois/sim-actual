@@ -1398,12 +1398,14 @@ class LookaheadTests(unittest.TestCase):
         self.assertEqual((ax, ay, az, used), (12.0, 0.0, 0.0, 0.0))
 
     def test_apply_body_mix_level(self):
-        # Identity gate quat: smaller horizontal is Δy=4 vs thru=10 → lateral=4
+        # Identity: along=10 (larger), lateral=4; λ=0.5 → thru_off=2 (clamped), lat=2
+        from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
+
         gq = self._level_quat()
         delta = np.array([10.0, 4.0, 0.0])
         ax, ay, az, used = apply_lookahead_body(12.0, 0.0, 0.0, gq, delta, 0.5)
         self.assertAlmostEqual(used, 0.5)
-        self.assertAlmostEqual(ax, 12.0)
+        self.assertAlmostEqual(ax, 12.0 + LOOKAHEAD_OFFSET_MAX_M)  # 0.5*10 clipped to 2
         self.assertAlmostEqual(ay, 2.0)
         self.assertAlmostEqual(az, 0.0)
 
@@ -1415,17 +1417,22 @@ class LookaheadTests(unittest.TestCase):
         delta = np.array([-23.6, -2.1, -5.1])  # flipped climb Δ
         ax, ay, az, used = apply_lookahead_body(10.0, 0.0, 0.0, gq90, delta, 0.35)
         self.assertAlmostEqual(used, 0.35)
-        self.assertAlmostEqual(ax, 10.0)
+        # Thru offset clamped; bx must stay positive and near original.
+        self.assertGreater(ax, 0.1)
+        self.assertLessEqual(abs(ax - 10.0), LOOKAHEAD_OFFSET_MAX_M + 0.01)
         self.assertLess(abs(ay), LOOKAHEAD_OFFSET_MAX_M + 0.01)
         self.assertLess(abs(ay), 1.0)  # ~0.35*|−2.1|, not 0.35*24
 
     def test_guidance_curves_toward_next(self):
-        """With modest Δ_y, lookahead should bank more."""
+        """With modest Δ_y, lookahead should bank more (when not dead-centered)."""
+        from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
+
         state = _fresh_hold_state()
+        # by above CENTERED_BY_M so lateral lookahead is not suppressed.
         vision = {
             "frame_id": 1,
             "body_x_m": 12.0,
-            "body_y_m": 0.0,
+            "body_y_m": 0.3,
             "body_z_m": 0.0,
             "normal_body": None,
             "source": "anduril",
@@ -1444,7 +1451,7 @@ class LookaheadTests(unittest.TestCase):
             delta_ned=np.array([10.0, 4.0, 0.0]),
             gate_quat=gq,
         )
-        self.assertAlmostEqual(dbg0["bearing_deg"], 0.0, places=4)
+        self.assertGreater(dbg0["bearing_deg"], 1.0)
         self.assertEqual(dbg0["lookahead"], 0.0)
 
         _a, _b, _c, _t, dbg1 = compute_guidance(
@@ -1461,17 +1468,21 @@ class LookaheadTests(unittest.TestCase):
             gate_quat=gq,
         )
         self.assertAlmostEqual(dbg1["lookahead"], 0.35)
-        self.assertGreater(dbg1["bearing_deg"], 1.0)
+        self.assertGreater(dbg1["bearing_deg"], dbg0["bearing_deg"])
         self.assertGreater(dbg1["desired_roll"], dbg0["desired_roll"])
-        self.assertAlmostEqual(dbg1["bx"], 12.0, places=4)
+        # thru_off = clip(0.35*10, ±2) = 2 → bx = 14
+        self.assertAlmostEqual(dbg1["bx"], 12.0 + LOOKAHEAD_OFFSET_MAX_M, places=4)
 
     def test_ahrs_yaw_no_longer_cancels_range(self):
-        """Regression: bx must stay put (old AHRS path collapsed it)."""
+        """Regression: bx must stay ahead (old AHRS path collapsed it)."""
+        from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
+
         gq90 = np.array([0.70710678, 0.0, 0.0, 0.70710678])
         delta = np.array([-23.6, -2.1, 5.1])
         ax, ay, az, used = apply_lookahead_body(12.0, 0.0, 0.0, gq90, delta, 0.35)
         self.assertAlmostEqual(used, 0.35)
-        self.assertAlmostEqual(ax, 12.0)
+        self.assertGreater(ax, 0.1)
+        self.assertLessEqual(abs(ax - 12.0), LOOKAHEAD_OFFSET_MAX_M + 0.01)
         self.assertLess(abs(ay), 1.0)
 
     def test_last_gate_no_delta(self):
