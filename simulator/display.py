@@ -37,7 +37,7 @@ def pick(data):
     Prefers the YOLO-pose annotated frame (data["pose"]), then the classical
     overlay, then the raw frame. When pose wins, blue-line HUD is composited
     on top (vision_rx only writes it to frame["annotated"], which display
-    otherwise never shows during make control-flight / bluevision).
+    otherwise never shows during make control-flight / make classical blue).
     `tag` changes only when a new frame is available, so callers can skip
     redundant ticks. (None, None) if no frame."""
     pose = data.get("pose")

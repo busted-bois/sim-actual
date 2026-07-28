@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight bluevision free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
+.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -41,10 +41,13 @@ control-flight:
 # Back-compat alias for the original AndurilGP-style entry name.
 auto-gp: control-flight
 
-# Same GP flight as control-flight. The dual-cyan corridor detector is always
-# on (vision_rx), so this is only a name that says "watch the blue line": it feeds
-# the no-gate ribbon fallback and the post-pass SEARCH direction cue.
-bluevision: control-flight
+# This branch's flight: the rl_failed101 classical GP control law + gate vision,
+# with the dual-cyan corridor feeding the no-gate fallback and the post-pass
+# SEARCH direction cue. Same target as control-flight -- the corridor detector
+# runs in vision_rx unconditionally, so this is a name, not a mode switch.
+# `classical` and `blue` are separate goals so `make classical blue` reads as
+# written; make runs the shared prerequisite once. `make classical-blue` too.
+classical blue classical-blue: control-flight
 
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
