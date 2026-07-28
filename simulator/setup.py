@@ -6,6 +6,7 @@ from pymavlink import mavutil
 from simulator.controller import Controller
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.preflight import udp_port_in_use
+from simulator.state_estimator import StateEstimator
 from simulator.timesync import TimeSync
 from simulator.vision_rx import VisionRX
 
@@ -133,7 +134,13 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # Setup Mavlink msg receiver
     # -------------------------------
     print("Setting up MAVLink rx...", flush=True)
-    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data)
+    # IMU-driven ESKF. Under the VQ2 block the sim never sends ODOMETRY/
+    # ATTITUDE/LOCAL_POSITION_NED, so velocity and attitude feedback read
+    # nan/0 and every speed/attitude loop in the pilots is inert. MAVLinkRX
+    # publishes this only as a fallback (see _publish_estimated_state), so a
+    # link that streams pose normally is unaffected.
+    estimator = StateEstimator()
+    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data, estimator=estimator)
 
     # -------------------------------
     # Timesync request Loop
@@ -150,6 +157,9 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     # Main control loop
     # -------------------------------
     controller = Controller(sim_conn, shared_data, system_boot_ms)
+    # The ESKF predicts velocity from COMMANDED thrust, not the accelerometer
+    # (this sim's accel is only clean on the ground) — so it needs every send.
+    controller.estimator = estimator
 
     return {
         "vision_rx": vision_rx,
@@ -157,4 +167,5 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
         "ts_loop": ts_loop,
         "sim_conn": sim_conn,
         "controller": controller,
+        "estimator": estimator,
     }

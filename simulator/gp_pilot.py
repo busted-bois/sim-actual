@@ -95,14 +95,40 @@ def _gate_usable(vision) -> bool:
     return _plausible_gate(vision)
 
 
-class TrackVirtualGate:
-    """Turn the blue-ribbon detection into a virtual gate for compute_guidance.
+def _course_direction_cue(blue_line, vision, track_last) -> float | None:
+    """Lateral course-direction cue for post-pass SEARCH (-1 left, +1 right).
 
-    A point TRACK_LOOKAHEAD_M ahead, offset in body-y by where the ribbon sits
+    Prefer blueline cx so the cue stays primed while a gate is still locked;
+    never used to override gate steering — only SEARCH when blind.
+    """
+    if (
+        blue_line is not None
+        and blue_line.get("found")
+        and (blue_line.get("left_found") or blue_line.get("right_found"))
+        and abs(float(blue_line.get("cx_norm", 0.0))) > 0.15
+    ):
+        return math.copysign(1.0, float(blue_line["cx_norm"]))
+    if _gate_usable(vision) and abs(vision["body_y_m"]) > 0.4:
+        return math.copysign(1.0, vision["body_y_m"])
+    if track_last is not None and abs(track_last.get("offset", 0.0)) > 0.15:
+        return math.copysign(1.0, track_last["offset"])
+    return None
+
+
+class TrackVirtualGate:
+    """Turn ribbon / dual-cyan corridor detection into a virtual gate.
+
+    A point TRACK_LOOKAHEAD_M ahead, offset in body-y by where the corridor sits
     (near offset + a heading-projected lookahead), held level (body_z=0). Feeding
     it as `vision` makes the proven guidance bank to CENTER the ribbon and cruise
-    forward — no new control law, no velocity estimate. detect_track runs only on
-    a NEW camera frame (~30 Hz, ~2 ms) and the result is cached between ticks."""
+    forward — no new control law, no velocity estimate.
+
+    Preference order per camera frame:
+      1. data["blue_line"] dual-cyan corridor (vision_rx, always on)
+      2. detect_track single-ribbon bands (fallback)
+
+    Detection runs only on a NEW camera frame (~30 Hz) and is cached between
+    ticks."""
 
     def __init__(self):
         self._last_fid = None
@@ -122,29 +148,10 @@ class TrackVirtualGate:
         self._last_fid = None
         self._last = None
 
-    def synth(self, data) -> dict | None:
-        frame = data.get("frame")
-        if not frame or frame.get("img") is None:
-            return None
-        fid = frame.get("frame_id")
-        if fid != self._last_fid:
-            self._last_fid = fid
-            try:
-                self._last = detect_track(frame["img"])
-            except Exception:
-                self._last = None
-        t = self._last
-        if t is None or t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
-            return None
-        # Offset (near-ribbon lateral position) is the reliable signal. The
-        # heading (angle) is only trustworthy with enough bands: the up-tilted
-        # camera sees little of the floor ribbon, so most detections are 2-4
-        # bands where `angle` saturates near +-pi/2 and points the WRONG way
-        # (live: a=+1.09 at s=0.33 banked +14 deg RIGHT into a LEFT curve). Use it
-        # only above TRACK_ANGLE_MIN_STRENGTH.
-        by = t["offset"] * self.lat_gain
-        if float(t["strength"]) >= TRACK_ANGLE_MIN_STRENGTH:
-            ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(t["angle"])))
+    def _vg_from_offset_angle(self, offset, angle, strength, fid, source, use_angle):
+        by = float(offset) * self.lat_gain
+        if use_angle:
+            ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(angle)))
             by += math.tan(ang) * self.lookahead * self.angle_gain
         return {
             "body_x_m": self.lookahead,
@@ -152,11 +159,79 @@ class TrackVirtualGate:
             "body_z_m": 0.0,
             "frame_id": fid,
             "reliable": True,
-            "source": "track",
+            "source": source,
             "normal_body": None,
             "method": None,
-            "strength": float(t["strength"]),
+            "strength": float(strength),
         }
+
+    def synth(self, data) -> dict | None:
+        frame = data.get("frame")
+        if not frame or frame.get("img") is None:
+            return None
+        fid = frame.get("frame_id")
+
+        if fid != self._last_fid:
+            self._last_fid = fid
+            self._last = None
+            # Prefer the dual-cyan corridor already computed in vision_rx: it
+            # resolves BOTH rails, so its centre and heading survive the bends
+            # and one-sided views that the single-ribbon detector reads wrong.
+            bl = data.get("blue_line")
+            if (
+                bl is not None
+                and bl.get("found")
+                and bl.get("frame_id") == fid
+                and (bl.get("left_found") or bl.get("right_found"))
+            ):
+                both = bool(bl.get("left_found")) and bool(bl.get("right_found"))
+                self._last = {
+                    "offset": float(bl["cx_norm"]),
+                    "angle": float(bl.get("heading_err", 0.0)),
+                    "strength": 1.0 if both else 0.5,
+                    "source": "blueline",
+                    "both": both,
+                }
+            else:
+                try:
+                    t = detect_track(frame["img"])
+                except Exception:
+                    t = None
+                if t is not None:
+                    t = dict(t)
+                    t["source"] = "track"
+                self._last = t
+
+        t = self._last
+        if t is None:
+            return None
+        if t.get("source") == "blueline":
+            # Heading only when a band resolved both rails — a single rail's
+            # slope is the rail's, not the corridor's.
+            return self._vg_from_offset_angle(
+                t["offset"],
+                t["angle"],
+                t["strength"],
+                fid,
+                "blueline",
+                use_angle=bool(t.get("both")),
+            )
+        if t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
+            return None
+        # Offset (near-ribbon lateral position) is the reliable signal. The
+        # heading (angle) is only trustworthy with enough bands: the up-tilted
+        # camera sees little of the floor ribbon, so most detections are 2-4
+        # bands where `angle` saturates near +-pi/2 and points the WRONG way
+        # (live: a=+1.09 at s=0.33 banked +14 deg RIGHT into a LEFT curve). Use it
+        # only above TRACK_ANGLE_MIN_STRENGTH.
+        return self._vg_from_offset_angle(
+            t["offset"],
+            t["angle"],
+            t["strength"],
+            fid,
+            "track",
+            use_angle=float(t["strength"]) >= TRACK_ANGLE_MIN_STRENGTH,
+        )
 
 
 # Anduril's own measured trim, byte-faithful to the original that flew the
@@ -1068,18 +1143,13 @@ class GPPilot:
             vision_vel = None
             self._track_active = True
 
-        # Track the lateral direction the course is trending (neg = left) from a
-        # usable gate's bearing or the ribbon offset, to steer the post-pass
-        # search the right way. (offset<0 = ribbon left = course turns left.)
-        cue = None
-        if _gate_usable(vision) and abs(vision["body_y_m"]) > 0.4:
-            cue = math.copysign(1.0, vision["body_y_m"])
-        elif (
-            self._trackline is not None
-            and self._trackline._last is not None
-            and abs(self._trackline._last.get("offset", 0.0)) > 0.15
-        ):
-            cue = math.copysign(1.0, self._trackline._last["offset"])
+        # Track the lateral direction the course is trending (neg = left) so the
+        # post-pass search arcs the right way. (offset<0 = corridor left =
+        # course turns left.) Prefer the blueline cx even while a gate is still
+        # locked, so the cue is primed the moment lock drops — this does NOT
+        # override gate steering, which is what banked wrong on curves before.
+        track_last = self._trackline._last if self._trackline is not None else None
+        cue = _course_direction_cue(self.data.get("blue_line"), vision, track_last)
         if cue is not None:
             self._course_cue += SEARCH_CUE_ALPHA * (cue - self._course_cue)
 
@@ -1173,7 +1243,13 @@ class GPPilot:
             steer = (
                 "SEARCH"
                 if self._search_active
-                else ("TRACK" if self._track_active else src)
+                else (
+                    "BLUELINE"
+                    if self._track_active
+                    and vision is not None
+                    and vision.get("source") == "blueline"
+                    else ("TRACK" if self._track_active else src)
+                )
             )
             trk = self._trackline._last if self._trackline is not None else None
             trk_s = (

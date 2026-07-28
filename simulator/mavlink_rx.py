@@ -1,3 +1,4 @@
+import math
 import os
 import struct
 import time
@@ -230,6 +231,41 @@ class MAVLinkRX:
         self.data["imu"] = imu
         if self.estimator is not None:
             self.estimator.on_imu(imu)
+            self._publish_estimated_state()
+
+    def _publish_estimated_state(self):
+        """Fill vel_ned/attitude from the ESKF when the sim will not send them.
+
+        Under the VQ2 block ODOMETRY/ATTITUDE/LOCAL_POSITION_NED never arrive, so
+        every pilot's velocity and attitude feedback reads nan/0 — measured over
+        44654 logged blue-line rows, vX was nan in ALL of them and att_roll/pitch
+        were 0 in ALL of them, leaving the speed PD and the error-space attitude
+        wire encoding inert. FALLBACK ONLY: a real MAVLink message always wins,
+        so nothing changes on a link that streams pose normally.
+        """
+        if not self.estimator.ready or self.data.get("has_position"):
+            return
+        pose = self.estimator.pose()
+        if pose is None:
+            return
+        _p, v, q = pose
+        qw, qx, qy, qz = (float(x) for x in q)
+        yaw = quat_to_yaw(qw, qx, qy, qz)
+        # ESKF quaternion → roll/pitch (yaw already has a helper).
+        roll = math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
+        pitch = math.asin(max(-1.0, min(1.0, 2.0 * (qw * qy - qz * qx))))
+        imu = self.data["imu"]
+        self.data["vel_ned"] = (float(v[0]), float(v[1]), float(v[2]))
+        self.data["yaw_rad"] = yaw
+        self.data["attitude"] = {
+            "roll": roll,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll_speed": float(imu["gx"]),
+            "pitch_speed": float(imu["gy"]),
+            "yaw_speed": float(imu["gz"]),
+        }
+        self.data["state_source"] = "eskf"
 
     def on_encapsulated_data(self, msg):
         if msg:

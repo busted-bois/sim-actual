@@ -59,6 +59,9 @@ class VisionRX:
         from simulator.anduril_gate_detect import AndurilGateTracker
 
         self._anduril = AndurilGateTracker()
+        from simulator.blue_line_vision import BlueLineTracker
+
+        self._blue_line = BlueLineTracker()
         self.thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.is_running = True
         self.thread.start()
@@ -252,7 +255,23 @@ class VisionRX:
                 obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
                 obstacle_px.append((ocx, ocy))
             self.data["obstacles"] = obstacles
-            self.data["frame"]["annotated"] = _annotate(img, detection, obstacle_px)
+
+            # Dual-cyan corridor (per-band rails); always on. GPPilot fuses this
+            # into the no-gate ribbon fallback ahead of detect_track.
+            from simulator.blue_line_vision import (
+                annotate_blue_lines,
+                estimate_to_dict,
+            )
+
+            bl_est, bl_mask = self._blue_line.update(img, frame_id, return_mask=True)
+            self.data["blue_line"] = estimate_to_dict(bl_est)
+            base = _annotate(img, detection, obstacle_px)
+            if bl_est.found:
+                self.data["frame"]["annotated"] = annotate_blue_lines(
+                    base, bl_est, bl_mask
+                )
+            else:
+                self.data["frame"]["annotated"] = base
         except Exception as e:
             from simulator import config
 

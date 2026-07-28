@@ -86,6 +86,16 @@ _SURVEY_DIR = (
 )
 
 
+def track_mask(frame_bgr, downscale=1):
+    """Binary ribbon mask for a FULL-RES frame, returned at downscaled res.
+
+    Public entry point for other detectors (blue_line_vision) so the measured
+    HSV ranges, the core adjacency gate and the CC filter live in one place.
+    """
+    small = frame_bgr[::downscale, ::downscale] if downscale > 1 else frame_bgr
+    return _track_mask(small, downscale)
+
+
 def _track_mask(small_bgr, downscale):
     """Binary ribbon mask at downscaled resolution."""
     hsv = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2HSV)
