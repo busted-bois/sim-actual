@@ -149,6 +149,17 @@ class YoloGateTracker:
         self._in_gate = False
         self._suppress_until_fid: int | None = None
 
+    @property
+    def threading_gate(self) -> bool:
+        """True while a gate is being threaded, or during the pass cooldown.
+
+        The suppression state was previously only observable as the `suppress`
+        return of update(), which vision_gate_estimate consumes and discards.
+        BlueLinePilot needs it as a standing signal: "a gate is right there" is
+        exactly when it must commit and stop hunting for the line.
+        """
+        return self._in_gate or self._suppress_until_fid is not None
+
     @staticmethod
     def _near_gate(gates) -> bool:
         for g in gates:

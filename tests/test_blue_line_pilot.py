@@ -3,16 +3,21 @@ race-start gating)."""
 
 import math
 import os
+import time
 import unittest
 
 import numpy as np
 
 from simulator.blue_line_pilot import (
+    BANK_THRUST_FF_MAX,
+    BL_VISION_STALE_S,
     BlueLinePilot,
     CONF_GAIN_FLOOR,
     CORNER_SPEED_MPS,
     CRUISE_PITCH_DEG,
     CRUISE_SPEED_MPS,
+    CY_TARGET,
+    GATE_Z_THRUST_MAX,
     GATE_BIAS_ROLL_MAX_DEG,
     GATE_BIAS_YAW_MAX_DEG,
     GATE_STEER_BANK_MAX_DEG,
@@ -25,6 +30,22 @@ from simulator.blue_line_pilot import (
     compute_blueline_guidance,
 )
 from simulator.gp_vision import YOLO_STALE_GAP_FR
+
+
+def _settle(vision, ticks=30, state=None, **kw):
+    """Hold one condition for `ticks` control ticks and return the last result.
+
+    turn_mag is rate-limited on the way UP (TURN_MAG_RISE_PER_S), so a single
+    call can no longer reach a full brake — one bad frame must not slam one on.
+    A genuine corner persists, so corner tests persist too. Each tick carries a
+    distinct frame_id: these are new measurements, not a frozen repeat.
+    """
+    state = {} if state is None else state
+    out = None
+    for i in range(ticks):
+        v = None if vision is None else {**vision, "frame_id": i}
+        out = compute_blueline_guidance(vision=v, lost_s=0.0, state=state, **kw)
+    return out
 
 
 class FakeController:
@@ -151,14 +172,8 @@ class GuidanceSignTests(unittest.TestCase):
             lost_s=0.0,
             pitch_deg=0.0,
         )
-        roll_t, pitch_t, yaw_t, _, dbg = compute_blueline_guidance(
-            vision={
-                "found": True,
-                "cx_norm": 0.1,
-                "cy_norm": 0.05,
-                "heading_err": 0.5,
-            },
-            lost_s=0.0,
+        roll_t, pitch_t, yaw_t, _, dbg = _settle(
+            {"found": True, "cx_norm": 0.1, "cy_norm": 0.05, "heading_err": 0.5},
             roll_deg=0.0,
             pitch_deg=0.0,
         )
@@ -259,12 +274,8 @@ class GuidanceSignTests(unittest.TestCase):
         # Line tracked, bending left; gate 25 deg left agrees -> bounded extra
         # left command + earlier slow-down, never beyond the bias clamps.
         vis = {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": -0.10}
-        _, _, _, _, dbg_base = compute_blueline_guidance(vision=vis, lost_s=0.0)
-        _, _, _, _, dbg_gate = compute_blueline_guidance(
-            vision=vis,
-            lost_s=0.0,
-            gate={"bearing_deg": -25.0, "range_m": 8.0},
-        )
+        _, _, _, _, dbg_base = _settle(vis)
+        _, _, _, _, dbg_gate = _settle(vis, gate={"bearing_deg": -25.0, "range_m": 8.0})
         self.assertEqual(dbg_gate["mode"], "track")
         self.assertTrue(dbg_gate.get("gate_bias"))
         d_yaw = dbg_gate["yaw_err"] - dbg_base["yaw_err"]
@@ -279,12 +290,8 @@ class GuidanceSignTests(unittest.TestCase):
         # Line clearly bends RIGHT while gate reads far LEFT: trust the line
         # for STEERING — but still slow down (direction-neutral corner brake).
         vis = {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": 0.15}
-        base = compute_blueline_guidance(vision=vis, lost_s=0.0)
-        gated = compute_blueline_guidance(
-            vision=vis,
-            lost_s=0.0,
-            gate={"bearing_deg": -25.0, "range_m": 8.0},
-        )
+        base = _settle(vis)
+        gated = _settle(vis, gate={"bearing_deg": -25.0, "range_m": 8.0})
         self.assertEqual(gated[4]["yaw_err"], base[4]["yaw_err"])
         self.assertEqual(gated[4]["desired_roll"], base[4]["desired_roll"])
         self.assertLess(gated[4]["v_target"], base[4]["v_target"])
@@ -377,8 +384,8 @@ class ClimbAndWeaveTests(unittest.TestCase):
         from simulator.blue_line_pilot import HOVER_THRUST, K_THRUST_CY, CY_TARGET
 
         # A hard corner drives turn_mag to 1.0; drone is low → wants thrust up.
-        vis = self._low(cx=0.0, hdg=0.6)  # big heading = real corner, tm→1
-        _, _, _, thrust, dbg = compute_blueline_guidance(vision=vis, lost_s=0.0)
+        vis = self._low(cx=0.0, hdg=0.75)  # big heading = real corner, tm→1
+        _, _, _, thrust, dbg = _settle(vis)  # sustained: rise cap needs ~0.4 s
         self.assertGreater(dbg["turn_mag"], 0.9)
         cy_err = self._low()["cy_norm"] - CY_TARGET
         old = HOVER_THRUST - K_THRUST_CY * cy_err * (1.0 - 0.7 * dbg["turn_mag"])
@@ -398,7 +405,7 @@ class ClimbAndWeaveTests(unittest.TestCase):
     def test_turn_mag_denoised(self):
         # Same cx weave, hdg dead: turn_mag is lower than the old 0.7 scale.
         vis = {"found": True, "cx_norm": 0.4, "cy_norm": 0.05, "heading_err": 0.0}
-        _, _, _, _, dbg = compute_blueline_guidance(vision=vis, lost_s=0.0)
+        _, _, _, _, dbg = _settle(vis)
         self.assertAlmostEqual(dbg["turn_mag"], 0.4 / 1.1, places=3)
         self.assertLess(dbg["turn_mag"], 0.4 / 0.7)  # was the old value
 
@@ -452,14 +459,8 @@ class SpeedTuningTests(unittest.TestCase):
     def test_gate_bearing_full_corner_brake(self):
         # An agreeing 25-deg gate bearing must pull v_target all the way down
         # to corner speed BEFORE the line itself bends in-frame.
-        _, _, _, _, dbg = compute_blueline_guidance(
-            vision={
-                "found": True,
-                "cx_norm": 0.0,
-                "cy_norm": 0.05,
-                "heading_err": -0.10,
-            },
-            lost_s=0.0,
+        _, _, _, _, dbg = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": -0.10},
             gate={"bearing_deg": -25.0, "range_m": 8.0},
         )
         self.assertEqual(dbg["mode"], "track")
@@ -488,9 +489,7 @@ class TurnRateTests(unittest.TestCase):
         corner = {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": 0.75}
         straight = {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": 0.0}
         state = {}
-        _, _, _, _, dbg1 = compute_blueline_guidance(
-            vision=corner, lost_s=0.0, state=state
-        )
+        _, _, _, _, dbg1 = _settle(corner, state=state)  # sustained -> full
         self.assertEqual(dbg1["turn_mag"], 1.0)
         _, _, _, _, dbg2 = compute_blueline_guidance(
             vision=straight, lost_s=0.0, state=state, dt=1.0 / 60.0
@@ -528,19 +527,31 @@ class TurnRateTests(unittest.TestCase):
         self.assertGreater(d2["yaw_err"], -0.3 * 30.0)  # magnitude reduced
 
     def test_openloop_corner_brake(self):
-        # vX unknown (no velocity telemetry): full corner must pitch UP.
-        _, pitch, _, _, dbg = compute_blueline_guidance(
-            vision={
-                "found": True,
-                "cx_norm": 0.0,
-                "cy_norm": 0.05,
-                "heading_err": 0.6,
-            },
-            lost_s=0.0,
+        # vX unknown (no velocity telemetry): a SUSTAINED corner must pitch UP.
+        _, pitch, _, _, dbg = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": 0.05, "heading_err": 0.75},
             pitch_deg=0.0,
         )
         self.assertGreater(dbg["pitch_des"], 0.0)
         self.assertGreater(pitch, 0.0)
+
+    def test_single_frame_spike_cannot_brake(self):
+        # Log-verified gate hesitation: cx dead centre, heading 55.9 deg -> the
+        # old code latched turn_mag 1.0 and braked (pitch_des +1.5) for 1.25 s,
+        # straight through the pass. One frame must not do that.
+        _, pitch, _, _, dbg = compute_blueline_guidance(
+            vision={
+                "found": True,
+                "cx_norm": 0.001,
+                "cy_norm": 0.05,
+                "heading_err": math.radians(55.9),
+            },
+            lost_s=0.0,
+            pitch_deg=0.0,
+        )
+        self.assertLess(dbg["turn_mag"], 0.2)
+        self.assertLess(dbg["pitch_des"], 0.0)  # still nose DOWN: no brake
+        self.assertLess(pitch, 0.0)
 
 
 class DetectorConfidenceTests(unittest.TestCase):
@@ -596,9 +607,304 @@ class DetectorConfidenceTests(unittest.TestCase):
 
     def test_hard_corner_still_brakes_fully(self):
         hard = self._vis(cx_norm=0.0, heading_err=math.radians(40.0))
-        _, _, _, _, dbg = compute_blueline_guidance(vision=hard, lost_s=0.0)
+        _, _, _, _, dbg = _settle(hard)
         self.assertGreaterEqual(dbg["turn_mag"], 1.0)
         self.assertAlmostEqual(dbg["v_target"], CORNER_SPEED_MPS)
+
+
+class ClimbAuthorityTests(unittest.TestCase):
+    """Flew UNDER gates 2 and 3: climb was gain-limited, not clamp-limited.
+
+    Logged evidence (4044 track rows): low in 53% of frames, yet thrust never
+    exceeded 0.348 against a THRUST_MAX of 0.55.
+    """
+
+    def _thrust(self, cy, roll_deg=0.0, gate=None):
+        _, _, _, thrust, _ = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": cy, "heading_err": 0.0},
+            roll_deg=roll_deg,
+            gate=gate,
+        )
+        return thrust
+
+    def test_low_drone_climbs_much_harder_than_before(self):
+        # Old gain 0.10 could only reach 0.319 at this error.
+        thrust = self._thrust(-0.5)
+        self.assertGreater(thrust, HOVER_THRUST + 0.10)
+        self.assertGreater(thrust, 0.319)
+
+    def test_climb_uses_the_available_headroom(self):
+        # A big error must now approach the clamp it never once reached.
+        self.assertGreater(self._thrust(-1.2), 0.45)
+
+    def test_high_drone_still_descends(self):
+        self.assertLess(self._thrust(0.6), HOVER_THRUST)
+
+    def test_on_target_is_hover(self):
+        self.assertAlmostEqual(self._thrust(CY_TARGET), HOVER_THRUST, places=6)
+
+    def test_corner_no_longer_starves_the_climb(self):
+        # The old (1 - 0.3*turn_mag) attenuation cut climb during exactly the
+        # cornering legs that precede gates 2 and 3.
+        low_straight = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": -0.5, "heading_err": 0.0}
+        )[3]
+        low_corner = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": -0.5, "heading_err": 0.75}
+        )[3]
+        self.assertGreaterEqual(low_corner, low_straight)
+
+    def test_bank_feed_forward_restores_lift(self):
+        level = self._thrust(CY_TARGET, roll_deg=0.0)
+        banked = self._thrust(CY_TARGET, roll_deg=26.0)
+        self.assertGreater(banked, level)
+        # It only ever restores what cos(bank) took — never more.
+        self.assertAlmostEqual(
+            banked - level, HOVER_THRUST * (1.0 / math.cos(math.radians(26.0)) - 1.0), 4
+        )
+
+    def test_bank_feed_forward_is_capped(self):
+        self.assertLessEqual(
+            self._thrust(CY_TARGET, roll_deg=80.0) - HOVER_THRUST,
+            BANK_THRUST_FF_MAX + 1e-9,
+        )
+
+    def test_gate_above_adds_climb_trim(self):
+        # body_z negative = gate centre ABOVE us (body FRD).
+        high = {"bearing_deg": 0.0, "range_m": 8.0, "body_z_m": -1.0}
+        self.assertGreater(self._thrust(CY_TARGET, gate=high), HOVER_THRUST)
+
+    def test_gate_below_removes_climb_trim(self):
+        low = {"bearing_deg": 0.0, "range_m": 8.0, "body_z_m": 1.0}
+        self.assertLess(self._thrust(CY_TARGET, gate=low), HOVER_THRUST)
+
+    def test_gate_z_trim_is_bounded(self):
+        wild = {"bearing_deg": 0.0, "range_m": 8.0, "body_z_m": -50.0}
+        self.assertLessEqual(
+            self._thrust(CY_TARGET, gate=wild) - HOVER_THRUST,
+            GATE_Z_THRUST_MAX + 1e-9,
+        )
+
+    def test_vertical_rate_damping_opposes_a_climb(self):
+        # Rising cy = corridor falling in frame = drone climbing: back off.
+        state = {}
+        rising = [-0.6, -0.4, -0.2, 0.0]
+        out = None
+        for i, cy in enumerate(rising):
+            out = compute_blueline_guidance(
+                vision={
+                    "found": True,
+                    "cx_norm": 0.0,
+                    "cy_norm": cy,
+                    "heading_err": 0.0,
+                    "frame_id": i,
+                },
+                lost_s=0.0,
+                state=state,
+            )
+        self.assertGreater(out[4]["dcy"], 0.0)
+        flat = _settle(
+            {"found": True, "cx_norm": 0.0, "cy_norm": 0.0, "heading_err": 0.0}
+        )[3]
+        self.assertLess(out[3], flat)  # climbing fast -> less thrust than settled
+
+    def test_damping_cannot_dominate_the_climb(self):
+        # Even a violent cy rate must leave a low drone climbing.
+        state = {"prev_cy": 5.0, "dcy_ema": 0.0, "prev_fid": 0, "frame_dt": 0.0}
+        _, _, _, thrust, _ = compute_blueline_guidance(
+            vision={
+                "found": True,
+                "cx_norm": 0.0,
+                "cy_norm": -0.8,
+                "heading_err": 0.0,
+                "frame_id": 1,
+            },
+            lost_s=0.0,
+            state=state,
+        )
+        self.assertGreater(thrust, HOVER_THRUST)
+
+
+class _StubAssist:
+    """Stand-in for GateAssist so commit tests drive the latch, not the YOLO stack."""
+
+    def __init__(self):
+        self.gate = None
+        self.threading = False
+        self.resets = 0
+
+    def update(self, data, now):
+        return self.gate
+
+    def reset(self):
+        self.resets += 1
+
+
+class GateCommitTests(unittest.TestCase):
+    """Punch-through: everything blinds at the gate mouth, so commit and fly."""
+
+    def _pilot(self):
+        data = {"armed": True, "race_status": _race(300)}
+        pilot, ctrl = _make_pilot(data)
+        pilot.tick()
+        data["race_status"] = _race(600, start_ms=3289)
+        pilot.tick()
+        assert pilot._phase == "fly"
+        stub = _StubAssist()
+        pilot._gate_assist = stub
+        data["blue_line"] = {
+            "found": True,
+            "cx_norm": 0.2,
+            "cy_norm": 0.05,
+            "heading_err": 0.0,
+            "frame_id": 1,
+        }
+        return pilot, data, stub
+
+    def _mode(self, data):
+        return (data.get("bl_gate_assist") or {}).get("mode")
+
+    def test_visible_gate_alone_does_not_commit(self):
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 3.0, "range_m": 3.0}
+        pilot.tick()
+        self.assertEqual(self._mode(data), "track")
+
+    def test_commits_when_a_lined_up_gate_blanks(self):
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 3.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None  # gate mouth: assist floors out, tracker goes blind
+        pilot.tick()
+        self.assertEqual(self._mode(data), "commit")
+
+    def test_offset_gate_does_not_arm_commit(self):
+        # A wild bearing is not a pass we are lined up for.
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 35.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None
+        pilot.tick()
+        self.assertNotEqual(self._mode(data), "commit")
+
+    def test_far_gate_does_not_arm_commit(self):
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 2.0, "range_m": 20.0}
+        pilot.tick()
+        stub.gate = None
+        pilot.tick()
+        self.assertNotEqual(self._mode(data), "commit")
+
+    def test_commit_beats_search_when_the_line_is_lost(self):
+        # The whole point: line loss at the gate mouth must NOT yaw-sweep.
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 0.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None
+        data["blue_line"] = {"found": False, "frame_id": 2}
+        pilot._lost_since = time.monotonic() - 5.0  # long past SEARCH_AFTER_S
+        pilot.tick()
+        self.assertEqual(self._mode(data), "commit")
+
+    def test_commit_holds_cruise_and_does_not_brake(self):
+        pilot, data, stub = self._pilot()
+        pilot._hold["turn_mag_lat"] = 1.0  # a corner brake latched on approach
+        stub.gate = {"bearing_deg": 0.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None
+        pilot.tick()
+        _roll, pitch, _yaw, _thrust = pilot.controller.commands[-1]
+        self.assertEqual(self._mode(data), "commit")
+        self.assertEqual(pilot._hold["turn_mag_lat"], 0.0)  # brake dropped
+        self.assertLess(pitch, 0.0)  # nose DOWN: still flying forward
+
+    def test_commit_disarms_on_pass_and_does_not_re_arm(self):
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 0.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None
+        pilot.tick()
+        self.assertEqual(self._mode(data), "commit")
+        data["active_gate_index"] = 1  # gate threaded
+        pilot.tick()
+        self.assertNotEqual(self._mode(data), "commit")
+        pilot.tick()  # the gate just passed must never arm another commit
+        self.assertNotEqual(self._mode(data), "commit")
+
+    def test_commit_expires(self):
+        pilot, data, stub = self._pilot()
+        stub.gate = {"bearing_deg": 0.0, "range_m": 3.0}
+        pilot.tick()
+        stub.gate = None
+        pilot.tick()
+        self.assertEqual(self._mode(data), "commit")
+        pilot._commit_until = time.monotonic() - 0.01
+        pilot.tick()
+        self.assertNotEqual(self._mode(data), "commit")
+
+
+class VisionStalenessTests(unittest.TestCase):
+    """data["blue_line"] keeps found=True when vision_rx stalls."""
+
+    def _pilot(self):
+        pilot, _ctrl = _make_pilot({"armed": True})
+        return pilot
+
+    def test_repeated_frame_id_goes_stale(self):
+        pilot = self._pilot()
+        v = {"found": True, "cx_norm": 0.0, "frame_id": 7}
+        self.assertTrue(pilot._vision_is_fresh(v, 100.0))
+        self.assertTrue(pilot._vision_is_fresh(v, 100.0 + BL_VISION_STALE_S - 0.05))
+        self.assertFalse(pilot._vision_is_fresh(v, 100.0 + BL_VISION_STALE_S + 0.05))
+
+    def test_new_frame_id_refreshes(self):
+        pilot = self._pilot()
+        self.assertTrue(pilot._vision_is_fresh({"found": True, "frame_id": 7}, 100.0))
+        self.assertTrue(pilot._vision_is_fresh({"found": True, "frame_id": 8}, 105.0))
+
+    def test_missing_frame_id_is_trusted(self):
+        # Older producers / unit tests publish no frame clock.
+        pilot = self._pilot()
+        self.assertTrue(pilot._vision_is_fresh({"found": True}, 100.0))
+        self.assertTrue(pilot._vision_is_fresh({"found": True}, 999.0))
+
+
+class VisionRateTests(unittest.TestCase):
+    """dcx must difference per CAMERA frame — control is 32.6 Hz, vision 12.5."""
+
+    def test_repeated_frame_does_not_dilute_the_rate(self):
+        state = {}
+        a = {"found": True, "cx_norm": 0.5, "cy_norm": 0.05, "heading_err": 0.0}
+        b = dict(a, cx_norm=0.3)
+        compute_blueline_guidance(vision=dict(a, frame_id=1), lost_s=0.0, state=state)
+        _, _, _, _, moved = compute_blueline_guidance(
+            vision=dict(b, frame_id=2), lost_s=0.0, state=state
+        )
+        held = state["dcx_ema"]
+        # Same frame repeated: no new measurement, so the EMA must not move.
+        _, _, _, _, repeat = compute_blueline_guidance(
+            vision=dict(b, frame_id=2), lost_s=0.0, state=state
+        )
+        self.assertAlmostEqual(repeat["dcx"], held)
+        self.assertAlmostEqual(state["dcx_ema"], held)
+        self.assertLess(moved["dcx"], 0.0)  # cx fell: rate is negative
+
+    def test_rate_uses_elapsed_time_across_repeats(self):
+        # Two stale ticks then a new frame: the step spans 3 ticks, so dividing
+        # by one control period would overstate the rate ~3x.
+        from simulator.blue_line_pilot import DCX_EMA_ALPHA
+
+        dt = 1.0 / 60.0
+        state = {}
+        v = {"found": True, "cx_norm": 0.5, "cy_norm": 0.05, "heading_err": 0.0}
+        for _ in range(3):
+            compute_blueline_guidance(
+                vision=dict(v, frame_id=1), lost_s=0.0, state=state, dt=dt
+            )
+        _, _, _, _, dbg = compute_blueline_guidance(
+            vision=dict(v, cx_norm=0.2, frame_id=2), lost_s=0.0, state=state, dt=dt
+        )
+        self.assertAlmostEqual(dbg["dcx"], DCX_EMA_ALPHA * (0.2 - 0.5) / (3 * dt))
 
 
 class RaceGateTests(unittest.TestCase):
