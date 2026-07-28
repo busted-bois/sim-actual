@@ -20,7 +20,6 @@ G = 9.81
 ACC_SMOOTH_N = 5
 ESTIMATION_POLL_HZ = 400
 LAUNCH_PITCH_DEG = -17.8
-ALPHA = 0.98  # complementary filter: gyro weight (accel gravity tilt gets 1-alpha)
 
 
 class GPEstimation:
@@ -119,9 +118,11 @@ class GPEstimation:
             gx = -float(imu.get("gx", imu.get("xgyro", 0.0)))
             gy = -float(imu.get("gy", imu.get("ygyro", 0.0)))
             gz = -float(imu.get("gz", imu.get("zgyro", 0.0)))
+            self._att_deg = self.ahrs.update(gx, gy, gz, dt)
+            self.rates_body[0] = math.degrees(gx)
+            self.rates_body[1] = math.degrees(gy)
+            self.rates_body[2] = math.degrees(gz)
 
-            # Smooth accel first so the complementary tilt and the strapdown
-            # dead-reckon share the same low-noise sample.
             ax = float(imu.get("ax", imu.get("xacc", 0.0)))
             ay = float(imu.get("ay", imu.get("yacc", 0.0)))
             az = float(imu.get("az", imu.get("zacc", 0.0)))
@@ -130,15 +131,6 @@ class GPEstimation:
             ax_s = sum(s[0] for s in self._acc_buf) / n
             ay_s = sum(s[1] for s in self._acc_buf) / n
             az_s = sum(s[2] for s in self._acc_buf) / n
-
-            # Complementary filter: gyro + gravity tilt (gated to |accel|~=g).
-            self._att_deg = self.ahrs.update_with_accel(
-                gx, gy, gz, ax_s, ay_s, az_s, dt, ALPHA
-            )
-            self.rates_body[0] = math.degrees(gx)
-            self.rates_body[1] = math.degrees(gy)
-            self.rates_body[2] = math.degrees(gz)
-
             self._integrate(ax_s, ay_s, az_s, dt)
 
     def _integrate(self, ax: float, ay: float, az: float, dt: float) -> None:

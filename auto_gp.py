@@ -11,7 +11,15 @@ import traceback
 # Select GP pilot before Controller is constructed (via setup → main path).
 os.environ["AUTO_PILOT"] = "gp"
 
+from simulator import display
 from simulator.setup import setup_components
+
+# Live vision window (YOLO-annotated camera feed). GP_DISPLAY=0 to disable.
+SHOW_VISION = os.environ.get("GP_DISPLAY", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 SIM_SERVER_UDP_IP = "127.0.0.1"
 SIM_SERVER_UDP_PORT = 14550
@@ -36,7 +44,13 @@ print("Arming drone...", flush=True)
 controller.arm()
 
 print("Starting control loop...", flush=True)
+if SHOW_VISION:
+    # imshow/waitKey must run on the thread that created the window — this
+    # main loop, never the VisionRX receiver thread.
+    display.start()
 _last_tb = 0.0
+_t0 = time.time()
+_last_shown_tag = None
 try:
     while True:
         try:
@@ -49,9 +63,18 @@ try:
                 traceback.print_exc()
                 _last_tb = now
             time.sleep(1.0 / 90.0)  # keep loop cadence if update() bailed early
+        if SHOW_VISION:
+            img, tag = display.pick(shared_data)
+            if tag is not None and tag != _last_shown_tag:
+                _last_shown_tag = tag
+                display.tick(img, time.time() - _t0)
+            else:
+                display.tick(None, 0.0)  # keep the window pumping OS events
 except KeyboardInterrupt:
     print("Exiting.", flush=True)
 finally:
+    if SHOW_VISION:
+        display.close()
     pilot = getattr(controller, "pilot", None)
     if pilot is not None and hasattr(pilot, "shutdown"):
         pilot.shutdown()

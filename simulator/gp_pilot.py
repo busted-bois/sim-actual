@@ -21,7 +21,6 @@ from enum import Enum, auto
 import numpy as np
 
 from simulator.gp_estimation import GPEstimation
-from simulator.anduril_gate_detect import CAM_TILT_DEG
 from simulator.gp_vision import (
     GateEstimateSmoother,
     VisionVelocityTracker,
@@ -31,7 +30,7 @@ from simulator.gp_vision import (
 # Anduril's own measured trim, byte-faithful to the original that flew the
 # course (their controller.py hardcoded 0.264). The RL stack keeps using
 # spec.HOVER_THRUST — rl.gp_expert passes its own hover_thrust in.
-HOVER_THRUST = 0.270
+HOVER_THRUST = 0.264
 # Original AndurilGP command rate (2:1 with the 30 Hz camera; spec cap 100).
 GP_CONTROL_HZ = 60
 DESIRED_PITCH_DEG = -2.0
@@ -39,27 +38,70 @@ K_BEARING = 2.5
 K_LAT_D = 5.0
 MAX_BANK_DEG = 14.0
 PERP_BLEND_DIST = 6.0
-# Near-gate floor on lateral blend. blend=bx/PERP_BLEND_DIST shrinks to 0 as
-# we close, which starved bank authority exactly when off-center (CSV seg11:
-# by grew to -1.5 m while blend cut P/D). Keep enough bank to finish centering.
-NEAR_LAT_BLEND_FLOOR = 0.75
-BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
-# Aim between current and next gate: p_la = p_cur + λ (p_next - p_cur).
-# Δ is expressed in the *current gate* frame (map quat), not AHRS — GyroAHRS
-# yaw is unreferenced and was rotating NED Δ into random body axes (CSV:
-# bx collapsed by ~λ|Δx| → wild bank). Vision-aligned: gate frame ≈ body.
-# Small default: start curving toward next gate before reaching current.
-LOOKAHEAD_LAMBDA = 0.2
-LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·thru / λ·lateral / λ·vert
-# Cross-track: bank bias from e_signed = (p_rel × dhat)_z (vision/gate-frame).
-# Negated into roll so +by (gate right) adds +bank toward the path/gate.
-K_CROSS = 0.3  # deg per meter CTE
 TILT_EMA_ALPHA = 0.25
-K_P_THRUST = 0.014
-K_D_THRUST = 0.0175
+# Elevation PD retuned 2026-07-20 (bottom-bar strike forensics): at the old
+# 0.014/0.0175 the loop's bandwidth was ~0.72 rad/s, zeta 0.45 — a ~3 m
+# inter-gate descent could not converge in the ~3.4 s between re-acquire and
+# the bx<=MIN_BX_FOR_ELEV cutoff at cruise, so every descending approach
+# reached the cutoff still ~0.8 m off with ~0.5 m/s of sink. 0.03/0.045 puts
+# it at ~1.06 rad/s, zeta ~0.78 (settle ~4 s).
+K_P_THRUST = 0.03
+K_D_THRUST = 0.045
+ELEV_ERR_CLAMP_M = 2.0  # bound the P authority against far-range PnP swings
+# Slow integral trim on the elevation loop. P-only left a steady-state offset
+# equal to the hover-trim mismatch (0.264 const vs ~0.27 measured): logs show
+# the drone riding ~0.5 m BELOW gate centre on every approach. Integrates only
+# while a gate is actively ranged (bx > MIN_BX_FOR_ELEV), held elsewhere.
+K_I_THRUST = 0.006  # thrust per m of elev error per second
+ELEV_I_CLAMP = 0.03  # ~11% of hover — enough for trim, can't run away
+# Seed at the measured hover deficit (~0.270 actual vs the byte-faithful
+# 0.264 const): un-seeded, every blind window flew slightly BELOW true hover
+# (log-verified mean 0.2639 while sinking at 0.7 m/s into gate 2's bottom
+# bar) until the slow I-term charged, which it never did on early gates.
+ELEV_I_SEED = 0.006
+# Anti-windup: integrate only in the small-error trim regime. The gate-1
+# climb-out holds a multi-meter elev error for seconds, which wound the
+# integrator to the clamp and ballooned the drone over the gate.
+ELEV_I_ERR_GATE_M = 1.0
 BEARING_RATE_CLAMP_DEG_S = 60.0
-ELEV_RATE_CLAMP_M_S = 5.0
-MIN_BX_FOR_ELEV = 3.0  # elev_rate only; elev_err updates whenever vision valid
+# 2.0 (was 5.0): no sane approach needs >2 m/s of commanded vertical rate at
+# <=10 km/h, but post-target-switch PnP refinement produced ±5 m/s phantom
+# elev rates that cut thrust to 0.23 for ~0.5 s while 1.8 m LOW (log rows
+# 217-221 of gp_log_20260720_171348). With K_D tripled the clamp must shrink.
+ELEV_RATE_CLAMP_M_S = 2.0
+# Vertical-speed null when no fresh elevation measurement exists (blind OR
+# inside MIN_BX_FOR_ELEV): d_vert = clip(vD) so the K_D term arrests residual
+# sink/climb instead of integrating it open-loop through the gate. Exact
+# vertical analog of the K_BLIND_VY_DEG sideslip null; clamped because vD is
+# IMU dead-reckoning (bound the damage, like BLIND_BANK_DEG does laterally).
+BLIND_VD_CLAMP_MPS = 1.5
+# Descent-rate cap. Overshoot into gate 2's bottom bar came from building more
+# sink than the (slow) elevation loop could arrest before the near-gate blind
+# window. Once descending faster than this, thrust is not allowed below the
+# hover trim (no further cut), so gravity alone can't push the sink much past
+# the cap and the loop gets to converge on centre instead of diving through it.
+MAX_DESCENT_RATE_MPS = 0.8
+# Floor safety net for the flat arena floor. The drone starts on the pad and
+# the descending course keeps every gate above that floor, so GO-time NED z is
+# a valid ground reference. Below this clearance above it, blend climb thrust
+# in; suppressed while a fresh gate still sits below us (that descent is
+# intended). Inert without position telemetry (alt blocked / offline harness).
+FLOOR_CLEARANCE_M = 0.8
+FLOOR_CLIMB_THRUST = 0.06
+# 2.5 (was 3.0): take the frozen elevation sample as late as the 20°-tilted
+# camera geometry allows, so the through-gate thrust servo runs on fresher data.
+MIN_BX_FOR_ELEV = 2.5
+# Blind-phase handling (pass-through suppression / lost lock). Verified fail
+# mode: with vision invalid, blend=0 zeroed all lateral authority, so residual
+# sideslip integrated unopposed for the ~1-1.5 s blind window and drifted the
+# drone into the gate edge even after a perfectly centred approach.
+K_BLIND_VY_DEG = 8.0  # deg of bank per m/s residual sideslip while blind
+BLIND_BANK_DEG = 6.0  # cap — IMU vY is drifty, bound the damage
+ELEV_BLIND_DECAY = 0.97  # per 60 Hz tick (~0.55 s tau) on the frozen elev err
+# Vision-derivative frame-gap tolerance: YOLO (primary source) skips camera
+# frames when inference lags; dt scales by the actual gap, so up to 6 frames
+# (200 ms) still yields a usable rate instead of silently dropping damping.
+VIS_DERIV_MAX_GAP_FR = 6
 VIS_VEL_EMA_ALPHA = 0.35
 OF_ALPHA = 0.6
 KP, KR, KY = 1.0, -1.0, -1.0
@@ -76,6 +118,11 @@ CRUISE_SPEED_MPS = 2.2
 THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
 BLIND_CRAWL_MPS = 1.0  # no gate in view
 SLOWDOWN_START_M = 5.0
+# Don't cruise into a gate that isn't vertically converged: scale the cruise
+# margin down as |elev_err| grows so the (slow) elevation loop gets more time
+# per metre. Full cruise at <=0.25 m of error, pure THRU crawl at >=1.25 m.
+VERT_SETTLED_ERR_M = 0.25
+VERT_SLOW_ERR_M = 1.25
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -86,50 +133,18 @@ PITCH_WIRE_MAX_DEG = 18.0  # clamp on attitude-quat pitch command
 CMD_SLEW_DEG_S = 90.0
 THRUST_SLEW_PER_S = 1.0
 
-# Collision backoff: reverse only as far as needed to re-acquire the gate.
-#
-# The reverse lean is TIME-SCHEDULED (push → coast → brake), not purely
-# regulated on vX: the IMU strapdown is dead-reckoning only, so vX is
-# untrustworthy right after an impact. The schedule bounds reverse speed even
-# when vX is stuck at zero and the AHRS is biased — the failure mode that used
-# to reverse at 20–30 km/h.
-BACKOFF_MAX_SPEED_MPS = 0.8  # ~2.9 km/h regulated target
-BACKOFF_PITCH_DEG = 4.0  # push-off nose-up lean
-BACKOFF_BRAKE_PITCH_DEG = -4.0  # nose-down, arrest reverse before FLYING
-BACKOFF_PITCH_WIRE_MAX_DEG = 5.0  # hard clamp on the attitude-quat command
-BACKOFF_PITCH_AUTH_DEG = 1.0  # how far the AHRS may trim the scheduled lean
-BACKOFF_PUSH_S = 1.2  # full lean window
-BACKOFF_COAST_S = 1.6  # lean decays linearly to zero
-BACKOFF_BRAKE_S = 1.2  # brake window
-BACKOFF_MAX_S = 4.0  # == PUSH + COAST + BRAKE (load-bearing invariant)
-BACKOFF_DIST_M = 2.0  # fallback exit; vision re-acquire normally exits first
+# Collision backoff: reverse a few meters then re-acquire.
+BACKOFF_DIST_M = 3.0
+BACKOFF_PITCH_DEG = 4.0  # mild nose-up while reversing
+BACKOFF_MAX_SPEED_MPS = 1.5  # ~5.4 km/h reverse cap
 BACKOFF_MIN_S = 0.6
-BACKOFF_EXIT_REV_MPS = 0.3  # reverse considered arrested
-BACKOFF_COOLDOWN_S = 1.5  # re-entry lockout after a backoff ends
-BACKOFF_COLLISION_GRACE_S = 0.3  # ignore repeats of the originating impact
-# Gate re-acquisition during the reverse: stop backing off as soon as the gate
-# is usefully in view again, rather than always running the full distance.
-BACKOFF_REACQ_MIN_BX_M = 4.0  # > MIN_BX_FOR_ELEV, leaves room to re-accelerate
-BACKOFF_REACQ_HOLD_S = 0.2  # ~6 camera frames; rejects single-frame flicker
-BACKOFF_VIS_VEL_HOLD_S = 0.25  # 30 Hz camera vs 60 Hz control
-BACKOFF_YAW_MAX_DEG = 6.0  # half of FLYING's +/-12 bearing clip
-BACKOFF_YAW_DECAY_S = 1.5  # stale bearing decays out rather than spinning us
+BACKOFF_MAX_S = 4.0
 WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 
 # Post-GO speed safety: IMU vX is often ~0 right after reset, which otherwise
 # saturates PITCH_DES_MIN and open-loop dives to 20–30 km/h.
 LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
-LAUNCH_THRUST_FLOOR_S = 3.0  # after GO: never command thrust below hover
 UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
-# Reject absurd post-gate ghost ranges.
-MAX_GATE_BX_M = 22.0
-MAX_ABS_BZ_M = 10.0
-ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
-E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
-# G1 refine: fade λ near throat; don't sideways-yank a centered hole.
-LOOKAHEAD_FADE_NEAR_M = 5.0  # λ→0 by this range (pass current gate first)
-LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
-CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat lookahead)
 
 
 class Phase(Enum):
@@ -137,108 +152,6 @@ class Phase(Enum):
     WAIT_FOR_START = auto()
     FLYING = auto()
     BACKOFF = auto()
-
-
-def gate_segment_delta_ned(
-    gate_map: list | None, active: int, *, flipz: bool = False
-) -> np.ndarray | None:
-    """Δ = p_next − p_current in NED (optional climb-course Z flip)."""
-    if not gate_map or active < 0 or active + 1 >= len(gate_map):
-        return None
-    try:
-        p0 = np.asarray(gate_map[active]["pos"], dtype=float).copy()
-        p1 = np.asarray(gate_map[active + 1]["pos"], dtype=float).copy()
-    except (KeyError, TypeError, ValueError, IndexError):
-        return None
-    if p0.shape != (3,) or p1.shape != (3,):
-        return None
-    if flipz:
-        p0[2] = -p0[2]
-        p1[2] = -p1[2]
-    return p1 - p0
-
-
-def path_dhat_body(
-    delta_ned: np.ndarray | None, gate_quat: np.ndarray | None
-) -> np.ndarray | None:
-    """Unit path direction in gate frame (≈ body when vision-aligned).
-
-    Returns None if map path is mostly *lateral* in gate frame — that case
-    produced e_signed≈bx (~11) while by≈0 (pass-gate-v1 log).
-    """
-    if delta_ned is None or gate_quat is None:
-        return None
-    from rl.spec import quat_to_R
-
-    d = np.asarray(delta_ned, dtype=float).reshape(3)
-    n = float(np.linalg.norm(d))
-    if n < 1e-3:
-        return None
-    R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))
-    dhat = R_wg.T @ (d / n)
-    hn = float(np.linalg.norm(dhat))
-    if hn < 1e-9:
-        return None
-    dhat = dhat / hn
-    if abs(float(dhat[0])) < abs(float(dhat[1])):
-        return None
-    return dhat
-
-
-def cross_track_error(
-    bx: float, by: float, bz: float, dhat_b: np.ndarray
-) -> tuple[np.ndarray, float]:
-    """ecross = p_rel × dhat; e_signed = 2D z-component bx*dhy − by*dhx."""
-    p_rel = np.array([bx, by, bz], dtype=float)
-    dhat = np.asarray(dhat_b, dtype=float).reshape(3)
-    ecross = np.cross(p_rel, dhat)
-    e_signed = float(bx * dhat[1] - by * dhat[0])
-    return ecross, e_signed
-
-
-def apply_lookahead_body(
-    bx: float,
-    by: float,
-    bz: float,
-    gate_quat: np.ndarray | None,
-    delta_ned: np.ndarray | None,
-    lam: float,
-) -> tuple[float, float, float, float]:
-    """Bias aim to p_lookahead = p_cur + λ (p_next − p_cur) in gate frame.
-
-    Map quats often put the long along-track Δ on gate-"right" (live log:
-    delta_gate≈[-2.1, +23.6, -5.1]). Adding that to body-y yanked ~8 m
-    sideways. Use the *larger* horizontal gate-frame component as thru
-    (along-track) and the *smaller* as lateral; clamp all three offsets.
-    """
-    if lam <= 0.0 or delta_ned is None or gate_quat is None:
-        return bx, by, bz, 0.0
-    from rl.spec import quat_to_R
-
-    R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))  # gate → world
-    dg = R_wg.T @ np.asarray(delta_ned, dtype=float)
-    # Horizontal: larger-mag = along-track (thru), smaller-mag = lateral.
-    g0, g1 = float(dg[0]), float(dg[1])
-    if abs(g1) >= abs(g0):
-        along, lateral = g1, g0
-    else:
-        along, lateral = g0, g1
-    vert = float(dg[2])
-    thru_off = float(
-        np.clip(lam * along, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
-    )
-    lat_off = float(
-        np.clip(lam * lateral, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
-    )
-    vert_off = float(
-        np.clip(lam * vert, -LOOKAHEAD_OFFSET_MAX_M, LOOKAHEAD_OFFSET_MAX_M)
-    )
-    ax = bx + thru_off
-    ay = by + lat_off
-    az = bz + vert_off
-    if ax <= 0.1:
-        return bx, by, bz, 0.0
-    return ax, ay, az, float(lam)
 
 
 def compute_guidance(
@@ -255,9 +168,7 @@ def compute_guidance(
     vX: float = float("nan"),
     dt: float = 1.0 / GP_CONTROL_HZ,
     flying_t: float = float("nan"),
-    delta_ned: np.ndarray | None = None,
-    lookahead_lambda: float = LOOKAHEAD_LAMBDA,
-    gate_quat: np.ndarray | None = None,
+    floor_clearance_m: float = float("nan"),
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -272,76 +183,71 @@ def compute_guidance(
     original fixed DESIRED_PITCH_DEG behavior.
 
     `flying_t` is seconds since GO (lean ramp / untrusted-vX guards).
-    `delta_ned` / `gate_quat` / `lookahead_lambda` bias aim toward next gate
-    in the current-gate frame (vision-aligned ≈ body).
     """
     vision_valid = False
     reliable = False
     bx = by = bz = float("nan")
-    bx_raw = by_raw = bz_raw = float("nan")
     vis_frame_id = None
-    lam_used = 0.0
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
         bz = float(vision.get("body_z_m", float("nan")))
-        bx_raw, by_raw, bz_raw = bx, by, bz
         vis_frame_id = vision.get("frame_id")
         if not any(math.isnan(v) for v in (bx, by, bz)) and bx > 0.1:
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
-            # Fade λ near throat (plan stays; G1 needs hole first).
-            # post-fix: by_raw≈0.04 → by_la≈−0.38 wrong-way bank → by→0.8.
-            lam_eff = float(lookahead_lambda)
-            if lam_eff > 0.0 and not math.isnan(bx_raw):
-                fade = float(
-                    np.clip(
-                        (bx_raw - LOOKAHEAD_FADE_NEAR_M)
-                        / max(LOOKAHEAD_FADE_FAR_M - LOOKAHEAD_FADE_NEAR_M, 1e-3),
-                        0.0,
-                        1.0,
-                    )
-                )
-                lam_eff *= fade
-            bx, by, bz, lam_used = apply_lookahead_body(
-                bx, by, bz, gate_quat, delta_ned, lam_eff
-            )
-            # Centered on hole: keep raw by — only thru/vert may curve.
-            if abs(by_raw) < CENTERED_BY_M:
-                by = by_raw
-            if bx <= 0.1:
-                vision_valid = False
-                lam_used = 0.0
-            elif bx > MAX_GATE_BX_M or abs(bz) > MAX_ABS_BZ_M:
-                # Ghost / wrong-gate after a pass — hold altitude, don't chase.
-                vision_valid = False
-                lam_used = 0.0
-                bx = by = bz = float("nan")
 
-    elev_rate = 0.0
-    elev_updated = False
-    if vision_valid and vis_frame_id is not None:
-        # Elev from RAW vision (pre-lookahead). Inflated bx from thru_off made
-        # optical elev climb when already high (pass-gate-v1).
-        bz_elev = float(bz_raw)
-        if (vision or {}).get("source") == "anduril":
-            bz_elev = bz_raw - math.tan(math.radians(CAM_TILT_DEG)) * max(
-                bx_raw, 0.1
-            )
-        state["last_elev_err"] = float(bz_elev)
-        elev_updated = True
-        if bx_raw > MIN_BX_FOR_ELEV:
-            prev_fid = state.get("prev_elev_frame_id")
-            if prev_fid is not None and 0 < vis_frame_id - prev_fid <= 3:
-                dt_e = (vis_frame_id - prev_fid) / 30.0
-                elev_rate = (bz_elev - state["prev_gate_pD"]) / dt_e
-            state["prev_gate_pD"] = float(bz_elev)
-            state["prev_elev_frame_id"] = vis_frame_id
-    elif not vision_valid:
+    if vision_valid and vision.get("track_break"):
+        # The smoother switched gates: previous frames describe a DIFFERENT
+        # target, so any derivative across the switch is a phantom rate (a
+        # 2 m by-jump in one frame reads as ~570 deg/s bearing rate → pins
+        # the roll at the clamp in the wrong direction).
         state["prev_gate_pD"] = None
         state["prev_elev_frame_id"] = None
-        state["last_elev_err"] = 0.0
+        state["prev_bearing_body"] = None
+        state["prev_bearing_frame_id"] = None
+        state["last_d_frame_id"] = None
+        state["gate_tilt_ema"] = None
+
+    elev_rate = 0.0
+    elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
+    if elev_fresh:
+        qw, qx, qy, qz = quat
+        gate_pD = (
+            2 * (qx * qz - qw * qy) * bx
+            + 2 * (qy * qz + qw * qx) * by
+            + (1 - 2 * (qx * qx + qy * qy)) * bz
+        )
+        prev_fid = state.get("prev_elev_frame_id")
+        if prev_fid is not None and 0 < vis_frame_id - prev_fid <= VIS_DERIV_MAX_GAP_FR:
+            dt_e = (vis_frame_id - prev_fid) / 30.0
+            elev_rate = (gate_pD - state["prev_gate_pD"]) / dt_e
+        state["prev_gate_pD"] = gate_pD
+        state["prev_elev_frame_id"] = vis_frame_id
+        state["last_elev_err"] = gate_pD
+        # Gate above => gate_pD < 0 => trim thrust up (and vice versa).
+        if abs(gate_pD) < ELEV_I_ERR_GATE_M:
+            state["elev_i"] = float(
+                np.clip(
+                    state.get("elev_i", 0.0) - gate_pD * K_I_THRUST * dt,
+                    -ELEV_I_CLAMP,
+                    ELEV_I_CLAMP,
+                )
+            )
+    else:
+        # No fresh elevation measurement: fully blind OR vision valid but
+        # inside MIN_BX_FOR_ELEV (the valid-but-close case used to HOLD the
+        # frozen error un-decayed and keep a stale below-hover command alive
+        # into the gate — log-verified on the gate-2 bottom-bar strike).
+        state["prev_gate_pD"] = None
+        state["prev_elev_frame_id"] = None
+        # Decay (don't hold) the frozen elev error: if the last sample came
+        # from a blended/wrong target, holding it locks a vertical impulse in
+        # open-loop all the way through the gate.
+        state["last_elev_err"] = float(state.get("last_elev_err", 0.0)) * (
+            ELEV_BLIND_DECAY
+        )
 
     # Vision-IMU velocity fusion (lateral + body-down). Forward speed for the
     # cap stays IMU-only — OF understates closing rate and caused dive saturation.
@@ -380,7 +286,7 @@ def compute_guidance(
         if (
             vis_frame_id is not None
             and prev_bf is not None
-            and 0 < vis_frame_id - prev_bf <= 3
+            and 0 < vis_frame_id - prev_bf <= VIS_DERIV_MAX_GAP_FR
         ):
             dt_b = (vis_frame_id - prev_bf) / 30.0
             bearing_rate = (bearing_body - state["prev_bearing_body"]) / dt_b
@@ -437,6 +343,15 @@ def compute_guidance(
         d_lat = vY - state["vY_at_vision"]
         d_vert = vD - state["vD_at_vision"]
 
+    if not elev_fresh and not math.isnan(vD):
+        # Vertical analog of the blind sideslip null: with no fresh elevation
+        # measurement the vision D-term reads ~0 exactly when it matters (log:
+        # d_vert 0.01 vs vD 0.70 inside bx<2.5, 0.000 while blind) and 0.5 m/s
+        # of residual sink drops ~0.8-1.0 m across the blind span — 60%+ of
+        # the half-gate. Null the measured vertical speed instead; the
+        # existing +d_vert*K_D_THRUST term turns it into arresting thrust.
+        d_vert = float(np.clip(vD, -BLIND_VD_CLAMP_MPS, BLIND_VD_CLAMP_MPS))
+
     if math.isnan(vX):
         # RL expert / offline harnesses: original fixed lean.
         pitch_des_deg = DESIRED_PITCH_DEG
@@ -445,7 +360,17 @@ def compute_guidance(
     else:
         if vision_valid and reliable:
             ease = float(np.clip(bx / SLOWDOWN_START_M, 0.0, 1.0))
-            v_target = THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease
+            vert_ok = float(
+                np.clip(
+                    (VERT_SLOW_ERR_M - abs(float(state.get("last_elev_err", 0.0))))
+                    / (VERT_SLOW_ERR_M - VERT_SETTLED_ERR_M),
+                    0.0,
+                    1.0,
+                )
+            )
+            v_target = THRU_SPEED_MPS + (
+                CRUISE_SPEED_MPS - THRU_SPEED_MPS
+            ) * ease * vert_ok
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
         else:
@@ -486,30 +411,15 @@ def compute_guidance(
     )
     p_lat = K_BEARING * bearing_body * blend
     d_lat_term = K_LAT_D * d_lat * blend
-    # When still off-center near the gate, don't let blend starve the bank.
-    if vision_valid and abs(bearing_body) >= BEARING_NEED_BANK_DEG:
-        lat_blend = max(blend, NEAR_LAT_BLEND_FLOOR)
-        p_lat = K_BEARING * bearing_body * lat_blend
-        d_lat_term = K_LAT_D * d_lat * lat_blend
-    desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
-    e_signed = 0.0
-    ecross = np.zeros(3)
     if vision_valid:
-        # CTE on raw vision (hole). Lateral map dhat → e_signed≈bx≈11
-        # (pass-gate-v1); reject → bearing-only. Clip leftover map CTE.
-        # No optical fallback: e_signed=-by would double-count bearing bank.
-        dhat_b = path_dhat_body(delta_ned, gate_quat)
-        if dhat_b is not None:
-            ecross, e_signed = cross_track_error(bx_raw, by_raw, bz_raw, dhat_b)
-            e_signed = float(np.clip(e_signed, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
-            # vcorrection → bank: negate so +by banks toward gate/path.
-            desired_roll = float(
-                np.clip(
-                    desired_roll - K_CROSS * e_signed,
-                    -MAX_BANK_DEG,
-                    MAX_BANK_DEG,
-                )
-            )
+        desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
+    else:
+        # Blind (threading / suppressed): don't just level the wings — null
+        # the residual sideslip so we cross the gate plane without drifting
+        # into the edge. Inert whenever vision is valid.
+        desired_roll = float(
+            np.clip(-K_BLIND_VY_DEG * vY, -BLIND_BANK_DEG, BLIND_BANK_DEG)
+        )
     roll_cmd_deg = (desired_roll - roll_deg) * KR
     yaw_cmd_deg = yaw_err * KY
 
@@ -518,73 +428,41 @@ def compute_guidance(
         math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
     )
     elev_err = float(state.get("last_elev_err", 0.0))
-    elev_err = float(np.clip(elev_err, -2.0, 2.0))
-    thrust_raw = hover_thrust - elev_err * K_P_THRUST + d_vert * K_D_THRUST
-    thrust = float(np.clip(thrust_raw / tilt, 0.0, 1.0))
-    # Pad / GO: elev must not drop us off the launch platform.
-    if not math.isnan(flying_t) and flying_t < LAUNCH_THRUST_FLOOR_S:
-        thrust = max(thrust, float(hover_thrust))
-    # Near gate: don't sink under the ring (live: stuck @1 m → collision backoff).
-    if vision_valid and not math.isnan(bx) and bx < 3.0:
-        thrust = max(thrust, float(hover_thrust) - 0.01)
-    # Falling: never keep commanding descend (post-gate ghost sink).
-    if vD > ANTI_SINK_VD_MPS:
-        thrust = max(thrust, float(hover_thrust) + 0.02)
-
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-
-        _n = int(state.get("_dbg_n", 0))
-        if vision_valid and _n % 10 == 0:
-            with open("debug-89f5ba.log", "a", encoding="utf-8") as _df:
-                _df.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "89f5ba",
-                            "runId": "g1-v1-restore",
-                            "hypothesisId": "baseline",
-                            "location": "gp_pilot.py:compute_guidance",
-                            "message": "thru_gate",
-                            "timestamp": int(_time.time() * 1000),
-                            "data": {
-                                "flying_t": float(flying_t)
-                                if not math.isnan(flying_t)
-                                else None,
-                                "bx_raw": float(bx_raw)
-                                if not math.isnan(bx_raw)
-                                else None,
-                                "by_raw": float(by_raw)
-                                if not math.isnan(by_raw)
-                                else None,
-                                "bz_raw": float(bz_raw)
-                                if not math.isnan(bz_raw)
-                                else None,
-                                "bx": float(bx),
-                                "by": float(by),
-                                "bz": float(bz),
-                                "lam": float(lam_used),
-                                "bearing": float(bearing_body),
-                                "desired_roll": float(desired_roll),
-                                "e_signed": float(e_signed),
-                                "elev_err": float(elev_err),
-                                "thrust": float(thrust),
-                                "hover": float(hover_thrust),
-                                "vX": float(vX) if not math.isnan(vX) else None,
-                                "v_target": float(v_target)
-                                if not math.isnan(v_target)
-                                else None,
-                                "blend": float(blend),
-                            },
-                        }
-                    )
-                    + "\n"
+    elev_err_c = float(np.clip(elev_err, -ELEV_ERR_CLAMP_M, ELEV_ERR_CLAMP_M))
+    thrust = (
+        hover_thrust
+        + float(state.get("elev_i", 0.0))
+        - elev_err_c * K_P_THRUST
+        + d_vert * K_D_THRUST
+    ) / tilt
+    # Descent-rate cap: sinking faster than MAX_DESCENT_RATE_MPS => don't let
+    # the command sit below the hover trim (that keeps accelerating the sink).
+    # Bounds the descent so it settles near the cap instead of diving through
+    # a low gate's bottom bar.
+    if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
+        hover_floor = (hover_thrust + float(state.get("elev_i", 0.0))) / tilt
+        thrust = max(thrust, hover_floor)
+    # Floor safety net: below FLOOR_CLEARANCE_M above the arena floor, blend in
+    # climb thrust so an overshoot below a low gate (or an open-loop blind sink)
+    # can't touch the ground. Suppressed while a fresh gate still sits below us
+    # (>0.3 m): that descent is the intended course, not a fall.
+    if not math.isnan(floor_clearance_m) and floor_clearance_m < FLOOR_CLEARANCE_M:
+        gate_below = elev_fresh and float(state.get("last_elev_err", 0.0)) > 0.3
+        if not gate_below:
+            floor_frac = float(
+                np.clip(
+                    (FLOOR_CLEARANCE_M - floor_clearance_m) / FLOOR_CLEARANCE_M,
+                    0.0,
+                    1.0,
                 )
-        state["_dbg_n"] = _n + 1
-    except Exception:
-        pass
-    # #endregion
+            )
+            climb_t = (
+                hover_thrust
+                + float(state.get("elev_i", 0.0))
+                + FLOOR_CLIMB_THRUST * floor_frac
+            ) / tilt
+            thrust = max(thrust, climb_t)
+    thrust = float(np.clip(thrust, 0.0, 1.0))
 
     dbg = {
         "bearing_deg": bearing_body,
@@ -600,42 +478,17 @@ def compute_guidance(
         "bz": bz,
         "v_target": v_target,
         "pitch_des_deg": pitch_des_deg,
+        "elev_i": float(state.get("elev_i", 0.0)),
         "source": (vision or {}).get("source", ""),
-        "lookahead": lam_used,
-        "e_signed": e_signed,
-        "ecross": ecross,
-        "elev_updated": elev_updated,
+        "infer_ms": (vision or {}).get("infer_ms"),
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
-
-
-def _backoff_pitch_target(elapsed: float, rev: float, braking: bool) -> float:
-    """Time-scheduled reverse lean (degrees, +nose-up). Mutates nothing.
-
-    push → coast → brake, driven by `elapsed`. `rev` (measured reverse speed,
-    m/s) may only REDUCE authority, never extend it: with rev stuck at 0.0 —
-    the exact post-impact failure mode — the lean still decays to zero and then
-    goes negative purely on elapsed time, so a broken speed estimate can no
-    longer hold the nose up all the way to the timeout.
-    """
-    if braking or elapsed >= BACKOFF_PUSH_S + BACKOFF_COAST_S:
-        return BACKOFF_BRAKE_PITCH_DEG
-    if rev > BACKOFF_MAX_SPEED_MPS:
-        return BACKOFF_BRAKE_PITCH_DEG  # overspeed: brake, not merely level
-    if elapsed >= BACKOFF_PUSH_S:
-        frac = 1.0 - (elapsed - BACKOFF_PUSH_S) / BACKOFF_COAST_S
-        decayed = BACKOFF_PITCH_DEG * max(0.0, frac)
-        if rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
-            return min(decayed, 0.3 * BACKOFF_PITCH_DEG)
-        return decayed
-    if rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
-        return 0.3 * BACKOFF_PITCH_DEG
-    return BACKOFF_PITCH_DEG
 
 
 def _fresh_hold_state() -> dict:
     return {
         "last_elev_err": 0.0,
+        "elev_i": ELEV_I_SEED,
         "last_fused_frame_id": None,
         "gate_tilt_ema": None,
         "last_d_frame_id": None,
@@ -707,15 +560,9 @@ class GPPilot:
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
-        self._backoff_brake_since: float | None = None
-        self._backoff_reacq_since: float | None = None
-        self._backoff_rev_vis = 0.0
-        self._backoff_rev_vis_t = 0.0
-        self._backoff_exit_reacq = False
-        self._last_backoff_end = 0.0
-        self._last_gate_bearing_deg: float | None = None
         self._flying_since: float | None = None
         self._go_start_ms: int | None = None
+        self._floor_z0: float | None = None  # GO-time NED z = flat-floor level
         self._tick = 0
         self._est_started = False
         self._last_arm_attempt = 0.0
@@ -729,28 +576,12 @@ class GPPilot:
         self._log_wr = None
         self._log_last_flush = 0.0
         self._debug = os.environ.get("GP_DEBUG", "").strip() in ("1", "true", "yes")
-        self.gate_map: list = []
-        self._gate_flipz = False
-        self._refresh_gate_map()
         # Original AndurilGP wire behavior: degree commands on the attitude
         # quaternion at 60 Hz (the encoding that flew the course).
         controller.control_hz = GP_CONTROL_HZ
         controller.set_control_mode("attitude_quat")
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
-        print(
-            f"[gp] AndurilGP controls pilot ready (lookahead λ={LOOKAHEAD_LAMBDA}"
-            f", K_CROSS={K_CROSS}, flipz={self._gate_flipz}, gates={len(self.gate_map)})",
-            flush=True,
-        )
-
-    def _refresh_gate_map(self) -> None:
-        """Load / refresh gate list (live track burst, else gate_map.json)."""
-        from rl.fly2_course import detect_climb_course, resolve_gate_map
-
-        gm = resolve_gate_map(self.data)
-        if gm:
-            self.gate_map = gm
-            self._gate_flipz = detect_climb_course(gm)
+        print("[gp] AndurilGP controls pilot ready (make control-flight)", flush=True)
 
     @property
     def gates_passed(self) -> int:
@@ -784,15 +615,9 @@ class GPPilot:
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
         self._backoff_last_t = 0.0
-        self._backoff_brake_since = None
-        self._backoff_reacq_since = None
-        self._backoff_rev_vis = 0.0
-        self._backoff_rev_vis_t = 0.0
-        self._backoff_exit_reacq = False
-        self._last_backoff_end = 0.0
-        self._last_gate_bearing_deg = None
         self._flying_since = None
         self._go_start_ms = None
+        self._floor_z0 = None
         self._close_log()
 
     def _open_log(self) -> None:
@@ -805,7 +630,7 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des source lookahead e_signed".split()
+                "pitch_des elev_i source gate".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -827,9 +652,8 @@ class GPPilot:
             now = time.time()
             vt = dbg.get("v_target", float("nan"))
             pd = dbg.get("pitch_des_deg", float("nan"))
+            ei = dbg.get("elev_i", 0.0) or 0.0
             src = str(dbg.get("source", "") or "")
-            la = float(dbg.get("lookahead", 0.0) or 0.0)
-            es = float(dbg.get("e_signed", 0.0) or 0.0)
             self._log_wr.writerow(
                 [f"{now:.3f}"]
                 + [f"{v:.3f}" for v in att]
@@ -837,16 +661,8 @@ class GPPilot:
                 + [f"{thrust:.4f}"]
                 + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
                 + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
-                + [
-                    f"{vY:.3f}",
-                    f"{vD:.3f}",
-                    f"{vX:.3f}",
-                    f"{vt:.3f}",
-                    f"{pd:.3f}",
-                    src,
-                    f"{la:.3f}",
-                    f"{es:.3f}",
-                ]
+                + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}"]
+                + [f"{ei:.4f}", src, str(self.n_passed)]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -933,7 +749,9 @@ class GPPilot:
                 # No "already running → fly now" (that skipped the 3s hold after
                 # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
+                countdown_done = (
+                    race_fresh and sim_ms >= start_ms and finish_ns < 0
+                )
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
@@ -997,14 +815,9 @@ class GPPilot:
 
         # Enter backoff on a fresh MAVLink COLLISION (mavlink_rx writes the key).
         if self.data.get("collision") is not None:
-            # Pop unconditionally: suppressing entry without popping leaves a
-            # stale key that re-fires every tick, turning the cooldown into a
-            # permanent lockout.
-            self.data.pop("collision", None)
-            if time.time() - self._last_backoff_end >= BACKOFF_COOLDOWN_S:
-                self._enter_backoff()
-                self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
-                return
+            self._enter_backoff()
+            self._tick_backoff(roll_deg, pitch_deg, yaw_deg, vX, vY, vD, dt)
+            return
 
         vision = self.gate_smoother.update(self.data)
         vision_vel = self.vel_tracker.update(vision)
@@ -1013,17 +826,18 @@ class GPPilot:
         if active > self.n_passed:
             self.n_passed = active
 
-        if not self.gate_map:
-            self._refresh_gate_map()
-        delta_ned = gate_segment_delta_ned(
-            self.gate_map, active, flipz=self._gate_flipz
-        )
-        gate_quat = None
-        if self.gate_map and 0 <= active < len(self.gate_map):
-            try:
-                gate_quat = np.asarray(self.gate_map[active]["quat"], dtype=float)
-            except (KeyError, TypeError, ValueError):
-                gate_quat = None
+        # Flat-floor clearance for the floor safety net. Capture GO-time NED z
+        # (drone on the pad = ground) once, then track height above it. z0
+        # persists across backoffs — the floor doesn't move — and is cleared
+        # only on a full race reset. Absent telemetry leaves clearance NaN
+        # (guard inert).
+        floor_clearance = float("nan")
+        lp = self.data.get("local_position_ned") or self.data.get("odometry")
+        if lp is not None and lp.get("z") is not None:
+            z_down = float(lp["z"])
+            if self._floor_z0 is None:
+                self._floor_z0 = z_down
+            floor_clearance = self._floor_z0 - z_down
 
         roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
@@ -1037,15 +851,8 @@ class GPPilot:
             vX=vX,
             dt=dt,
             flying_t=flying_t,
-            delta_ned=delta_ned,
-            lookahead_lambda=LOOKAHEAD_LAMBDA,
-            gate_quat=gate_quat,
+            floor_clearance_m=floor_clearance,
         )
-        # Latch the live bearing so a backoff can steer back toward the gate
-        # after it leaves the camera FOV. Cheap, and _enter_backoff can't
-        # recover it afterwards.
-        if dbg.get("vision_valid"):
-            self._last_gate_bearing_deg = float(dbg.get("bearing_deg", 0.0))
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
@@ -1064,39 +871,29 @@ class GPPilot:
         if self._debug and self._tick % DEBUG_EVERY_N == 0:
             vt = dbg.get("v_target", float("nan"))
             src = dbg.get("source", "")
+            infer = dbg.get("infer_ms")
+            infer_s = f" yolo={infer:.0f}ms" if infer is not None else ""
             print(
                 f"[gp] att=({roll_deg:+.1f}r {pitch_deg:+.1f}p) "
                 f"gate=({dbg['bx']:+.1f},{dbg['by']:+.1f},{dbg['bz']:+.1f}) "
-                f"vX={vX:+.2f}/{vt:.2f} src={src} blend={dbg['blend']:.2f} "
+                f"vX={vX:+.2f}/{vt:.2f} src={src}{infer_s} blend={dbg['blend']:.2f} "
                 f"elev={dbg['elev_err']:+.2f} T={thrust:.3f}",
                 flush=True,
             )
 
-
-    def _resume_flying(
-        self, *, reseed_attitude: bool, preserve_vision: bool = False
-    ) -> None:
-        """Shared FLYING entry: re-arm lean ramp + clear dead-reckoned speed.
-
-        `reseed_attitude` re-seeds the AHRS to the launch-ramp pitch. That is
-        correct on the pad and WRONG mid-air: GyroAHRS is pure gyro
-        integration with no accel correction, so a bad seed is a permanent
-        bias for the rest of the flight — it never washes out. A mid-air
-        resume clears velocity only.
-
-        `preserve_vision` keeps the gate lock when the caller already has one,
-        so a re-acquire exit doesn't drop straight back to BLIND_CRAWL_MPS.
-        """
+    def _resume_flying(self) -> None:
+        """Shared FLYING entry: re-arm lean ramp + full AHRS/vel reset."""
         self.phase = Phase.FLYING
         self._flying_since = time.time()
-        if reseed_attitude:
-            self.est.reset()
-        else:
-            self.est.zero_velocity()
+        self.est.reset()
+        # elev_i is learned hover trim (vehicle-level, not gate-level): losing
+        # it on every backoff kept the integrator near zero all flight and the
+        # ~0.5 m low-riding bias never trimmed out (log-verified).
+        ei = float(self._hold.get("elev_i", 0.0))
         self._hold = _fresh_hold_state()
+        self._hold["elev_i"] = ei
         self.vel_tracker.reset()
-        if not preserve_vision:
-            self.gate_smoother.reset()
+        self.gate_smoother.reset()
         self._cmd_slew.reset()
         self.data.pop("collision", None)
 
@@ -1105,8 +902,7 @@ class GPPilot:
         print("Countdown complete! Flying!", flush=True)
         self._go_start_ms = start_ms
         self._finish_noted = False
-        # On the pad: the drone really is sitting at LAUNCH_PITCH_DEG.
-        self._resume_flying(reseed_attitude=True)
+        self._resume_flying()
 
     def _abort_to_wait(self, reason: str) -> None:
         """Drop out of FLYING/BACKOFF and hold zero thrust for a fresh countdown."""
@@ -1163,42 +959,19 @@ class GPPilot:
         self._backoff_start = now
         self._backoff_dist = 0.0
         self._backoff_last_t = now
-        self._backoff_brake_since = None
-        self._backoff_reacq_since = None
-        self._backoff_rev_vis = 0.0
-        self._backoff_rev_vis_t = 0.0
-        self._backoff_exit_reacq = False
         self.data.pop("collision", None)
-        # Drop vision D-terms so re-acquire after the reverse isn't polluted.
-        # NOTE: gate_smoother is deliberately NOT reset — _tick_backoff tracks
-        # the gate through the reverse so it can stop as soon as it's back in
-        # view, and _last_gate_bearing_deg survives to steer the reverse.
+        # Drop vision D-terms so re-acquire after the reverse isn't polluted
+        # (but keep the learned hover trim — see _resume_flying).
+        ei = float(self._hold.get("elev_i", 0.0))
         self._hold = _fresh_hold_state()
+        self._hold["elev_i"] = ei
         self.vel_tracker.reset()
+        self.gate_smoother.reset()
         self._cmd_slew.reset()
-        # Impact leaves the strapdown holding pre-collision FORWARD speed. Left
-        # stale, rev = max(0, -vX) reads 0 and the regulator commands maximum
-        # nose-up all the way to the timeout. Clear velocity but NOT attitude
-        # (zero_velocity, not reset — reset reseeds the launch-ramp pitch).
-        self.est.zero_velocity()
         print(
-            f"[gp] COLLISION — backing off up to {BACKOFF_DIST_M:.0f} m",
+            f"[gp] COLLISION — backing off ~{BACKOFF_DIST_M:.0f} m",
             flush=True,
         )
-
-    def _backoff_rev(self, vX: float) -> float:
-        """Reverse speed (m/s, >=0), IMU fused with vision range-rate.
-
-        `max`, not a weighted blend: this is a one-sided safety limiter and
-        both sources fail TOWARD zero (IMU when stale after impact, vision
-        when the lock drops). Taking the max means either source seeing speed
-        is enough to cut authority; a blend would let a zero-reading source
-        mask a live one, which is the failure being fixed here.
-        """
-        rev_imu = max(0.0, -vX)
-        if time.time() - self._backoff_rev_vis_t <= BACKOFF_VIS_VEL_HOLD_S:
-            return max(rev_imu, self._backoff_rev_vis)
-        return rev_imu
 
     def _tick_backoff(
         self,
@@ -1217,103 +990,20 @@ class GPPilot:
         self._backoff_last_t = now
         self._backoff_dist += max(0.0, -vX) * step_dt
 
-        # Keep watching for the gate through the reverse — the whole point is
-        # to back off only as far as it takes to see it again.
-        vision = self.gate_smoother.update(self.data)
-        vision_vel = self.vel_tracker.update(vision)
-        if vision_vel is not None:
-            # Reversing grows the gate range, so vx_body_mps (approach-positive)
-            # goes negative. Same convention as rev_imu, directly comparable.
-            self._backoff_rev_vis = max(0.0, -float(vision_vel["vx_body_mps"]))
-            self._backoff_rev_vis_t = now
-        bx = float(vision["body_x_m"]) if vision is not None else float("nan")
-
-        reacquired = (
-            vision is not None
-            and bool(vision.get("reliable"))
-            and not math.isnan(bx)
-            and bx >= BACKOFF_REACQ_MIN_BX_M
-        )
-        if reacquired:
-            if self._backoff_reacq_since is None:
-                self._backoff_reacq_since = now
+        # Regulate reverse speed — fixed nose-up used to hit 20–30 km/h.
+        rev = max(0.0, -vX)
+        if rev > BACKOFF_MAX_SPEED_MPS:
+            pitch_target = 0.0
+        elif rev > 0.8 * BACKOFF_MAX_SPEED_MPS:
+            pitch_target = 0.3 * BACKOFF_PITCH_DEG
         else:
-            self._backoff_reacq_since = None
-        if (
-            self._backoff_reacq_since is not None
-            and now - self._backoff_reacq_since >= BACKOFF_REACQ_HOLD_S
-            and elapsed >= BACKOFF_MIN_S
-            and self._backoff_brake_since is None
-        ):
-            # Latch the brake rather than exiting outright — every exit hands
-            # FLYING a drone whose reverse has been arrested.
-            self._backoff_brake_since = now
-            self._backoff_exit_reacq = True
-            print(f"[gp] gate re-acquired at {bx:.1f} m — braking out", flush=True)
-
-        # We hit something BEHIND us — reversing harder is exactly wrong. The
-        # grace window ignores repeat messages from the originating impact
-        # (ground contact can fire hundreds of times per second).
-        if (
-            self.data.get("collision") is not None
-            and elapsed >= BACKOFF_COLLISION_GRACE_S
-        ):
-            self.data.pop("collision", None)
-            if self._backoff_brake_since is None:
-                self._backoff_brake_since = now
-                print("[gp] COLLISION during backoff — braking out", flush=True)
-
-        # Time-scheduled lean; rev can only cut authority, never extend it.
-        rev = self._backoff_rev(vX)
-        braking = self._backoff_brake_since is not None
-        pitch_target = _backoff_pitch_target(elapsed, rev, braking)
-        # These commands ARE the attitude setpoint on the quaternion wire, so
-        # the P-on-error form needs an explicit magnitude bound — FLYING has
-        # one (PITCH_WIRE_MAX_DEG), this path used to have none. With a biased
-        # AHRS, (4.0 - (-17.8)) shipped 21.8 deg of lean: ~28 km/h in reverse.
-        #
-        # The magnitude bound alone is not enough. Because the command is
-        # (target - measured), a biased `pitch_deg` inverts the brake: at
-        # target=-4 with a -17.8 bias the raw command is +8.8, i.e. MORE
-        # nose-up, and it just pins to the clamp. So bound nose-up relative to
-        # what the schedule actually asked for — the estimate may trim within
-        # BACKOFF_PITCH_AUTH_DEG of the target, never override its sign. The
-        # schedule outranks the estimate, which is the only one of the two
-        # that is observable after an impact.
-        raw_pitch = (pitch_target - pitch_deg) * KP
-        pitch_cmd = float(
-            np.clip(
-                min(raw_pitch, pitch_target + BACKOFF_PITCH_AUTH_DEG),
-                -BACKOFF_PITCH_WIRE_MAX_DEG,
-                BACKOFF_PITCH_WIRE_MAX_DEG,
-            )
-        )
-        roll_cmd = float(np.clip((0.0 - roll_deg) * KR, -MAX_BANK_DEG, MAX_BANK_DEG))
-        # Steer the reverse back toward the gate: a straight-line retreat only
-        # helps if the gate was dead ahead, and after a glancing strike it
-        # rarely is. Kept small — yaw rotates the body-X axis that rev and
-        # _backoff_dist are both measured in.
-        if vision is not None and not math.isnan(float(vision["body_y_m"])):
-            bearing = math.degrees(math.atan2(float(vision["body_y_m"]), max(bx, 0.5)))
-        elif self._last_gate_bearing_deg is not None:
-            # Stale bearing decays out over BACKOFF_YAW_DECAY_S rather than
-            # steering on an ever-older measurement.
-            decay = max(0.0, 1.0 - elapsed / BACKOFF_YAW_DECAY_S)
-            bearing = self._last_gate_bearing_deg * decay
-        else:
-            bearing = 0.0
-        yaw_cmd = (
-            float(np.clip(bearing, -BACKOFF_YAW_MAX_DEG, BACKOFF_YAW_MAX_DEG)) * KY
-        )
-        # A bare HOVER_THRUST constant sinks through the whole reverse: no
-        # vertical damping at all. Reuse FLYING's form minus the proportional
-        # term — there's no trustworthy gate elevation during backoff. vD is
-        # NED-down (positive = descending), so +K_D*vD arrests a sink.
-        tilt = max(
-            0.01,
-            math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
-        )
-        thrust = float(np.clip((HOVER_THRUST + K_D_THRUST * vD) / tilt, 0.0, 1.0))
+            pitch_target = BACKOFF_PITCH_DEG
+        pitch_cmd = (pitch_target - pitch_deg) * KP
+        roll_cmd = (0.0 - roll_deg) * KR
+        yaw_cmd = 0.0
+        # Include the learned hover trim: raw 0.264 is ~0.006 below measured
+        # hover, so every backoff slowly sank toward the floor-wedge cycle.
+        thrust = HOVER_THRUST + float(self._hold.get("elev_i", 0.0))
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
         )
@@ -1325,43 +1015,26 @@ class GPPilot:
             vY,
             vD,
             {
-                "bx": bx,
-                "by": float(vision["body_y_m"]) if vision is not None else float("nan"),
-                "bz": float(vision["body_z_m"]) if vision is not None else float("nan"),
+                "bx": float("nan"),
+                "by": float("nan"),
+                "bz": float("nan"),
                 "blend": 0.0,
                 "d_lat": 0.0,
                 "d_vert": 0.0,
-                "source": "backoff-brake" if braking else "backoff",
+                "source": "backoff",
             },
             vX=vX,
         )
 
-        # Distance no longer exits directly — it latches the brake, and the
-        # brake exits. Every exit path therefore hands FLYING a drone that has
-        # had its reverse velocity arrested, instead of one at peak speed.
-        if self._backoff_brake_since is None:
-            # The schedule is already braking past PUSH+COAST, so latch there
-            # unconditionally — otherwise a vX too broken to ever reach
-            # BACKOFF_DIST_M would leave the brake unlatched and strand the
-            # pilot in BACKOFF with no exit check running at all.
-            if elapsed >= BACKOFF_PUSH_S + BACKOFF_COAST_S or (
-                self._backoff_dist >= BACKOFF_DIST_M and elapsed >= BACKOFF_MIN_S
-            ):
-                self._backoff_brake_since = now
-        if self._backoff_brake_since is not None:
-            brake_done = now - self._backoff_brake_since >= BACKOFF_BRAKE_S
-            if (brake_done and rev <= BACKOFF_EXIT_REV_MPS) or elapsed >= BACKOFF_MAX_S:
-                why = "reacquired" if self._backoff_exit_reacq else "distance/time"
-                print(
-                    f"[gp] backoff done ({why}) dist={self._backoff_dist:.1f}m "
-                    f"t={elapsed:.1f}s rev={rev:.2f}m/s — resuming chase",
-                    flush=True,
-                )
-                self._last_backoff_end = now
-                self._resume_flying(
-                    reseed_attitude=False,
-                    preserve_vision=self._backoff_exit_reacq,
-                )
+        done_dist = self._backoff_dist >= BACKOFF_DIST_M and elapsed >= BACKOFF_MIN_S
+        done_time = elapsed >= BACKOFF_MAX_S
+        if done_dist or done_time:
+            print(
+                f"[gp] backoff done dist={self._backoff_dist:.1f}m "
+                f"t={elapsed:.1f}s — resuming chase",
+                flush=True,
+            )
+            self._resume_flying()
 
     def shutdown(self) -> None:
         self.est.stop()
