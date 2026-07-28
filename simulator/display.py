@@ -35,14 +35,29 @@ _window_open = False
 def pick(data):
     """Choose what to show from the shared data dict, returning (img, tag).
     Prefers the YOLO-pose annotated frame (data["pose"]), then the classical
-    overlay, then the raw frame. `tag` changes only when a new frame is
-    available, so callers can skip redundant ticks. (None, None) if no frame."""
+    overlay, then the raw frame. When pose wins, blue-line HUD is composited
+    on top (vision_rx only writes it to frame["annotated"], which display
+    otherwise never shows during make control-flight / bluevision).
+    `tag` changes only when a new frame is available, so callers can skip
+    redundant ticks. (None, None) if no frame."""
     pose = data.get("pose")
-    if pose is not None and pose.get("annotated") is not None:
-        return pose["annotated"], ("p", pose["frame_id"])
     frame = data.get("frame")
+    bl = data.get("blue_line")
+    bl_fid = bl.get("frame_id") if bl is not None else None
+
+    if pose is not None and pose.get("annotated") is not None:
+        img = pose["annotated"]
+        tag = ("p", pose["frame_id"], bl_fid)
+        if img is not None and bl is not None:
+            from simulator.blue_line_vision import (
+                annotate_blue_lines,
+                estimate_from_dict,
+            )
+
+            img = annotate_blue_lines(img, estimate_from_dict(bl), None)
+        return img, tag
     if frame is not None:
-        return frame.get("annotated", frame.get("img")), ("f", frame["frame_id"])
+        return frame.get("annotated", frame.get("img")), ("f", frame["frame_id"], bl_fid)
     return None, None
 
 

@@ -14,6 +14,10 @@ from simulator.gp_pilot import (
     MAX_BANK_DEG,
     MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
+    TRACK_LAT_GAIN,
+    TRACK_LOOKAHEAD_M,
+    TrackVirtualGate,
+    _course_direction_cue,
     _fresh_hold_state,
     compute_guidance,
 )
@@ -1710,6 +1714,75 @@ class EstimatorResilienceTests(unittest.TestCase):
                 self.assertGreater(abs(yaw), 0.5)
             finally:
                 est.stop()
+
+
+class TrackVirtualGateBluelineTests(unittest.TestCase):
+    """Blue-line centroid fuses ahead of detect_track in the ribbon fallback."""
+
+    def test_prefers_blue_line_over_track(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 7},
+            "blue_line": {
+                "found": True,
+                "cx_norm": 0.4,
+                "heading_err": 0.0,
+                "left_found": True,
+                "right_found": True,
+                "frame_id": 7,
+            },
+        }
+        with patch("simulator.gp_pilot.detect_track") as det:
+            out = vg.synth(data)
+            det.assert_not_called()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "blueline")
+        self.assertAlmostEqual(out["body_x_m"], TRACK_LOOKAHEAD_M)
+        self.assertAlmostEqual(out["body_y_m"], 0.4 * TRACK_LAT_GAIN)
+        self.assertEqual(vg._last["offset"], 0.4)
+
+    def test_falls_back_to_track_when_blue_line_missing(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 3},
+            "blue_line": {"found": False, "frame_id": 3},
+        }
+        fake = {"offset": -0.2, "angle": 0.0, "strength": 0.75}
+        with patch("simulator.gp_pilot.detect_track", return_value=fake) as det:
+            out = vg.synth(data)
+            det.assert_called_once()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "track")
+        self.assertAlmostEqual(out["body_y_m"], -0.2 * TRACK_LAT_GAIN)
+
+    def test_course_cue_prefers_blueline_over_gate(self):
+        bl = {
+            "found": True,
+            "cx_norm": -0.4,
+            "left_found": True,
+            "right_found": True,
+        }
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        cue = _course_direction_cue(bl, gate, {"offset": 0.5})
+        self.assertEqual(cue, -1.0)
+
+    def test_course_cue_falls_back_to_gate_then_track(self):
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        self.assertEqual(_course_direction_cue(None, gate, None), 1.0)
+        self.assertEqual(
+            _course_direction_cue({"found": False}, None, {"offset": -0.3}),
+            -1.0,
+        )
 
 
 if __name__ == "__main__":
