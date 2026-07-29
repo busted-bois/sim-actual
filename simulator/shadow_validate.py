@@ -415,7 +415,7 @@ def analyze(rows: list[dict]) -> None:
 
 def _load(path):
     with open(path) as fh:
-        return [json.loads(l) for l in fh if l.strip()]
+        return [json.loads(line) for line in fh if line.strip()]
 
 
 def main():

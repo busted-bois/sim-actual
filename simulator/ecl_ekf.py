@@ -120,9 +120,15 @@ class EclEkf:
         vn, ve, vd = self._vel[0], self._vel[1], self._vel[2]
         w, x, y, z = self._quat[0], self._quat[1], self._quat[2], self._quat[3]
         # v_body = R_nb^T * v_ned  (R_nb from q_nb, body->NED). Rows of R^T:
-        r00 = 1 - 2 * (y * y + z * z); r01 = 2 * (x * y + w * z); r02 = 2 * (x * z - w * y)
-        r10 = 2 * (x * y - w * z); r11 = 1 - 2 * (x * x + z * z); r12 = 2 * (y * z + w * x)
-        r20 = 2 * (x * z + w * y); r21 = 2 * (y * z - w * x); r22 = 1 - 2 * (x * x + y * y)
+        r00 = 1 - 2 * (y * y + z * z)
+        r01 = 2 * (x * y + w * z)
+        r02 = 2 * (x * z - w * y)
+        r10 = 2 * (x * y - w * z)
+        r11 = 1 - 2 * (x * x + z * z)
+        r12 = 2 * (y * z + w * x)
+        r20 = 2 * (x * z + w * y)
+        r21 = 2 * (y * z - w * x)
+        r22 = 1 - 2 * (x * x + y * y)
         fwd = r00 * vn + r01 * ve + r02 * vd
         right = r10 * vn + r11 * ve + r12 * vd
         down = r20 * vn + r21 * ve + r22 * vd
@@ -139,8 +145,10 @@ class EclEkf:
     def variance(self):
         """Estimator state variances: dict with vel_ned/pos_ned/gyro_bias/accel_bias,
         each a 3-tuple. Diagonal of the covariance — how uncertain the filter is."""
-        vv = (ctypes.c_double * 3)(); pv = (ctypes.c_double * 3)()
-        gv = (ctypes.c_double * 3)(); av = (ctypes.c_double * 3)()
+        vv = (ctypes.c_double * 3)()
+        pv = (ctypes.c_double * 3)()
+        gv = (ctypes.c_double * 3)()
+        av = (ctypes.c_double * 3)()
         EclEkf._lib.ekf2_get_variance(self._h, vv, pv, gv, av)
         return {
             "vel_ned": (vv[0], vv[1], vv[2]),
@@ -151,7 +159,9 @@ class EclEkf:
 
     def status(self):
         """(tilt_align, yaw_align, ev_vel) booleans."""
-        ti = ctypes.c_int(0); ya = ctypes.c_int(0); ev = ctypes.c_int(0)
+        ti = ctypes.c_int(0)
+        ya = ctypes.c_int(0)
+        ev = ctypes.c_int(0)
         EclEkf._lib.ekf2_get_status(self._h, ctypes.byref(ti), ctypes.byref(ya), ctypes.byref(ev))
         return (bool(ti.value), bool(ya.value), bool(ev.value))
 
