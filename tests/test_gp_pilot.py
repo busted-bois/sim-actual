@@ -1432,7 +1432,7 @@ class LookaheadTests(unittest.TestCase):
         vision = {
             "frame_id": 1,
             "body_x_m": 12.0,
-            "body_y_m": 0.3,
+            "body_y_m": 0.5,
             "body_z_m": 0.0,
             "normal_body": None,
             "source": "anduril",
@@ -1580,6 +1580,36 @@ class CrossTrackTests(unittest.TestCase):
         self.assertAlmostEqual(
             dbg1["desired_roll"] - dbg0["desired_roll"], K_CROSS * 0.4, places=3
         )
+
+    def test_cte_skipped_near_throat(self):
+        """bx_raw below fade-near → bearing-only (no K_CROSS)."""
+        from simulator.gp_pilot import LOOKAHEAD_FADE_NEAR_M
+
+        gq = self._level_quat()
+        delta = np.array([10.0, 0.0, 0.0])
+        bx = LOOKAHEAD_FADE_NEAR_M - 1.0
+        vision = {
+            "frame_id": 1,
+            "body_x_m": bx,
+            "body_y_m": 0.4,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "source": "anduril",
+        }
+        _a, _b, _c, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            delta_ned=delta,
+            gate_quat=gq,
+            lookahead_lambda=0.0,
+        )
+        self.assertEqual(dbg["e_signed"], 0.0)
 
     def test_last_gate_no_cte_term(self):
         vision = {

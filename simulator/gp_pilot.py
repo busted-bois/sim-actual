@@ -73,9 +73,9 @@ DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips mid-flight
 # (not gated on vision) so lost-lock cannot open-loop dive to 20–30 km/h.
 MAX_SPEED_MPS = 10.0 / 3.6  # ≈2.78 m/s
 CRUISE_SPEED_MPS = 2.2
-THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
+THRU_SPEED_MPS = 1.1  # near-gate crawl (was 1.2; more time to center)
 BLIND_CRAWL_MPS = 1.0  # no gate in view
-SLOWDOWN_START_M = 5.0
+SLOWDOWN_START_M = 6.0  # start slowing earlier than 5 m
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -127,9 +127,9 @@ MAX_ABS_BZ_M = 10.0
 ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
 E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
 # G1 refine: fade λ near throat; don't sideways-yank a centered hole.
-LOOKAHEAD_FADE_NEAR_M = 5.0  # λ→0 by this range (pass current gate first)
+LOOKAHEAD_FADE_NEAR_M = 7.0  # λ→0 by this range (pass current gate first)
 LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
-CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat lookahead)
+CENTERED_BY_M = 0.40  # |by_raw| below → keep raw by (no lat lookahead)
 
 
 class Phase(Enum):
@@ -497,9 +497,11 @@ def compute_guidance(
     if vision_valid:
         # CTE on raw vision (hole). Lateral map dhat → e_signed≈bx≈11
         # (pass-gate-v1); reject → bearing-only. Clip leftover map CTE.
+        # Near throat: bearing-only (skip K_CROSS) so CTE cannot fight hole aim.
         # No optical fallback: e_signed=-by would double-count bearing bank.
         dhat_b = path_dhat_body(delta_ned, gate_quat)
-        if dhat_b is not None:
+        near_throat = not math.isnan(bx_raw) and bx_raw < LOOKAHEAD_FADE_NEAR_M
+        if dhat_b is not None and not near_throat:
             ecross, e_signed = cross_track_error(bx_raw, by_raw, bz_raw, dhat_b)
             e_signed = float(np.clip(e_signed, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
             # vcorrection → bank: negate so +by banks toward gate/path.
@@ -543,7 +545,7 @@ def compute_guidance(
                     _json.dumps(
                         {
                             "sessionId": "89f5ba",
-                            "runId": "g1-v1-restore",
+                            "runId": "g1-consistent-v1",
                             "hypothesisId": "baseline",
                             "location": "gp_pilot.py:compute_guidance",
                             "message": "thru_gate",
