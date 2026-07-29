@@ -1,6 +1,7 @@
 """Unit tests for AndurilGP controls port (AHRS, guidance, wiring)."""
 
 import math
+import os
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from simulator.gp_pilot import (
+    BACKOFF_MAX_SPEED_MPS,
+    CLEAR_ENGAGE_BX_M,
+    CLEAR_MIN_M,
     ELEV_I_SEED,
     HOVER_THRUST,
     K_BEARING,
@@ -22,6 +26,7 @@ from simulator.gp_pilot import (
     TURN_FF_GAIN,
     TURN_FF_MAX_DEG,
     TURN_FF_MIN_BX_M,
+    GPPilot,
     TrackVirtualGate,
     _course_direction_cue,
     _fresh_hold_state,
@@ -1533,13 +1538,28 @@ class GpRaceGateTests(unittest.TestCase):
         finally:
             pilot.shutdown()
 
-    def test_collision_default_no_backoff_keeps_flying(self):
-        """Default (GP_BACKOFF off): a collision must NOT reverse — just consume
-        the event and keep flying the guidance forward."""
+    def test_collision_floats_back_by_default(self):
+        """Default is now GP_BACKOFF ON: a hit floats the drone back a short way
+        instead of grinding on against whatever it struck."""
         from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
-        self.assertFalse(pilot._backoff_on)  # off by default
+        self.assertTrue(pilot._backoff_on)  # on by default
+        try:
+            self._go_flying(ctrl, data, pilot)
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.BACKOFF)
+            self.assertIsNone(data.get("collision"))  # event consumed
+        finally:
+            pilot.shutdown()
+
+    def test_collision_keeps_flying_when_backoff_disabled(self):
+        """GP_BACKOFF=0 restores the old behaviour: consume and press on."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        pilot._backoff_on = False
         try:
             self._go_flying(ctrl, data, pilot)
             data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
@@ -2014,7 +2034,7 @@ class FlightLogSchemaTests(unittest.TestCase):
             "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
             "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
             "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
-            "source gate".split()
+            "half_w half_h clearance clear_ok source gate".split()
         )
         _r, _p, _y, thrust, dbg = compute_guidance(
             roll_deg=0.0,
@@ -2047,6 +2067,263 @@ class FlightLogSchemaTests(unittest.TestCase):
         self.assertEqual(row[header.index("source")], "")
         self.assertEqual(row[header.index("gate")], "2")
         self.assertGreater(float(row[header.index("turn_ff")]), 0.0)
+
+
+
+class InnerOpeningExtentTests(unittest.TestCase):
+    """gate_pnp.inner_opening_half_extents — measured aperture, not nominal."""
+
+    def _kp(self, half_px, cx=320.0, cy=180.0, squash=1.0):
+        # Slots 0-3 = inner TL,TR,BL,BR (top pair, then bottom pair).
+        hw, hh = half_px, half_px * squash
+        return np.array(
+            [
+                [cx - hw, cy - hh],
+                [cx + hw, cy - hh],
+                [cx - hw, cy + hh],
+                [cx + hw, cy + hh],
+                [cx - hw * 1.8, cy - hh * 1.8],
+                [cx + hw * 1.8, cy - hh * 1.8],
+                [cx - hw * 1.8, cy + hh * 1.8],
+                [cx + hw * 1.8, cy + hh * 1.8],
+            ],
+            dtype=np.float64,
+        )
+
+    def test_square_opening_recovers_nominal_half_width(self):
+        from simulator.gate_pnp import inner_opening_half_extents
+
+        # 1.5 m opening at 10 m: half-width 0.75 m -> 0.75*320/10 = 24 px.
+        ext = inner_opening_half_extents(self._kp(24.0), np.ones(8), depth_m=10.0)
+        self.assertIsNotNone(ext)
+        self.assertAlmostEqual(ext[0], 0.75, places=6)
+        self.assertAlmostEqual(ext[1], 0.75, places=6)
+
+    def test_foreshortened_gate_reads_narrower(self):
+        from simulator.gate_pnp import inner_opening_half_extents
+
+        # An angled gate projects a narrower opening -- exactly the clip case.
+        wide = inner_opening_half_extents(self._kp(24.0), np.ones(8), 10.0)
+        narrow = inner_opening_half_extents(self._kp(12.0), np.ones(8), 10.0)
+        self.assertLess(narrow[0], wide[0])
+        self.assertAlmostEqual(narrow[0], 0.375, places=6)
+
+    def test_scales_with_depth(self):
+        from simulator.gate_pnp import inner_opening_half_extents
+
+        near = inner_opening_half_extents(self._kp(48.0), np.ones(8), 5.0)
+        far = inner_opening_half_extents(self._kp(24.0), np.ones(8), 10.0)
+        self.assertAlmostEqual(near[0], far[0], places=6)
+
+    def test_partial_quad_returns_none(self):
+        from simulator.gate_pnp import inner_opening_half_extents
+
+        # Bottom corners cropped inside ~4.5 m: must NOT report a narrow gate.
+        cf = np.ones(8)
+        cf[2] = cf[3] = 0.1
+        self.assertIsNone(inner_opening_half_extents(self._kp(24.0), cf, 10.0))
+
+    def test_bad_depth_returns_none(self):
+        from simulator.gate_pnp import inner_opening_half_extents
+
+        self.assertIsNone(inner_opening_half_extents(self._kp(24.0), np.ones(8), 0.0))
+        self.assertIsNone(
+            inner_opening_half_extents(self._kp(24.0), np.ones(8), float("nan"))
+        )
+
+
+class ClearanceTests(unittest.TestCase):
+    """Predicted crossing vs the opening: slow down AND bias off the post."""
+
+    def _run(self, by, half=None, vY=0.0, bx=3.0, state=None):
+        state = _fresh_hold_state() if state is None else state
+        vision = {
+            "frame_id": 9,
+            "body_x_m": bx,
+            "body_y_m": by,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        if half is not None:
+            vision["half_w_m"], vision["half_h_m"] = half, half
+        return compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=vY,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            vX=2.0,
+        )
+
+    def test_centred_pass_is_untouched(self):
+        dbg = self._run(by=0.0)[4]
+        self.assertAlmostEqual(dbg["clear_ok"], 1.0)
+        self.assertGreater(dbg["clearance"], CLEAR_MIN_M)
+
+    def test_near_post_slows_down(self):
+        centred = self._run(by=0.0)[4]
+        tight = self._run(by=0.62)[4]
+        self.assertLess(tight["clear_ok"], 1.0)
+        self.assertLess(tight["v_target"], centred["v_target"])
+
+    def test_near_post_biases_aim_away(self):
+        # Same geometry, bias on vs off: the biased aim must bank harder.
+        import importlib
+
+        import simulator.gp_pilot as gp
+
+        # Geometry chosen to stay clear of MAX_BANK_DEG, or both saturate at 14.
+        tight_on = abs(self._run(by=0.35, bx=6.0)[4]["desired_roll"])
+        with patch.dict(os.environ, {"GP_CLEAR_BIAS": "0"}):
+            importlib.reload(gp)
+            try:
+                self.assertEqual(gp.CLEAR_BIAS_GAIN, 0.0)
+                _r, _p, _y, _t, d = gp.compute_guidance(
+                    roll_deg=0.0,
+                    pitch_deg=0.0,
+                    quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+                    vY=0.0,
+                    vD=0.0,
+                    vision={
+                        "frame_id": 9,
+                        "body_x_m": 6.0,
+                        "body_y_m": 0.35,
+                        "body_z_m": 0.0,
+                        "normal_body": None,
+                    },
+                    vision_vel=None,
+                    state=gp._fresh_hold_state(),
+                    vX=2.0,
+                )
+                tight_off = abs(d["desired_roll"])
+            finally:
+                importlib.reload(gp)
+        self.assertLess(tight_on, MAX_BANK_DEG)
+        self.assertGreater(tight_on, tight_off)
+
+    def test_inert_beyond_engage_range(self):
+        # 12 m out, 0.8 m off-centre: routine, must not read as a clip.
+        dbg = self._run(by=0.8, bx=CLEAR_ENGAGE_BX_M + 6.0)[4]
+        self.assertAlmostEqual(dbg["clear_ok"], 1.0)
+        self.assertTrue(math.isnan(dbg["clearance"]))
+
+    def test_measured_extent_overrides_nominal_and_is_held(self):
+        state = _fresh_hold_state()
+        # A narrow (foreshortened) opening seen at range...
+        self._run(by=0.0, half=0.40, bx=8.0, state=state)
+        self.assertAlmostEqual(state["half_w_hold"], 0.40)
+        # ...still applies once the corners drop out of frame near the gate.
+        dbg = self._run(by=0.0, bx=3.0, state=state)[4]
+        self.assertAlmostEqual(dbg["half_w"], 0.40)
+
+    def test_nominal_used_before_any_measurement(self):
+        dbg = self._run(by=0.0, bx=3.0)[4]
+        self.assertAlmostEqual(dbg["half_w"], 0.75)
+
+    def test_fresh_state_clears_hold(self):
+        st = _fresh_hold_state()
+        self.assertIsNone(st["half_w_hold"])
+        self.assertIsNone(st["half_h_hold"])
+
+    def test_centred_pass_through_a_narrow_gate_is_not_penalised(self):
+        # A foreshortened gate is genuinely narrower; a dead-centre crossing of
+        # it must still score full marks. Scoring against a fixed 0.75 m
+        # reference would brake the whole approach through every angled gate.
+        st = _fresh_hold_state()
+        dbg = self._run(by=0.0, half=0.40, bx=4.0, state=st)[4]
+        self.assertAlmostEqual(dbg["half_w"], 0.40)
+        self.assertAlmostEqual(dbg["clear_ok"], 1.0)
+
+    def test_narrow_gate_still_penalises_an_off_centre_crossing(self):
+        st = _fresh_hold_state()
+        centred = self._run(by=0.0, half=0.40, bx=4.0, state=st)[4]
+        off = self._run(by=0.25, half=0.40, bx=4.0, state=st)[4]
+        self.assertLess(off["clear_ok"], centred["clear_ok"])
+
+    def test_vertical_miss_drives_clearance(self):
+        # Laterally centred but riding low: the BAR is the near miss, not a
+        # post. body_z_m (not a pre-set last_elev_err, which guidance recomputes).
+        vision = {
+            "frame_id": 9,
+            "body_x_m": 3.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.65,
+            "normal_body": None,
+        }
+        _r, _p, _y, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            vX=2.0,
+        )
+        self.assertLess(dbg["clear_ok"], 1.0)
+        self.assertAlmostEqual(dbg["clearance"], 0.75 - 0.65, places=6)
+
+
+class BackoffTests(unittest.TestCase):
+    """Post-collision float: short, gentle, and attitude-bounded."""
+
+    def test_enabled_by_default(self):
+        env = dict(os.environ)
+        env.pop("GP_BACKOFF", None)
+        with patch.dict(os.environ, env, clear=True):
+            on = os.environ.get("GP_BACKOFF", "1").strip() not in ("0", "false", "no")
+        self.assertTrue(on)
+
+    def test_float_is_gentler_than_the_original(self):
+        from simulator.gp_pilot import BACKOFF_DIST_M, BACKOFF_MAX_S
+
+        self.assertLessEqual(BACKOFF_DIST_M, 2.0)
+        self.assertLessEqual(BACKOFF_MAX_SPEED_MPS, 1.0)
+        self.assertLessEqual(BACKOFF_MAX_S, 2.5)
+
+    def test_roll_command_clamped_after_a_hit(self):
+        from simulator.gp_pilot import KR
+
+        raw = (0.0 - 107.0) * KR
+        clamped = float(np.clip(raw, -ROLL_WIRE_MAX_DEG, ROLL_WIRE_MAX_DEG))
+        self.assertGreater(abs(raw), ROLL_WIRE_MAX_DEG)
+        self.assertLessEqual(abs(clamped), ROLL_WIRE_MAX_DEG)
+
+    def test_backoff_log_row_matches_header(self):
+        import csv as _csv
+        import io
+        import time as _time
+
+        pilot = GPPilot.__new__(GPPilot)
+        buf = io.StringIO()
+        pilot._log = buf
+        pilot._log_wr = _csv.writer(buf)
+        pilot._log_last_flush = _time.time()
+        pilot.n_passed = 1
+        # Exactly the partial dbg that _tick_backoff emits.
+        dbg = {
+            "bx": float("nan"),
+            "by": float("nan"),
+            "bz": float("nan"),
+            "blend": 0.0,
+            "d_lat": 0.0,
+            "d_vert": 0.0,
+            "source": "backoff",
+        }
+        pilot._log_tick((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.27, 0.0, 0.0, dbg)
+        row = next(_csv.reader(io.StringIO(buf.getvalue())))
+        header = (
+            "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
+            "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
+            "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
+            "half_w half_h clearance clear_ok source gate".split()
+        )
+        self.assertEqual(len(row), len(header))
+        self.assertEqual(row[header.index("source")], "backoff")
 
 
 

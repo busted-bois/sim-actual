@@ -12,6 +12,8 @@ import math
 
 import numpy as np
 
+from simulator.gate_pnp import inner_opening_half_extents
+
 GATE_OUTER_W_M = 2.7
 FX = 320.0
 CX = 320.0
@@ -110,11 +112,24 @@ def _yolo_pose_estimate(data: dict) -> dict | None:
         return None
     p = g["pose"]
     gb = np.asarray(p["gate_pos_body"], dtype=np.float64).reshape(3)
+    # Measured half-extents of the OPENING, so the pilot can tell a centred
+    # pass from one about to catch a post. None whenever the inner quad isn't
+    # fully visible (routine inside ~4.5 m); the pilot holds the last value.
+    half_w = half_h = None
+    gp_cam = p.get("gate_pos_cam")
+    kxy, kcf = g.get("keypoints"), g.get("keypoint_conf")
+    if gp_cam is not None and kxy is not None and kcf is not None:
+        depth = float(np.asarray(gp_cam, dtype=np.float64).reshape(3)[2])
+        ext = inner_opening_half_extents(kxy, kcf, depth)
+        if ext is not None:
+            half_w, half_h = ext
     return {
         "frame_id": fid,
         "body_x_m": float(gb[0]),
         "body_y_m": float(gb[1]),
         "body_z_m": float(gb[2]),
+        "half_w_m": half_w,
+        "half_h_m": half_h,
         "pnp_ok": True,
         "pnp_rvec": None,
         "normal_body": np.asarray(p["normal_body"], dtype=np.float64).reshape(3),
