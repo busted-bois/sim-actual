@@ -12,13 +12,20 @@ from simulator.gp_pilot import (
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
+    MAX_CLIMB_RATE_MPS,
     MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
+    ROLL_WIRE_MAX_DEG,
+    TILT_COMP_MIN,
     TRACK_LAT_GAIN,
     TRACK_LOOKAHEAD_M,
+    TURN_FF_GAIN,
+    TURN_FF_MAX_DEG,
+    TURN_FF_MIN_BX_M,
     TrackVirtualGate,
     _course_direction_cue,
     _fresh_hold_state,
+    _turn_yaw_ff,
     compute_guidance,
 )
 from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
@@ -1783,6 +1790,264 @@ class TrackVirtualGateBluelineTests(unittest.TestCase):
             _course_direction_cue({"found": False}, None, {"offset": -0.3}),
             -1.0,
         )
+
+
+class ClimbCapAndUpsetGuardTests(unittest.TestCase):
+    """Bounds added after gp_log_20260728_183724 went full-throttle inverted."""
+
+    def _level_quat(self):
+        return np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+
+    def _gate_above(self):
+        # bz negative at level = gate ABOVE -> elev-P commands climb.
+        return {
+            "frame_id": 5,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": -3.0,
+            "normal_body": None,
+        }
+
+    def _run(self, roll_deg=0.0, pitch_deg=0.0, vD=0.0, vision=None, **kw):
+        state = _fresh_hold_state()
+        vision = self._gate_above() if vision is None else vision
+        # Two ticks: the first seeds last_elev_err, the second acts on it.
+        for _ in range(2):
+            out = compute_guidance(
+                roll_deg=roll_deg,
+                pitch_deg=pitch_deg,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=vD,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                **kw,
+            )
+        return out
+
+    def test_climb_cap_holds_thrust_at_hover_ceiling(self):
+        _rr, _pr, _yr, thrust, _dbg = self._run(vD=-(MAX_CLIMB_RATE_MPS + 1.0))
+        ceiling = HOVER_THRUST + ELEV_I_SEED
+        self.assertLessEqual(thrust, ceiling + 1e-6)
+
+    def test_climb_cap_inert_below_threshold(self):
+        # Same climbing gate, but slower than the cap -> elev-P still boosts.
+        _rr, _pr, _yr, thrust, _dbg = self._run(vD=-(MAX_CLIMB_RATE_MPS * 0.25))
+        self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_descent_cap_still_floors_thrust(self):
+        # Regression: the new min() must not undo the existing sink floor.
+        vision = dict(self._gate_above(), body_z_m=3.0)  # gate BELOW -> cut thrust
+        _rr, _pr, _yr, thrust, _dbg = self._run(
+            vD=MAX_DESCENT_RATE_MPS + 1.0, vision=vision
+        )
+        self.assertGreaterEqual(thrust, HOVER_THRUST + ELEV_I_SEED - 1e-6)
+
+    def test_inverted_attitude_does_not_command_full_thrust(self):
+        # cos(108)*cos(45) is NEGATIVE; the old max(0.01, .) floor made this 1.0.
+        _rr, _pr, _yr, thrust, _dbg = self._run(roll_deg=108.0, pitch_deg=45.0)
+        self.assertLess(thrust, 1.0)
+        self.assertLessEqual(thrust, (HOVER_THRUST + 0.09) / TILT_COMP_MIN + 1e-6)
+
+    def test_tilt_compensation_unaffected_in_normal_bank(self):
+        level = self._run(roll_deg=0.0)[3]
+        banked = self._run(roll_deg=14.0)[3]
+        # 14 deg of bank is a ~3% boost, nowhere near the TILT_COMP_MIN clamp.
+        self.assertGreater(banked, level)
+        self.assertLess(banked, level * 1.10)
+
+    def test_roll_command_clamped_when_upset(self):
+        roll_cmd, _pr, _yr, _t, _dbg = self._run(roll_deg=107.0)
+        self.assertLessEqual(abs(roll_cmd), ROLL_WIRE_MAX_DEG + 1e-6)
+
+    def test_normal_bank_demand_not_clamped(self):
+        # Gate well off to the right at range: real turn authority must survive.
+        vision = dict(self._gate_above(), body_y_m=3.0, body_z_m=0.0)
+        roll_cmd, _pr, _yr, _t, _dbg = self._run(roll_deg=0.0, vision=vision)
+        self.assertLess(abs(roll_cmd), ROLL_WIRE_MAX_DEG)
+        self.assertGreater(abs(roll_cmd), 0.0)
+
+
+class TurnYawFeedForwardTests(unittest.TestCase):
+    """Corridor bend biases yaw so the drone rotates into a curve."""
+
+    def _bl(self, hdg, **kw):
+        d = {
+            "found": True,
+            "left_found": True,
+            "right_found": True,
+            "conf": 1.0,
+            "heading_err": hdg,
+        }
+        d.update(kw)
+        return d
+
+    def test_right_bend_yaws_right(self):
+        far = TURN_FF_MIN_BX_M + 5.0
+        ff = _turn_yaw_ff(self._bl(0.2), far)
+        self.assertGreater(ff, 0.0)
+        self.assertAlmostEqual(ff, TURN_FF_GAIN * math.degrees(0.2), places=6)
+
+    def test_left_bend_yaws_left(self):
+        self.assertLess(_turn_yaw_ff(self._bl(-0.2), TURN_FF_MIN_BX_M + 5.0), 0.0)
+
+    def test_bounded(self):
+        self.assertAlmostEqual(
+            _turn_yaw_ff(self._bl(1.5), 20.0), TURN_FF_MAX_DEG, places=6
+        )
+
+    def test_single_rail_ignored(self):
+        bl = self._bl(0.3, right_found=False)
+        self.assertEqual(_turn_yaw_ff(bl, 20.0), 0.0)
+
+    def test_low_confidence_ignored(self):
+        self.assertEqual(_turn_yaw_ff(self._bl(0.3, conf=0.1), 20.0), 0.0)
+
+    def test_not_found_ignored(self):
+        self.assertEqual(_turn_yaw_ff({"found": False}, 20.0), 0.0)
+        self.assertEqual(_turn_yaw_ff(None, 20.0), 0.0)
+
+    def test_disabled_inside_crossing(self):
+        # Inside TURN_FF_MIN_BX_M the gate owns the aim.
+        self.assertEqual(_turn_yaw_ff(self._bl(0.3), TURN_FF_MIN_BX_M - 1.0), 0.0)
+
+    def test_active_when_blind(self):
+        # No gate -> bx is NaN; the corridor should still steer yaw.
+        self.assertGreater(_turn_yaw_ff(self._bl(0.3), float("nan")), 0.0)
+
+    def test_reaches_guidance_yaw_command(self):
+        quat = np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+        vision = {
+            "frame_id": 3,
+            "body_x_m": 14.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        kw = dict(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=quat,
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+        )
+        _r, _p, yaw_plain, _t, d0 = compute_guidance(state=_fresh_hold_state(), **kw)
+        _r, _p, yaw_ff, _t, d1 = compute_guidance(
+            state=_fresh_hold_state(), blue_line=self._bl(0.3), **kw
+        )
+        self.assertNotEqual(yaw_plain, yaw_ff)
+        self.assertGreater(d1["turn_ff_deg"], 0.0)
+        self.assertEqual(d0["turn_ff_deg"], 0.0)
+        self.assertTrue(d1["bl_found"])
+        self.assertFalse(d0["bl_found"])
+
+
+
+class SearchArcScalingTests(unittest.TestCase):
+    """Blind post-pass arc is sized to the corridor's last measured bend."""
+
+    def _arc(self, hdg):
+        from simulator.gp_pilot import (
+            SEARCH_HDG_REF_RAD,
+            SEARCH_LAT_MIN_FRAC,
+        )
+
+        return float(
+            np.clip(abs(hdg) / SEARCH_HDG_REF_RAD, SEARCH_LAT_MIN_FRAC, 1.0)
+        )
+
+    def test_sharp_bend_gives_full_arc(self):
+        from simulator.gp_pilot import SEARCH_HDG_REF_RAD
+
+        self.assertAlmostEqual(self._arc(SEARCH_HDG_REF_RAD * 2), 1.0)
+
+    def test_gentle_bend_floors_not_zeroes(self):
+        from simulator.gp_pilot import SEARCH_LAT_MIN_FRAC
+
+        # A straight corridor must still sweep, or a lost gate is never found.
+        self.assertAlmostEqual(self._arc(0.0), SEARCH_LAT_MIN_FRAC)
+
+    def test_arc_is_monotonic_in_bend(self):
+        self.assertLess(self._arc(0.10), self._arc(0.25))
+
+    def test_course_hdg_ema_tracks_both_rails_only(self):
+        from simulator.gp_pilot import SEARCH_HDG_ALPHA
+
+        hdg = 0.0
+        bl = {"found": True, "left_found": True, "right_found": True,
+              "heading_err": 0.4}
+        for _ in range(50):
+            if bl.get("found") and bl.get("left_found") and bl.get("right_found"):
+                hdg += SEARCH_HDG_ALPHA * (float(bl["heading_err"]) - hdg)
+        self.assertGreater(hdg, 0.3)
+        # Single rail contributes nothing.
+        single = {"found": True, "left_found": True, "right_found": False,
+                  "heading_err": -0.9}
+        before = hdg
+        if single.get("left_found") and single.get("right_found"):
+            hdg += SEARCH_HDG_ALPHA * (float(single["heading_err"]) - hdg)
+        self.assertEqual(hdg, before)
+
+
+
+class FlightLogSchemaTests(unittest.TestCase):
+    """Header and row must stay the same width (new diagnostic columns)."""
+
+    def test_header_and_row_widths_match(self):
+        import csv as _csv
+        import io
+        import time as _time
+
+        from simulator.gp_pilot import GPPilot
+
+        pilot = GPPilot.__new__(GPPilot)  # no controller/MAVLink needed
+        buf = io.StringIO()
+        pilot._log = buf
+        pilot._log_wr = _csv.writer(buf)
+        pilot._log_last_flush = _time.time()
+        pilot.n_passed = 2
+
+        header = (
+            "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
+            "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
+            "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
+            "source gate".split()
+        )
+        _r, _p, _y, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=0.0,
+            vD=0.0,
+            vision={
+                "frame_id": 1,
+                "body_x_m": 12.0,
+                "body_y_m": 0.5,
+                "body_z_m": 0.0,
+                "normal_body": None,
+            },
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            blue_line={
+                "found": True,
+                "left_found": True,
+                "right_found": True,
+                "conf": 0.9,
+                "heading_err": 0.2,
+            },
+        )
+        pilot._log_tick((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), thrust, 0.0, 0.0, dbg)
+        row = next(_csv.reader(io.StringIO(buf.getvalue())))
+        self.assertEqual(len(row), len(header))
+        # Diagnostics actually carry a value, not a placeholder.
+        self.assertEqual(row[header.index("bl_found")], "1")
+        self.assertEqual(row[header.index("source")], "")
+        self.assertEqual(row[header.index("gate")], "2")
+        self.assertGreater(float(row[header.index("turn_ff")]), 0.0)
+
 
 
 if __name__ == "__main__":

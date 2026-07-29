@@ -64,6 +64,45 @@ SEARCH_CUE_ALPHA = 0.15  # EMA on the lateral course-direction cue
 # opening (then having to swing back). Once facing it, the normal approach takes
 # it mostly straight in — matches the observed "dip left then go right" miss.
 SEARCH_ROLL_SCALE = 0.35
+# Scale the search arc by how sharply the corridor was last seen to bend, rather
+# than always demanding the fixed 45° of SEARCH_LAT_M/SEARCH_LOOKAHEAD_M. The
+# fixed demand is what threw the drone into a wall mid-arc after gate 1
+# (gp_log_20260728_183724 t=49 s). SEARCH only fires once the corridor is
+# already lost, so this rides on a held EMA of its last heading.
+SEARCH_HDG_ALPHA = 0.1
+SEARCH_HDG_REF_RAD = 0.35  # ~20° of corridor bend = full-strength arc
+SEARCH_LAT_MIN_FRAC = 0.35  # floor: a gentle bend still arcs enough to sweep
+
+# --- Corridor-heading yaw feed-forward ---------------------------------------
+# blue_line["heading_err"] (rad, + = corridor vanishes RIGHT) is the only signal
+# that encodes course CURVATURE, and it was thrown away whenever a gate was
+# locked — leaving the pilot to bank (translate) through curves rather than
+# rotate into them. Added to yaw_err ONLY, never to roll, so the drone turns to
+# face the curve while the gate's own bearing term keeps owning fine aim.
+TURN_FF_GAIN = 0.5  # deg of yaw per deg of corridor heading (0 disables)
+TURN_FF_MAX_DEG = 8.0  # bounded under the ±12° gate bearing term
+TURN_FF_MIN_BX_M = 5.0  # far approach only — off through the crossing
+TURN_FF_MIN_CONF = 0.5
+
+
+def _turn_yaw_ff(blue_line, bx: float) -> float:
+    """Bounded yaw feed-forward from the corridor's measured bend (deg).
+
+    Requires BOTH rails: a single rail's slope is that rail's, not the
+    corridor's — the same reason TrackVirtualGate gates its `use_angle`.
+    """
+    if blue_line is None or not blue_line.get("found"):
+        return 0.0
+    if not (blue_line.get("left_found") and blue_line.get("right_found")):
+        return 0.0
+    if float(blue_line.get("conf", 0.0)) < TURN_FF_MIN_CONF:
+        return 0.0
+    # Inside the crossing the gate owns the aim; a corridor bend there is the
+    # NEXT leg and would drag us off the opening.
+    if math.isfinite(bx) and bx <= TURN_FF_MIN_BX_M:
+        return 0.0
+    hdg_deg = math.degrees(float(blue_line.get("heading_err", 0.0)))
+    return float(np.clip(TURN_FF_GAIN * hdg_deg, -TURN_FF_MAX_DEG, TURN_FF_MAX_DEG))
 
 
 # A real next gate is near and roughly ahead. After a pass YOLO intermittently
@@ -288,6 +327,23 @@ BLIND_VD_CLAMP_MPS = 1.5
 # hover trim (no further cut), so gravity alone can't push the sink much past
 # the cap and the loop gets to converge on centre instead of diving through it.
 MAX_DESCENT_RATE_MPS = 0.8
+# Climb-rate cap — the missing mirror of MAX_DESCENT_RATE_MPS. Nothing bounded
+# ASCENT: elev-P saturates at ELEV_ERR_CLAMP_M*K_P_THRUST = +0.06 over hover
+# (plus elev_i, log-verified thrust ceiling 0.354 vs hover 0.264) while the
+# D-damping tops out at BLIND_VD_CLAMP*K_D_THRUST = -0.0675, so a gate more
+# than 2 m up commanded a net climb the loop could never arrest — measured
+# peak 4.82 m/s, p95 2.78 (gp_log_20260728_183856). Above this rate the
+# command may not sit ABOVE the hover trim, so gravity bleeds the climb off.
+# Median climb is 0.14 m/s, so ordinary flight never reaches this.
+MAX_CLIMB_RATE_MPS = float(os.environ.get("GP_MAX_CLIMB", "1.2"))
+# Tilt-compensation floor. thrust is divided by cos(roll)*cos(pitch) to hold
+# vertical thrust through a bank. Past 90° of roll that product goes NEGATIVE,
+# and the old max(0.01, ...) floor turned it into 0.264/0.01 -> clipped to
+# 1.000: FULL THROTTLE while inverted, exactly when it does most harm (51 such
+# ticks after a strike in gp_log_20260728_183724, vD swinging to 21 m/s).
+# Clamping instead of flooring caps the boost at 1/0.7 = 1.43x. Never binds in
+# normal flight: cos(14°)*cos(18°) = 0.92 at full commanded bank.
+TILT_COMP_MIN = 0.7
 # Floor safety net for the flat arena floor. The drone starts on the pad and
 # the descending course keeps every gate above that floor, so GO-time NED z is
 # a valid ground reference. Below this clearance above it, blend climb thrust
@@ -349,6 +405,13 @@ K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
 PITCH_DES_MAX_DEG = 6.0
 PITCH_WIRE_MAX_DEG = 18.0  # clamp on attitude-quat pitch command
+# Same clamp for roll, which had none. The command is error-space
+# ((desired_roll - roll_deg) * KR) but ships as an ABSOLUTE attitude quaternion,
+# so an upset feeds itself: at a measured roll of 107° it demanded +93°, driving
+# the tumble instead of recovering from it. 25 rather than PITCH's 18 because
+# controlled flight legitimately reaches |cmd_roll| p99 15-20° (max 19.4/35.1
+# across two logs) — 18 would clip real turn authority, 25 only cuts the upset.
+ROLL_WIRE_MAX_DEG = 25.0
 
 # Attitude-command slew limits (vision flicker → bank twitch).
 CMD_SLEW_DEG_S = 90.0
@@ -391,6 +454,7 @@ def compute_guidance(
     flying_t: float = float("nan"),
     floor_clearance_m: float = float("nan"),
     yaw_rate_rps: float = 0.0,
+    blue_line: dict | None = None,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -552,6 +616,13 @@ def compute_guidance(
         state["prev_bearing_frame_id"] = None
         bearing_rate = 0.0
 
+    # Rotate INTO the curve. Additive to yaw only: the gate keeps owning the
+    # bank, so this can bias which way we face without ever pulling the aim off
+    # a locked opening. Inert when no gate is in view too (bx is NaN there),
+    # which is exactly the post-pass window the turns were failing in.
+    turn_ff_deg = _turn_yaw_ff(blue_line, bx)
+    yaw_err += turn_ff_deg
+
     is_new_d = (
         vision_valid
         and vis_frame_id is not None
@@ -677,12 +748,19 @@ def compute_guidance(
         desired_roll = float(
             np.clip(-K_BLIND_VY_DEG * vY, -BLIND_BANK_DEG, BLIND_BANK_DEG)
         )
-    roll_cmd_deg = (desired_roll - roll_deg) * KR
+    roll_cmd_deg = float(
+        np.clip((desired_roll - roll_deg) * KR, -ROLL_WIRE_MAX_DEG, ROLL_WIRE_MAX_DEG)
+    )
     yaw_cmd_deg = yaw_err * KY
 
-    tilt = max(
-        0.01,
-        math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
+    # Clamp, don't floor: past 90° of roll the cosine product is negative, and
+    # flooring it at 0.01 turned the tilt compensation into full throttle.
+    tilt = float(
+        np.clip(
+            math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)),
+            TILT_COMP_MIN,
+            1.0,
+        )
     )
     elev_err = float(state.get("last_elev_err", 0.0))
     elev_err_c = float(np.clip(elev_err, -ELEV_ERR_CLAMP_M, ELEV_ERR_CLAMP_M))
@@ -699,6 +777,13 @@ def compute_guidance(
     if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
         hover_floor = (hover_thrust + float(state.get("elev_i", 0.0))) / tilt
         thrust = max(thrust, hover_floor)
+    # Climb-rate cap (mirror of the descent cap): climbing faster than
+    # MAX_CLIMB_RATE_MPS => the command may not sit ABOVE the hover trim, so the
+    # climb decays instead of the saturated elev-P driving it further. Sits
+    # BEFORE the floor net so ground-strike avoidance can still override it.
+    if not math.isnan(vD) and vD < -MAX_CLIMB_RATE_MPS:
+        hover_ceiling = (hover_thrust + float(state.get("elev_i", 0.0))) / tilt
+        thrust = min(thrust, hover_ceiling)
     # Floor safety net: below FLOOR_CLEARANCE_M above the arena floor, blend in
     # climb thrust so an overshoot below a low gate (or an open-loop blind sink)
     # can't touch the ground. Suppressed while a fresh gate still sits below us
@@ -737,8 +822,16 @@ def compute_guidance(
         "v_target": v_target,
         "pitch_des_deg": pitch_des_deg,
         "elev_i": float(state.get("elev_i", 0.0)),
+        "agl": floor_clearance_m,
         "source": (vision or {}).get("source", ""),
         "infer_ms": (vision or {}).get("infer_ms"),
+        # Corridor diagnostics: `source` only shows "blueline" when the corridor
+        # is USED (no gate), never when it is merely SEEN, so detection rate was
+        # unmeasurable from the logs.
+        "turn_ff_deg": turn_ff_deg,
+        "bl_found": bool((blue_line or {}).get("found", False)),
+        "bl_hdg": float((blue_line or {}).get("heading_err", float("nan"))),
+        "bl_conf": float((blue_line or {}).get("conf", float("nan"))),
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -830,6 +923,7 @@ class GPPilot:
         self._post_pass_until = 0  # tick until which the ribbon overrides gates
         self._blind_ticks = 0  # consecutive ticks with no usable gate
         self._course_cue = 0.0  # EMA lateral course direction (neg=left)
+        self._course_hdg = 0.0  # EMA corridor bend, rad (sizes the search arc)
         self._search_active = False  # debug: arcing to reacquire after a pass
         # Collision backoff DISABLED by default (GP_BACKOFF=1 to restore): a hit
         # made the drone reverse ~3 m, losing all progress and flying backward
@@ -889,6 +983,7 @@ class GPPilot:
         self._post_pass_until = 0
         self._blind_ticks = 0
         self._course_cue = 0.0
+        self._course_hdg = 0.0
         self._search_active = False
         self._cmd_slew.reset()
         self.est.reset()
@@ -919,7 +1014,8 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des elev_i source gate".split()
+                "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
+                "source gate".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -942,6 +1038,9 @@ class GPPilot:
             vt = dbg.get("v_target", float("nan"))
             pd = dbg.get("pitch_des_deg", float("nan"))
             ei = dbg.get("elev_i", 0.0) or 0.0
+            ee = dbg.get("elev_err", float("nan"))
+            agl = dbg.get("agl", float("nan"))
+            tff = dbg.get("turn_ff_deg", 0.0)
             src = str(dbg.get("source", "") or "")
             self._log_wr.writerow(
                 [f"{now:.3f}"]
@@ -951,7 +1050,13 @@ class GPPilot:
                 + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
                 + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
                 + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}"]
-                + [f"{ei:.4f}", src, str(self.n_passed)]
+                + [f"{ei:.4f}", f"{ee:.3f}", f"{agl:.3f}", f"{tff:.2f}"]
+                + [
+                    str(int(dbg.get("bl_found", False))),
+                    f"{dbg.get('bl_hdg', float('nan')):.4f}",
+                    f"{dbg.get('bl_conf', float('nan')):.3f}",
+                ]
+                + [src, str(self.n_passed)]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -1149,9 +1254,23 @@ class GPPilot:
         # locked, so the cue is primed the moment lock drops — this does NOT
         # override gate steering, which is what banked wrong on curves before.
         track_last = self._trackline._last if self._trackline is not None else None
-        cue = _course_direction_cue(self.data.get("blue_line"), vision, track_last)
+        bl = self.data.get("blue_line")
+        cue = _course_direction_cue(bl, vision, track_last)
         if cue is not None:
             self._course_cue += SEARCH_CUE_ALPHA * (cue - self._course_cue)
+        # Hold how sharply the corridor last bent, so the blind arc below can be
+        # sized to the real curve. Both rails only — a single rail's slope is
+        # the rail's, not the corridor's. Held (not reset) because SEARCH fires
+        # precisely when the corridor is no longer visible.
+        if (
+            bl is not None
+            and bl.get("found")
+            and bl.get("left_found")
+            and bl.get("right_found")
+        ):
+            self._course_hdg += SEARCH_HDG_ALPHA * (
+                float(bl.get("heading_err", 0.0)) - self._course_hdg
+            )
 
         # Post-pass turn search: blind for a beat after a pass -> ARC toward the
         # course direction so the off-axis next gate sweeps into the camera,
@@ -1175,9 +1294,19 @@ class GPPilot:
                 search_ticks = self._blind_ticks - SEARCH_START_TICKS
                 flip = -1.0 if (search_ticks // SEARCH_SWEEP_TICKS) % 2 == 1 else 1.0
                 side = math.copysign(1.0, self._course_cue) * flip
+                # Size the arc to the corridor's last measured bend instead of
+                # always demanding the full 45°. The fixed demand is what threw
+                # the drone into a wall mid-arc after gate 1.
+                arc = float(
+                    np.clip(
+                        abs(self._course_hdg) / SEARCH_HDG_REF_RAD,
+                        SEARCH_LAT_MIN_FRAC,
+                        1.0,
+                    )
+                )
                 vision = {
                     "body_x_m": SEARCH_LOOKAHEAD_M,
-                    "body_y_m": side * SEARCH_LAT_M,
+                    "body_y_m": side * SEARCH_LAT_M * arc,
                     "body_z_m": 0.0,
                     "frame_id": None,
                     "reliable": True,
@@ -1215,6 +1344,7 @@ class GPPilot:
             flying_t=flying_t,
             floor_clearance_m=floor_clearance,
             yaw_rate_rps=yaw_rate_rps,
+            blue_line=bl,
         )
         # In search, keep the yaw (reorient toward the next gate) but soften the
         # bank so it faces the gate instead of slamming sideways past it.
