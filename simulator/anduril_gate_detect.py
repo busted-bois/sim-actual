@@ -336,10 +336,9 @@ def body_relative_pose(estimate):
 
     t = math.radians(CAM_TILT_DEG)
     ct, st = math.cos(t), math.sin(t)
-    # Camera pitched DOWN by CAM_TILT vs body FRD: optical-axis gate → +body_z.
-    body_x_m = ct * cam_z_m - st * cam_y_m
+    body_x_m = ct * cam_z_m + st * cam_y_m
     body_y_m = cam_x_m
-    body_z_m = st * cam_z_m + ct * cam_y_m
+    body_z_m = -st * cam_z_m + ct * cam_y_m
     estimate.update(
         cam_x_m=cam_x_m,
         cam_y_m=cam_y_m,
@@ -361,12 +360,12 @@ def _normal_body_from_rvec(rvec) -> np.ndarray | None:
         t = math.radians(CAM_TILT_DEG)
         # Map camera → body for the normal (same tilt as position).
         ct, st = math.cos(t), math.sin(t)
-        # cam (x right, y down, z fwd) → body FRD via same down-tilt on (z,y):
+        # cam (x right, y down, z fwd) → body FRD via same 20° tilt on (z,y):
         # body uses cam_x as Y; rotate (cam_z, cam_y) into (bx,bz).
         nx, ny, nz = float(n_cam[0]), float(n_cam[1]), float(n_cam[2])
-        bx = ct * nz - st * ny
+        bx = ct * nz + st * ny
         by = nx
-        bz = st * nz + ct * ny
+        bz = -st * nz + ct * ny
         n = np.array([bx, by, bz], dtype=np.float64)
         # Prefer normal pointing back at drone (dot with +X body > 0 means
         # pointing forward — flip so fly-through is -normal).
