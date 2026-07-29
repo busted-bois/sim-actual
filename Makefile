@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port push-videos push-videos-dry probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -52,6 +52,26 @@ ifeq ($(OS),Windows_NT)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-mavlink-port.ps1
 else
 	bash scripts/free-mavlink-port.sh
+endif
+
+# --- Shared run recordings ----------------------------------------------------
+# Publish runs/videos/*.mp4 to the `videos` branch (Git LFS) so the whole team
+# has one archive to review and finetune against. Works from any branch: the
+# push happens in a throwaway worktree, so your tree is untouched. Re-running is
+# safe -- recordings already on the branch are skipped.
+push-videos:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1
+else
+	bash scripts/push-videos.sh
+endif
+
+# Same, but only prints what would be uploaded.
+push-videos-dry:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1 -DryRun
+else
+	bash scripts/push-videos.sh --dry-run
 endif
 
 # Passive MAVLink probe: per-message rates + IMU conventions. Run in Training
