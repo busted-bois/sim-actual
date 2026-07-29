@@ -28,6 +28,23 @@ skills-lock.json        # Agent skills lockfile
 ```
 
 
+## Run recordings
+
+Every run writes `runs/videos/vision_<YYYYmmdd_HHMMSS>.mp4`, local and gitignored.
+To add yours to the shared archive:
+
+```bash
+make push-videos
+```
+
+That publishes them to the **`videos`** branch through [Git LFS](https://git-lfs.com)
+(install it first) -- one folder holding every member's runs, for review and
+finetuning. Re-running is safe; recordings already on the branch are skipped, and
+your current branch and working tree are never touched. `make push-videos-dry`
+shows what would upload without pushing.
+
+To pull videos back down, see the README on the [`videos`](https://github.com/busted-bois/sim-actual/tree/videos/videos) branch.
+
 ## More Info
 
 See [docs/main-documentation.md](docs/main-documentation.md) for a living overview of what is on **`main`** (updated when features merge).
