@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
+.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display -v
 
 sim:
 	uv run main.py
@@ -60,6 +60,26 @@ ifeq ($(OS),Windows_NT)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-mavlink-port.ps1
 else
 	bash scripts/free-mavlink-port.sh
+endif
+
+# --- Shared run recordings ----------------------------------------------------
+# Publish runs/videos/*.mp4 to the `videos` branch (Git LFS) so the whole team
+# has one archive to review and finetune against. Works from any branch: the
+# push happens in a throwaway worktree, so your tree is untouched. Re-running is
+# safe -- recordings already on the branch are skipped.
+push-videos:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1
+else
+	bash scripts/push-videos.sh
+endif
+
+# Same, but only prints what would be uploaded.
+push-videos-dry:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1 -DryRun
+else
+	bash scripts/push-videos.sh --dry-run
 endif
 
 # Passive MAVLink probe: per-message rates + IMU conventions. Run in Training
