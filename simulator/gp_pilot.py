@@ -130,6 +130,9 @@ E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
 LOOKAHEAD_FADE_NEAR_M = 7.0  # λ→0 by this range (pass current gate first)
 LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
 CENTERED_BY_M = 0.40  # |by_raw| below → keep raw by (no lat lookahead)
+THROAT_BX_M = 4.0  # near-hole elev: stop sink / climb if low
+THROAT_CLIMB_BIAS = 0.03  # extra thrust when gate is above us at throat
+THROAT_CLIMB_KP_SCALE = 2.5  # stronger climb gain when elev_err < 0 near throat
 
 
 class Phase(Enum):
@@ -526,9 +529,17 @@ def compute_guidance(
     # Pad / GO: elev must not drop us off the launch platform.
     if not math.isnan(flying_t) and flying_t < LAUNCH_THRUST_FLOOR_S:
         thrust = max(thrust, float(hover_thrust))
-    # Near gate: don't sink under the ring (live: stuck @1 m → collision backoff).
-    if vision_valid and not math.isnan(bx) and bx < 3.0:
-        thrust = max(thrust, float(hover_thrust) - 0.01)
+    # Near throat: live miss is fly-under (elev still + → soft-descend into ring).
+    # Hold ≥ hover unless clearly high; if gate above us, climb harder.
+    if vision_valid and not math.isnan(bx_raw) and bx_raw < THROAT_BX_M:
+        if elev_err < -0.1:
+            thrust = max(
+                thrust,
+                float(hover_thrust) + THROAT_CLIMB_BIAS,
+                float(hover_thrust) - elev_err * K_P_THRUST * THROAT_CLIMB_KP_SCALE,
+            )
+        elif elev_err < 0.5:
+            thrust = max(thrust, float(hover_thrust))
     # Falling: never keep commanding descend (post-gate ghost sink).
     if vD > ANTI_SINK_VD_MPS:
         thrust = max(thrust, float(hover_thrust) + 0.02)
@@ -545,8 +556,8 @@ def compute_guidance(
                     _json.dumps(
                         {
                             "sessionId": "89f5ba",
-                            "runId": "g1-consistent-v1",
-                            "hypothesisId": "baseline",
+                            "runId": "g1-under-fix-v1",
+                            "hypothesisId": "under-gate",
                             "location": "gp_pilot.py:compute_guidance",
                             "message": "thru_gate",
                             "timestamp": int(_time.time() * 1000),
