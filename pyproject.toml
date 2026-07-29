@@ -25,6 +25,12 @@ dev = [
     "ruff>=0.15.15",
 ]
 
+# ekf2/px4/ is upstream PX4 source vendored in for the ecl/EKF2 build -- their
+# code, their style. Linting it reports 113 findings we would never fix, and any
+# fix we did make would be reverted by the next sync from upstream.
+[tool.ruff]
+extend-exclude = ["ekf2/px4"]
+
 # CUDA wheels for torch: YOLO gate detection needs the GPU (CPU inference is
 # 100-350 ms/frame -- too slow to track gates at racing speed).
 [tool.uv.sources]

@@ -694,7 +694,7 @@ def calibrate(path: str) -> None:
     through the EKF under each candidate (gyro-sign, accel per-axis sign) and rank
     by NED velocity RMSE vs truth. NED velocity is convention-independent, so the
     lowest RMSE IS the physically-correct convention -- no euler-frame ambiguity."""
-    raw = [json.loads(l) for l in open(path) if l.strip()]
+    raw = [json.loads(line) for line in open(path) if line.strip()]
     raw = [r for r in raw if r.get("tv")]
     print(f"[calibrate] {len(raw)} full-rate samples with truth from {path}")
     if len(raw) < 500:
