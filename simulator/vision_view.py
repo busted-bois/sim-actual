@@ -1,7 +1,7 @@
 """Passive live vision viewer — camera + YOLO gate detection, no MAVLink.
 
 Pops up the drone-camera window with the YOLO-pose overlay (boxes + corner
-keypoints, drawn by GatePoseRunner) and records runs/vision.mp4. Reads ONLY the
+keypoints, drawn by GatePoseRunner) and records runs/vision_<stamp>.mp4. Reads ONLY the
 camera stream (UDP 5600) -- no odometry/attitude/heartbeat -- so it works in the
 VQ2 Qualification event block where pose telemetry is blocked (spec
 VADR-TS-003 s9.3). It never arms or commands the drone; it just watches, so it's
