@@ -119,6 +119,56 @@ class GuidanceTests(unittest.TestCase):
         # Positive elev → reduce thrust below hover
         self.assertLess(thrust, HOVER_THRUST)
 
+    def test_throat_holds_hover_when_slightly_high(self):
+        """Near hole with mild +elev: don't soft-descend under the ring."""
+        state = _fresh_hold_state()
+        # Non-anduril: elev_err == bz (no cam-tilt offset).
+        vision = {
+            "frame_id": 5,
+            "body_x_m": 3.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.3,
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            flying_t=10.0,
+        )
+        self.assertGreater(dbg["elev_err"], 0.0)
+        self.assertLess(dbg["elev_err"], 0.5)
+        self.assertGreaterEqual(thrust, HOVER_THRUST - 1e-6)
+
+    def test_throat_climbs_when_low(self):
+        """Near hole with gate above (neg elev): climb above hover."""
+        state = _fresh_hold_state()
+        vision = {
+            "frame_id": 5,
+            "body_x_m": 3.0,
+            "body_y_m": 0.0,
+            "body_z_m": -0.5,
+            "normal_body": None,
+        }
+        _rr, _pr, _yr, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=state,
+            flying_t=10.0,
+        )
+        self.assertLess(dbg["elev_err"], -0.1)
+        self.assertGreater(thrust, HOVER_THRUST + 0.02)
+
     def test_blend_zero_at_gate_plane(self):
         state = _fresh_hold_state()
         vision = {
