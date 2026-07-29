@@ -8,6 +8,9 @@ imshow/waitKey are GUI calls and MUST run on the same thread that created the
 window. Call start()/tick()/close() all from the entry point's main thread
 (fly2.main, main.py) -- never from the VisionRX receiver thread.
 
+Recordings collect in runs/videos/, one timestamped mp4 per run, so they
+accumulate rather than overwriting one another.
+
 Usage:
     display.start()                # create the window
     display.tick(frame, elapsed)   # every loop iter; frame may be None
@@ -15,20 +18,31 @@ Usage:
 """
 
 import os
+import time
 
 import cv2
 
 _WINDOW_NAME = "drone vision"
 _FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
 _FPS = 30.0
-_RECORD_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "runs", "vision.mp4"
-)
+# All recordings collect in one folder of their own. runs/ is shared with the
+# attitude harness, which drops a directory per run, and videos got lost among
+# them. Repo-relative (derived from __file__), so it works from any checkout
+# and any working directory.
+_RECORD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runs", "videos")
+# Stamped per recording so runs accumulate instead of overwriting each other —
+# every launch used to destroy the previous recording, including the rare good
+# runs most worth reviewing. Same %Y%m%d_%H%M%S convention as
+# rl/data/gp_log_*.csv, so a video pairs with its telemetry by filename
+# (stamped at the first frame vs the log's race start, so expect a few seconds
+# of skew — pair by nearest, not exact).
+_RECORD_FMT = "vision_%Y%m%d_%H%M%S.mp4"
 
 # Set False to skip the mp4 (live window only).
 RECORD = True
 
 _video_writer = None
+_record_path = None
 _window_open = False
 
 
@@ -57,7 +71,7 @@ def tick(frame, elapsed):
     """Show one frame and (lazily) record it. `frame` may be None -- we still
     pump waitKey so the window stays responsive while waiting for the first
     sim frame. `elapsed` (s) is drawn so screen-recordings self-timestamp."""
-    global _video_writer
+    global _video_writer, _record_path
     if not _window_open:
         return
 
@@ -75,10 +89,11 @@ def tick(frame, elapsed):
         )
         if RECORD:
             if _video_writer is None:
-                os.makedirs(os.path.dirname(_RECORD_PATH), exist_ok=True)
+                os.makedirs(_RECORD_DIR, exist_ok=True)
                 h, w = frame.shape[:2]
-                _video_writer = cv2.VideoWriter(_RECORD_PATH, _FOURCC, _FPS, (w, h))
-                print(f"[display] recording -> {_RECORD_PATH}", flush=True)
+                _record_path = os.path.join(_RECORD_DIR, time.strftime(_RECORD_FMT))
+                _video_writer = cv2.VideoWriter(_record_path, _FOURCC, _FPS, (w, h))
+                print(f"[display] recording -> {_record_path}", flush=True)
             _video_writer.write(frame)
         cv2.imshow(_WINDOW_NAME, frame)
 
@@ -88,11 +103,12 @@ def tick(frame, elapsed):
 
 def close():
     """Finalize the mp4 and destroy the window."""
-    global _video_writer, _window_open
+    global _video_writer, _record_path, _window_open
     if _video_writer is not None:
         _video_writer.release()
         _video_writer = None
-        print(f"[display] video saved -> {_RECORD_PATH}", flush=True)
+        print(f"[display] video saved -> {_record_path}", flush=True)
+        _record_path = None
     if _window_open:
         cv2.destroyAllWindows()
         _window_open = False
