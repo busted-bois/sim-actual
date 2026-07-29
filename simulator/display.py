@@ -8,8 +8,8 @@ imshow/waitKey are GUI calls and MUST run on the same thread that created the
 window. Call start()/tick()/close() all from the entry point's main thread
 (fly2.main, main.py) -- never from the VisionRX receiver thread.
 
-Each run records to its own runs/vision_<stamp>.mp4, so recordings accumulate
-rather than overwriting one another.
+Recordings collect in runs/videos/, one timestamped mp4 per run, so they
+accumulate rather than overwriting one another.
 
 Usage:
     display.start()                # create the window
@@ -25,7 +25,12 @@ import cv2
 _WINDOW_NAME = "drone vision"
 _FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
 _FPS = 30.0
-_RECORD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runs")
+# All recordings collect in one folder of their own. runs/ itself is shared
+# with the attitude harness, which drops a directory per run — mixing 67 MB
+# videos in among those made the videos hard to find.
+_RECORD_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "runs", "videos"
+)
 # Stamped per recording so runs accumulate instead of overwriting each other —
 # a rare good run used to be destroyed by the next launch. Same %Y%m%d_%H%M%S
 # convention as rl/data/gp_log_*.csv, so a video pairs with its telemetry by
