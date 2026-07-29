@@ -55,11 +55,12 @@ LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·thru / λ·lateral / λ·vert
 # Negated into roll so +by (gate right) adds +bank toward the path/gate.
 K_CROSS = 0.3  # deg per meter CTE
 TILT_EMA_ALPHA = 0.25
-K_P_THRUST = 0.014
+K_P_THRUST = 0.025  # stronger elev (was 0.014; under-gate needs more climb/descent auth)
 K_D_THRUST = 0.0175
 BEARING_RATE_CLAMP_DEG_S = 60.0
 ELEV_RATE_CLAMP_M_S = 5.0
 MIN_BX_FOR_ELEV = 3.0  # elev_rate only; elev_err updates whenever vision valid
+MAX_DESCENT_RATE_MPS = 0.8  # near throat: don't keep accelerating a sink under the ring
 VIS_VEL_EMA_ALPHA = 0.35
 OF_ALPHA = 0.6
 KP, KR, KY = 1.0, -1.0, -1.0
@@ -540,6 +541,10 @@ def compute_guidance(
             )
         elif elev_err < 0.5:
             thrust = max(thrust, float(hover_thrust))
+    # Descent-rate cap: don't keep thrusting below hover while sinking hard
+    # (live under-gate: elev still + while already diving through the ring).
+    if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
+        thrust = max(thrust, float(hover_thrust))
     # Falling: never keep commanding descend (post-gate ghost sink).
     if vD > ANTI_SINK_VD_MPS:
         thrust = max(thrust, float(hover_thrust) + 0.02)

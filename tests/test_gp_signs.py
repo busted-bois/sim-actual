@@ -69,19 +69,13 @@ class _Plant:
         self.truth.update(*self.rates, dt)
         self.t_us += int(dt * 1e6)
         g = self.s_gyro * self.rates
-        # Quasi-static specific force: gravity rotated into the body frame at the
-        # truth attitude (sim reads a_body = R^T @ [0,0,-g], level az ~= -g). The
-        # complementary filter now consumes this, so a flat az=-g would falsely
-        # read "level" and fight the gyro; emit the physically correct tilt.
-        r = spec.quat_to_R(np.asarray(self.truth.quaternion, float))
-        a_body = r.T @ np.array([0.0, 0.0, -9.81])
         return {
             "gx": float(g[0]),
             "gy": float(g[1]),
             "gz": float(g[2]),
-            "ax": float(a_body[0]),
-            "ay": float(a_body[1]),
-            "az": float(a_body[2]),
+            "ax": 0.0,
+            "ay": 0.0,
+            "az": -9.81,
             "time_us": self.t_us,
         }
 
@@ -183,10 +177,7 @@ class AndurilPlantTests(unittest.TestCase):
         est = np.array(hist["est"])
         self.assertLess(np.abs(truth[:, :2]).max(), 40.0)
         # Banked toward the gate (positive roll = right) before releveling.
-        # The complementary filter tightened est->truth to <0.1 deg, so the
-        # roll loop no longer over-banks fighting estimation error (peak ~4.5
-        # deg vs the old ~8+); the bank direction/relevel/yaw intent is intact.
-        self.assertGreater(truth[:, 0].max(), 3.0)
+        self.assertGreater(truth[:, 0].max(), 8.0)
         self.assertLess(abs(truth[-1, 0]), 6.0)
         # Yawed toward the gate: heading moved right, bearing nulled.
         self.assertGreater(truth[-1, 2], 5.0)
