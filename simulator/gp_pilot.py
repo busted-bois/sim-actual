@@ -368,27 +368,6 @@ BLIND_BANK_DEG = 10.0  # cap (was 6): vY is vision-fused now, needs real authori
 # time-to-gate (bx/vX), capped. Nulling by_pred REVERSES sideslip before the edge
 # instead of feeding it. Undisturbed when vY~0 (gates entered centred + slow).
 LAT_LEAD_S_MAX = 0.6  # cap on the sideslip look-ahead time (s)
-# --- Corner clearance ---------------------------------------------------------
-# The pilot aimed at the gate CENTRE and never knew how wide the opening was,
-# so a pass about to catch a post looked identical to a centred one. With the
-# measured half-extents (gate_pnp.inner_opening_half_extents, held through the
-# crossing) the predicted crossing point yields metres-of-room to the nearer
-# post, on whichever axis is worse — top/bottom-bar strikes are as documented
-# in gate_pnp.py as lateral ones. Full cruise at CLEAR_REF_M of room, pure
-# crawl at CLEAR_MIN_M, and the aim over-corrects toward centre as it closes.
-GATE_INNER_HALF_M = 0.75  # nominal: 1.5 m inner opening / 2
-# Full marks at a dead-centre crossing, zero at CLEAR_MIN_M from the post. The
-# scale is the gate's OWN half-extent, not a constant: on a foreshortened gate
-# (half_w well under 0.75) a fixed reference would score even a perfect pass as
-# tight and brake the whole approach.
-CLEAR_MIN_M = 0.25
-CLEAR_BIAS_GAIN = float(os.environ.get("GP_CLEAR_BIAS", "0.6"))  # 0 = slow only
-# Only judge clearance once the crossing is IMMINENT. by_pred leans on t_lead,
-# which is capped at 0.6 s for near-gate drift — at 12 m out (6 s away) it is
-# not a crossing prediction at all, and treating a routine 0.8 m offset as a
-# clip would brake and over-bank the whole approach. Matches PERP_BLEND_DIST,
-# where the guidance already switches into its near-gate regime.
-CLEAR_ENGAGE_BX_M = 6.0
 ELEV_BLIND_DECAY = 0.97  # per 60 Hz tick (~0.55 s tau) on the frozen elev err
 # Vision-derivative frame-gap tolerance: YOLO (primary source) skips camera
 # frames when inference lags; dt scales by the actual gap, so up to 6 frames
@@ -438,18 +417,12 @@ ROLL_WIRE_MAX_DEG = 25.0
 CMD_SLEW_DEG_S = 90.0
 THRUST_SLEW_PER_S = 1.0
 
-# Collision backoff: FLOAT back a short way, then re-acquire. Roughly half the
-# original 3 m / 1.5 m/s / 4 s, which was disabled because that much reverse
-# "lost all progress and flew the drone backward into oblivion" — far enough to
-# unstick from a gate frame, short enough to keep the course line. Safe to run
-# by default now that ROLL_WIRE_MAX_DEG bounds the command a post-hit attitude
-# produces (unclamped, a 107° roll used to ship +107° straight back onto the
-# wire) and TILT_COMP_MIN stops the thrust divisor exploding while inverted.
-BACKOFF_DIST_M = 1.5
-BACKOFF_PITCH_DEG = 2.5  # mild nose-up while reversing
-BACKOFF_MAX_SPEED_MPS = 0.8  # ~2.9 km/h reverse cap
-BACKOFF_MIN_S = 0.4
-BACKOFF_MAX_S = 2.0
+# Collision backoff: reverse a few meters then re-acquire.
+BACKOFF_DIST_M = 3.0
+BACKOFF_PITCH_DEG = 4.0  # mild nose-up while reversing
+BACKOFF_MAX_SPEED_MPS = 1.5  # ~5.4 km/h reverse cap
+BACKOFF_MIN_S = 0.6
+BACKOFF_MAX_S = 4.0
 WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 
 # Post-GO speed safety: IMU vX is often ~0 right after reset, which otherwise
@@ -522,20 +495,6 @@ def compute_guidance(
         state["prev_bearing_frame_id"] = None
         state["last_d_frame_id"] = None
         state["gate_tilt_ema"] = None
-
-    # Opening half-extents. Only measurable while the whole inner quad is in
-    # frame (beyond ~4.5 m — the 20°-up camera crops the bottom corners after
-    # that), so hold the last reading through the crossing where the clearance
-    # actually matters. Never measured => the nominal 1.5 m opening.
-    if vision is not None:
-        hw = vision.get("half_w_m")
-        hh = vision.get("half_h_m")
-        if hw is not None and math.isfinite(float(hw)) and float(hw) > 0.0:
-            state["half_w_hold"] = float(hw)
-        if hh is not None and math.isfinite(float(hh)) and float(hh) > 0.0:
-            state["half_h_hold"] = float(hh)
-    half_w = float(state.get("half_w_hold") or GATE_INNER_HALF_M)
-    half_h = float(state.get("half_h_hold") or GATE_INNER_HALF_M)
 
     elev_rate = 0.0
     elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
@@ -698,32 +657,6 @@ def compute_guidance(
         # existing +d_vert*K_D_THRUST term turns it into arresting thrust.
         d_vert = float(np.clip(vD, -BLIND_VD_CLAMP_MPS, BLIND_VD_CLAMP_MPS))
 
-    # Where we will actually cross the gate plane, and how much room that
-    # leaves. Computed once here because BOTH mitigations need it: the speed
-    # block below scales cruise by clear_ok, and the roll block aims at by_aim.
-    by_pred = by
-    by_aim = by
-    clearance = float("nan")
-    clear_ok = 1.0
-    if vision_valid:
-        vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
-        t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
-        by_pred = by - vY * t_lead
-        by_aim = by_pred
-        if bx <= CLEAR_ENGAGE_BX_M:
-            # Worse of the two axes: a top-bar strike ends the run as surely as
-            # a post strike. Vertical miss is the frozen world-down offset.
-            clearance = min(
-                half_w - abs(by_pred),
-                half_h - abs(float(state.get("last_elev_err", 0.0))),
-            )
-            half_eff = max(min(half_w, half_h), CLEAR_MIN_M + 0.05)
-            clear_ok = float(
-                np.clip((clearance - CLEAR_MIN_M) / (half_eff - CLEAR_MIN_M), 0.0, 1.0)
-            )
-            # Over-correct toward centre as the margin closes; inert at full room.
-            by_aim = by_pred * (1.0 + CLEAR_BIAS_GAIN * (1.0 - clear_ok))
-
     if math.isnan(vX):
         # RL expert / offline harnesses: original fixed lean.
         pitch_des_deg = DESIRED_PITCH_DEG
@@ -750,15 +683,9 @@ def compute_guidance(
                     1.0,
                 )
             )
-            # clear_ok: give the aim loop more time per metre when the
-            # predicted crossing is running close to a post or a bar.
             v_target = (
                 THRU_SPEED_MPS
-                + (CRUISE_SPEED_MPS - THRU_SPEED_MPS)
-                * ease
-                * vert_ok
-                * lat_ok
-                * clear_ok
+                + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok * lat_ok
             )
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
@@ -802,9 +729,13 @@ def compute_guidance(
         # Predictive lateral aim: null where the gate will be at the crossing
         # given current sideslip, not its instantaneous bearing. t_lead grows at
         # close range (bx/vX) so drift is reversed BEFORE the blind zone; capped
-        # because vY, though vision-fused, is not exact. by_aim adds the
-        # clearance over-correction (== by_pred while there is room to spare).
-        bearing_ctrl = float(np.clip(math.degrees(math.atan2(by_aim, bx)), -25.0, 25.0))
+        # because vY, though vision-fused, is not exact.
+        vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
+        t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
+        by_pred = by - vY * t_lead
+        bearing_ctrl = float(
+            np.clip(math.degrees(math.atan2(by_pred, bx)), -25.0, 25.0)
+        )
         p_lat = K_BEARING * bearing_ctrl * blend
         d_lat_term = K_LAT_D * d_lat * blend
         desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
@@ -892,10 +823,6 @@ def compute_guidance(
         "pitch_des_deg": pitch_des_deg,
         "elev_i": float(state.get("elev_i", 0.0)),
         "agl": floor_clearance_m,
-        "half_w": half_w,
-        "half_h": half_h,
-        "clearance": clearance,
-        "clear_ok": clear_ok,
         "source": (vision or {}).get("source", ""),
         "infer_ms": (vision or {}).get("infer_ms"),
         # Corridor diagnostics: `source` only shows "blueline" when the corridor
@@ -925,8 +852,6 @@ def _fresh_hold_state() -> dict:
         "prev_bearing_frame_id": None,
         "prev_gate_pD": None,
         "prev_elev_frame_id": None,
-        "half_w_hold": None,
-        "half_h_hold": None,
         "prev_vx": None,
         "ax_fwd_ema": 0.0,
         "min_dive_s": 0.0,
@@ -1000,15 +925,13 @@ class GPPilot:
         self._course_cue = 0.0  # EMA lateral course direction (neg=left)
         self._course_hdg = 0.0  # EMA corridor bend, rad (sizes the search arc)
         self._search_active = False  # debug: arcing to reacquire after a pass
-        # Collision float ON by default (GP_BACKOFF=0 to disable). Previously
-        # off: at 3 m / 1.5 m/s the reverse lost all progress and flew the drone
-        # backward into oblivion. Now half that distance and speed, and the
-        # roll/tilt clamps keep the post-hit attitude recoverable, so a hit ends
-        # in a short drift and re-acquire rather than ending the run.
-        self._backoff_on = os.environ.get("GP_BACKOFF", "1").strip() not in (
-            "0",
-            "false",
-            "no",
+        # Collision backoff DISABLED by default (GP_BACKOFF=1 to restore): a hit
+        # made the drone reverse ~3 m, losing all progress and flying backward
+        # into oblivion instead of just continuing toward the gate.
+        self._backoff_on = os.environ.get("GP_BACKOFF", "0").strip() in (
+            "1",
+            "true",
+            "yes",
         )
         self._backoff_start = 0.0
         self._backoff_dist = 0.0
@@ -1092,7 +1015,7 @@ class GPPilot:
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
                 "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
-                "half_w half_h clearance clear_ok source gate".split()
+                "source gate".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -1132,12 +1055,6 @@ class GPPilot:
                     str(int(dbg.get("bl_found", False))),
                     f"{dbg.get('bl_hdg', float('nan')):.4f}",
                     f"{dbg.get('bl_conf', float('nan')):.3f}",
-                ]
-                + [
-                    f"{dbg.get('half_w', float('nan')):.3f}",
-                    f"{dbg.get('half_h', float('nan')):.3f}",
-                    f"{dbg.get('clearance', float('nan')):.3f}",
-                    f"{dbg.get('clear_ok', float('nan')):.3f}",
                 ]
                 + [src, str(self.n_passed)]
             )
@@ -1597,12 +1514,7 @@ class GPPilot:
         else:
             pitch_target = BACKOFF_PITCH_DEG
         pitch_cmd = (pitch_target - pitch_deg) * KP
-        # Clamp as compute_guidance does: a collision is exactly when roll_deg
-        # is large, and the error-space command ships as an ABSOLUTE attitude
-        # target — unclamped, a 107° roll demanded +107° and drove the tumble.
-        roll_cmd = float(
-            np.clip((0.0 - roll_deg) * KR, -ROLL_WIRE_MAX_DEG, ROLL_WIRE_MAX_DEG)
-        )
+        roll_cmd = (0.0 - roll_deg) * KR
         yaw_cmd = 0.0
         # Include the learned hover trim: raw 0.264 is ~0.006 below measured
         # hover, so every backoff slowly sank toward the floor-wedge cycle.

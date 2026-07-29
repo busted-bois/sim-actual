@@ -319,49 +319,6 @@ def estimate_gate_pose_from_corners(corners):
     return _finalize_pose(pose, corners.mean(axis=0))
 
 
-def inner_opening_half_extents(keypoints, confs, depth_m):
-    """Half-width / half-height of the OPENING in metres at `depth_m`.
-
-    The pilot aims at the gate centre and, without this, has no idea how much
-    room it actually has — a centred pass and one about to catch a post look
-    identical to it. Measured rather than assumed on purpose: a gate met at an
-    angle presents a FORESHORTENED aperture, which is exactly when a corner
-    gets clipped, and the nominal 1.5 m would overstate the room every time.
-
-    Slots 0-3 are the inner corners; _INNER_EDGE_PAIRS names them as
-    (top, bottom, left, right). Averaging the two opposing edges cancels most
-    of the perspective trapezoid. All four must be visible — inside ~4.5 m the
-    20°-up camera pushes the bottom pair out of frame, and a partial quad would
-    silently read as a narrow gate and brake the drone for no reason.
-
-    -> (half_w_m, half_h_m) | None
-    """
-    kp = np.asarray(keypoints, np.float64)
-    cf = np.asarray(confs, np.float64)
-    if kp.ndim != 2 or kp.shape[0] < 4 or cf.shape[0] < 4:
-        return None
-    if not np.isfinite(depth_m) or depth_m <= 0.0:
-        return None
-    if not bool(_visible_mask(kp, cf)[:4].all()):
-        return None
-    top, bottom, left, right = _INNER_EDGE_PAIRS
-    w_px = 0.5 * (
-        np.linalg.norm(kp[top[0]] - kp[top[1]])
-        + np.linalg.norm(kp[bottom[0]] - kp[bottom[1]])
-    )
-    h_px = 0.5 * (
-        np.linalg.norm(kp[left[0]] - kp[left[1]])
-        + np.linalg.norm(kp[right[0]] - kp[right[1]])
-    )
-    if not (np.isfinite(w_px) and np.isfinite(h_px)) or min(w_px, h_px) < 1.0:
-        return None
-    fx = float(_K[0, 0])
-    return (
-        float(0.5 * w_px * depth_m / fx),
-        float(0.5 * h_px * depth_m / fx),
-    )
-
-
 def _finalize_pose(pose, ctr):
     """PnP depth + centre pixel -> body-frame position, plane normal and
     bearings (shared by the YOLO-keypoint and CV-corner paths)."""
