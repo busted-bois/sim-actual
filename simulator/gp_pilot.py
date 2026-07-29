@@ -55,12 +55,11 @@ LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·thru / λ·lateral / λ·vert
 # Negated into roll so +by (gate right) adds +bank toward the path/gate.
 K_CROSS = 0.3  # deg per meter CTE
 TILT_EMA_ALPHA = 0.25
-K_P_THRUST = 0.025  # stronger elev (was 0.014; under-gate needs more climb/descent auth)
+K_P_THRUST = 0.014
 K_D_THRUST = 0.0175
 BEARING_RATE_CLAMP_DEG_S = 60.0
 ELEV_RATE_CLAMP_M_S = 5.0
 MIN_BX_FOR_ELEV = 3.0  # elev_rate only; elev_err updates whenever vision valid
-MAX_DESCENT_RATE_MPS = 0.8  # near throat: don't keep accelerating a sink under the ring
 VIS_VEL_EMA_ALPHA = 0.35
 OF_ALPHA = 0.6
 KP, KR, KY = 1.0, -1.0, -1.0
@@ -74,9 +73,9 @@ DISARM_PERSIST_S = 1.0  # ignore 1 Hz heartbeat armed-flag blips mid-flight
 # (not gated on vision) so lost-lock cannot open-loop dive to 20–30 km/h.
 MAX_SPEED_MPS = 10.0 / 3.6  # ≈2.78 m/s
 CRUISE_SPEED_MPS = 2.2
-THRU_SPEED_MPS = 1.1  # near-gate crawl (was 1.2; more time to center)
+THRU_SPEED_MPS = 1.2  # near-gate / weak-detection crawl
 BLIND_CRAWL_MPS = 1.0  # no gate in view
-SLOWDOWN_START_M = 6.0  # start slowing earlier than 5 m
+SLOWDOWN_START_M = 5.0
 K_SPEED_P = 2.5  # deg of pitch lean per m/s of speed error
 K_SPEED_D = 0.6  # deg per m/s^2 damping on forward speed
 PITCH_DES_MIN_DEG = -2.5
@@ -128,12 +127,9 @@ MAX_ABS_BZ_M = 10.0
 ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
 E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
 # G1 refine: fade λ near throat; don't sideways-yank a centered hole.
-LOOKAHEAD_FADE_NEAR_M = 7.0  # λ→0 by this range (pass current gate first)
+LOOKAHEAD_FADE_NEAR_M = 5.0  # λ→0 by this range (pass current gate first)
 LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
-CENTERED_BY_M = 0.40  # |by_raw| below → keep raw by (no lat lookahead)
-THROAT_BX_M = 4.0  # near-hole elev: stop sink / climb if low
-THROAT_CLIMB_BIAS = 0.03  # extra thrust when gate is above us at throat
-THROAT_CLIMB_KP_SCALE = 2.5  # stronger climb gain when elev_err < 0 near throat
+CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat lookahead)
 
 
 class Phase(Enum):
@@ -501,11 +497,9 @@ def compute_guidance(
     if vision_valid:
         # CTE on raw vision (hole). Lateral map dhat → e_signed≈bx≈11
         # (pass-gate-v1); reject → bearing-only. Clip leftover map CTE.
-        # Near throat: bearing-only (skip K_CROSS) so CTE cannot fight hole aim.
         # No optical fallback: e_signed=-by would double-count bearing bank.
         dhat_b = path_dhat_body(delta_ned, gate_quat)
-        near_throat = not math.isnan(bx_raw) and bx_raw < LOOKAHEAD_FADE_NEAR_M
-        if dhat_b is not None and not near_throat:
+        if dhat_b is not None:
             ecross, e_signed = cross_track_error(bx_raw, by_raw, bz_raw, dhat_b)
             e_signed = float(np.clip(e_signed, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
             # vcorrection → bank: negate so +by banks toward gate/path.
@@ -530,21 +524,9 @@ def compute_guidance(
     # Pad / GO: elev must not drop us off the launch platform.
     if not math.isnan(flying_t) and flying_t < LAUNCH_THRUST_FLOOR_S:
         thrust = max(thrust, float(hover_thrust))
-    # Near throat: live miss is fly-under (elev still + → soft-descend into ring).
-    # Hold ≥ hover unless clearly high; if gate above us, climb harder.
-    if vision_valid and not math.isnan(bx_raw) and bx_raw < THROAT_BX_M:
-        if elev_err < -0.1:
-            thrust = max(
-                thrust,
-                float(hover_thrust) + THROAT_CLIMB_BIAS,
-                float(hover_thrust) - elev_err * K_P_THRUST * THROAT_CLIMB_KP_SCALE,
-            )
-        elif elev_err < 0.5:
-            thrust = max(thrust, float(hover_thrust))
-    # Descent-rate cap: don't keep thrusting below hover while sinking hard
-    # (live under-gate: elev still + while already diving through the ring).
-    if not math.isnan(vD) and vD > MAX_DESCENT_RATE_MPS:
-        thrust = max(thrust, float(hover_thrust))
+    # Near gate: don't sink under the ring (live: stuck @1 m → collision backoff).
+    if vision_valid and not math.isnan(bx) and bx < 3.0:
+        thrust = max(thrust, float(hover_thrust) - 0.01)
     # Falling: never keep commanding descend (post-gate ghost sink).
     if vD > ANTI_SINK_VD_MPS:
         thrust = max(thrust, float(hover_thrust) + 0.02)
@@ -561,8 +543,8 @@ def compute_guidance(
                     _json.dumps(
                         {
                             "sessionId": "89f5ba",
-                            "runId": "g1-under-fix-v1",
-                            "hypothesisId": "under-gate",
+                            "runId": "g1-v1-restore",
+                            "hypothesisId": "baseline",
                             "location": "gp_pilot.py:compute_guidance",
                             "message": "thru_gate",
                             "timestamp": int(_time.time() * 1000),
