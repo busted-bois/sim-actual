@@ -68,7 +68,7 @@ class RecordingLifecycleTests(unittest.TestCase):
 
     def setUp(self):
         self._tmp = os.path.join(
-            os.path.dirname(__file__), "_display_tmp_%d" % os.getpid()
+            os.path.dirname(__file__), f"_display_tmp_{os.getpid()}"
         )
         self._dir_patch = patch.object(display, "_RECORD_DIR", self._tmp)
         self._dir_patch.start()

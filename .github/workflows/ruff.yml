@@ -10,3 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
+        with:
+          # Match the ruff pinned in pyproject.toml so CI and `make check` agree.
+          # Unpinned, CI floats to the newest release and a ruff that ships new
+          # default rules turns every open PR red for code it never touched.
+          version: 0.15.15
