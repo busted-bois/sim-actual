@@ -21,7 +21,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "lefthook>=2.1.9",
-    "ruff>=0.15.15",
+    "ruff==0.15.15",
 ]
 
 # CUDA wheels for torch: YOLO gate detection needs the GPU (CPU inference is
