@@ -62,6 +62,9 @@ class VisionRX:
         from simulator.blue_line_vision import BlueLineTracker
 
         self._blue_line = BlueLineTracker()
+        from simulator.gate_occlusion import OcclusionTracker
+
+        self._occlusion = OcclusionTracker()
         self.thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.is_running = True
         self.thread.start()
@@ -223,38 +226,35 @@ class VisionRX:
                         self._last_no_gate_log = now
                         print("[vision] no gate in frame", flush=True)
 
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            _, obs_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
-            obs_mask[gray > 80] = 0  # exclude gate orange (~100+) and bright objects
-            # Exclude ground band — dark floor false-triggers obstacle stop.
-            obs_mask[int(h * 0.55) :, :] = 0
-            if detection is not None:
-                cv2.circle(
-                    obs_mask,
-                    (int(detection.centroid_x_px), int(detection.centroid_y_px)),
-                    int(max(detection.width_px, detection.height_px)),
-                    0,
-                    -1,
-                )
-            obs_contours, _ = cv2.findContours(
-                obs_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            obstacles = []
-            obstacle_px = []  # (cx, cy) in pixels, for the live overlay
-            for oc in obs_contours:
-                oa = cv2.contourArea(oc)
-                if oa < 800:
-                    continue
-                om = cv2.moments(oc)
-                om00 = max(om["m00"], 1e-6)
-                ocx = om["m10"] / om00
-                ocy = om["m01"] / om00
-                onx = (ocx - w / 2.0) / (w / 2.0)
-                ony = (ocy - h / 2.0) / (h / 2.0)
-                orf = oa / (w * h)
-                obstacles.append({"nx": onx, "ny": ony, "r_frac": orf})
-                obstacle_px.append((ocx, ocy))
+            # Dark-blob obstacles (pillars/walls) with bbox+area for the occlusion
+            # PEEK cue. Shared extractor so peek_replay sees identical blobs (one
+            # source of truth); nx/ny/r_frac kept -- legacy pilots read them.
+            from simulator.gate_occlusion import obstacles_from_frame
+
+            obstacles = obstacles_from_frame(img, detection)
+            obstacle_px = [
+                (o["nx"] * (w / 2.0) + w / 2.0, o["ny"] * (h / 2.0) + h / 2.0)
+                for o in obstacles
+            ]
             self.data["obstacles"] = obstacles
+
+            # Non-gate occluder PEEK cue: which side of a pillar the gate lies on,
+            # so GPPilot can bias its aim around it (gate-3 fix). Inert when no
+            # occluder overlaps the gate. Gate descriptor from the HSV detection.
+            gate_desc = None
+            if detection is not None:
+                gw2 = float(detection.width_px) / 2.0
+                gh2 = float(detection.height_px) / 2.0
+                gcx = float(detection.centroid_x_px)
+                gcy = float(detection.centroid_y_px)
+                gate_desc = {
+                    "cx": gcx, "cy": gcy,
+                    "x0": gcx - gw2, "x1": gcx + gw2,
+                    "y0": gcy - gh2, "y1": gcy + gh2,
+                }
+            self.data["occlusion"] = self._occlusion.update(
+                gate_desc, obstacles, (h, w), bgr=img, frame_id=frame_id
+            )
 
             # Dual-cyan corridor (per-band rails); always on. GPPilot fuses this
             # into the no-gate ribbon fallback ahead of detect_track.
