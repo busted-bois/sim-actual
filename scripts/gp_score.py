@@ -238,6 +238,10 @@ def tick_metrics(row_sets):
         "thrust_zero_frac": _frac(thrust, lambda v: v <= _SAT_EPS),
         "up_min": min((v for v in up if not math.isnan(v)), default=float("nan")),
         "upset_ticks": sum(1 for v in up if not math.isnan(v) and v < _UPSET_COS),
+        # What the guard DID, as distinct from how often the aircraft was
+        # upset: these two diverge if GP_UPSET_GUARD is off or the threshold
+        # is retuned, and that divergence is the thing to look at.
+        "guard_fired": sum(1 for r in rows if _f(r, "upset", 0.0) >= 0.5),
         "over_descent": _frac(vD, lambda v: v > MAX_DESCENT_RATE_MPS),
         "vD_p95": _pct(vD, 0.95),
         "agl_min": min((v for v in agl if not math.isnan(v)), default=float("nan")),
@@ -265,6 +269,7 @@ _TICK_ROWS = [
     ("thrust at 0.000", "thrust_zero_frac", "{:.1%}", 0),
     ("min up (cos*cos)", "up_min", "{:.3f}", +1),
     ("ticks up < 0.50", "upset_ticks", "{:.0f}", -1),
+    ("upset guard fired", "guard_fired", "{:.0f}", -1),
     ("ticks over descent cap", "over_descent", "{:.1%}", -1),
     ("vD p95 m/s", "vD_p95", "{:.2f}", -1),
     ("min agl m", "agl_min", "{:.2f}", +1),

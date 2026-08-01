@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+import simulator.gp_pilot as gp_pilot
 from simulator.gp_pilot import (
     ELEV_BLIND_DECAY,
     ELEV_I_SEED,
@@ -16,8 +17,10 @@ from simulator.gp_pilot import (
     MAX_CLIMB_RATE_MPS,
     MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
+    PITCH_WIRE_MAX_DEG,
     ROLL_WIRE_MAX_DEG,
     TILT_COMP_MIN,
+    UPSET_COS,
     TRACK_LAT_GAIN,
     TRACK_LOOKAHEAD_M,
     TURN_FF_GAIN,
@@ -2071,6 +2074,90 @@ class ClimbCapAndUpsetGuardTests(unittest.TestCase):
         # 14 deg of bank is a ~3% boost, nowhere near the TILT_COMP_MIN clamp.
         self.assertGreater(banked, level)
         self.assertLess(banked, level * 1.10)
+
+    # --- Upset guard: collective only, and provably inert in nominal flight ---
+
+    def test_guard_inert_at_the_commanded_attitude_envelope(self):
+        # MAX_BANK_DEG / PITCH_DES_MAX_DEG is what guidance can ASK for.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=14.0, pitch_deg=6.0)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            on = self._run(roll_deg=14.0, pitch_deg=6.0)[3]
+        self.assertEqual(off, on)
+
+    def test_guard_inert_even_at_both_wire_clamps_at_once(self):
+        # cos(25)*cos(18) = 0.862, ~4x above UPSET_COS. If this ever fires, the
+        # threshold is wrong -- the guard must never touch an intended tick.
+        self.assertGreater(
+            math.cos(math.radians(ROLL_WIRE_MAX_DEG))
+            * math.cos(math.radians(PITCH_WIRE_MAX_DEG)),
+            UPSET_COS,
+        )
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=ROLL_WIRE_MAX_DEG, pitch_deg=PITCH_WIRE_MAX_DEG)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            on = self._run(roll_deg=ROLL_WIRE_MAX_DEG, pitch_deg=PITCH_WIRE_MAX_DEG)[3]
+        self.assertEqual(off, on)
+
+    def test_guard_overrides_the_descent_floor_when_inverted(self):
+        # The gap test_descent_cap_still_floors_thrust cannot cover: sinking
+        # AND inverted, the descent cap forces (hover+elev_i)/tilt = ~0.377
+        # aimed at the ground. The guard has to win against that floor.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            _r, _p, _y, thrust, dbg = self._run(
+                roll_deg=108.0, pitch_deg=45.0, vD=MAX_DESCENT_RATE_MPS + 2.0
+            )
+        self.assertTrue(dbg["upset"])
+        self.assertEqual(thrust, 0.0)
+
+    def test_guard_is_continuous_at_the_threshold(self):
+        # The multiplier is exactly 1.0 at the boundary, so crossing it is not
+        # a step the slew limiter has to smear. (Not bit-identical: `tilt` also
+        # moves with roll, hence a ~1e-6 drift rather than 0.)
+        roll = math.degrees(math.acos(UPSET_COS))
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            just_under = self._run(roll_deg=roll - 1e-4)[3]
+            just_over = self._run(roll_deg=roll + 1e-4)[3]
+        self.assertLess(abs(just_under - just_over), 1e-4)
+
+    def test_guard_scales_collective_down_mid_range(self):
+        # At 70 deg the guard cuts to 0.684x but does NOT zero: the vertical
+        # component is thrust*cos(70) either way, so a partial cut here is a
+        # sink, not a save. Full cut only arrives at 90 deg, where any
+        # collective at all is pointed sideways or down.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=70.0)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            _r, _p, _y, on, dbg = self._run(roll_deg=70.0)
+        self.assertTrue(dbg["upset"])
+        self.assertGreater(on, 0.0)
+        self.assertLess(on, off)
+        self.assertAlmostEqual(on / off, math.cos(math.radians(70.0)) / UPSET_COS, places=6)
+
+    def test_disabled_guard_matches_previous_behaviour_exactly(self):
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            _r, _p, _y, thrust, dbg = self._run(roll_deg=108.0, pitch_deg=45.0)
+        self.assertFalse(dbg["upset"])
+        # The pre-guard bound: clamped tilt compensation, nothing more.
+        self.assertLessEqual(thrust, (HOVER_THRUST + 0.09) / TILT_COMP_MIN + 1e-6)
+
+    def test_upset_bypasses_the_thrust_slew(self):
+        # At the real ~32 Hz loop rate the limiter needs ~0.7 s to reach zero,
+        # which is several metres of fall. The guard must land in one tick.
+        slew = gp_pilot.CommandSlew(hz=60.0)
+        slew.apply(0.0, 0.0, 0.0, 0.377)
+        _r, _p, _y, limited = slew.apply(0.0, 0.0, 0.0, 0.0)
+        self.assertGreater(limited, 0.3)  # rate-limited, still nearly full
+
+        slew2 = gp_pilot.CommandSlew(hz=60.0)
+        slew2.apply(0.0, 0.0, 0.0, 0.377)
+        _r, _p, _y, immediate = slew2.apply(0.0, 0.0, 0.0, 0.0, thrust_immediate=True)
+        self.assertEqual(immediate, 0.0)
+
+    # NOTE: BACKOFF sends unclamped roll/pitch and uncompensated thrust and is
+    # deliberately NOT covered by this guard -- it is safe only because it is
+    # dead code. test_collision_default_no_backoff_keeps_flying already asserts
+    # the default stays off, which is the tripwire if that ever changes.
 
     def test_roll_command_clamped_when_upset(self):
         roll_cmd, _pr, _yr, _t, _dbg = self._run(roll_deg=107.0)

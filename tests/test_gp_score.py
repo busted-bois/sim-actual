@@ -176,6 +176,14 @@ class TickMetricTests(unittest.TestCase):
         self.assertEqual(m["upset_ticks"], 2)
         self.assertAlmostEqual(m["up_min"], -0.31, places=6)
 
+    def test_guard_firing_is_tracked_separately_from_being_upset(self):
+        # They diverge when the guard is disabled or the threshold is retuned,
+        # and that divergence is the point of having both.
+        rows = [_row(up=-0.31, upset=0), _row(up=-0.31, upset=1)]
+        m = gp_score.tick_metrics([rows])
+        self.assertEqual(m["upset_ticks"], 2)
+        self.assertEqual(m["guard_fired"], 1)
+
     def test_loop_rate_ignores_the_gap_between_attempts(self):
         # Two attempts minutes apart must not contribute a 100 s "dt".
         a1 = [_row(t=1000.0), _row(t=1000.031), _row(t=1000.062)]
