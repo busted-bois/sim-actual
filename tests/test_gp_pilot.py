@@ -2240,7 +2240,7 @@ class FlightLogSchemaTests(unittest.TestCase):
         import io
         import time as _time
 
-        from simulator.gp_pilot import GPPilot
+        from simulator.gp_pilot import LOG_COLUMNS, GPPilot
 
         pilot = GPPilot.__new__(GPPilot)  # no controller/MAVLink needed
         buf = io.StringIO()
@@ -2249,13 +2249,10 @@ class FlightLogSchemaTests(unittest.TestCase):
         pilot._log_last_flush = _time.time()
         pilot.n_passed = 2
 
-        header = (
-            "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
-            "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-            "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
-            "bl_hdg_valid bl_span bl_paired bl_cy src_switch "
-            "source gate peek_side peek_strength peek_active collision".split()
-        )
+        # The header the writer actually emits, not a copy of it. The previous
+        # hardcoded duplicate asserted width only, so any rename or reorder
+        # passed silently -- which is how the schema drifted nine times.
+        header = list(LOG_COLUMNS)
         _r, _p, _y, thrust, dbg = compute_guidance(
             roll_deg=0.0,
             pitch_deg=0.0,
