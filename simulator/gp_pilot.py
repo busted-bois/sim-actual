@@ -470,6 +470,30 @@ MAX_CLIMB_RATE_MPS = float(os.environ.get("GP_MAX_CLIMB", "1.2"))
 # Clamping instead of flooring caps the boost at 1/0.7 = 1.43x. Never binds in
 # normal flight: cos(14°)*cos(18°) = 0.92 at full commanded bank.
 TILT_COMP_MIN = 0.7
+# Upset guard: cut collective when the aircraft is no longer meaningfully
+# upright. TILT_COMP_MIN above bounded the MAGNITUDE of the inverted-thrust bug
+# but not its DIRECTION -- at 1.43x it is still full-ish throttle aimed at the
+# ground. Two more sites push the same way and are worse because they are
+# floors, not boosts: the descent-rate cap forces thrust up to
+# (hover+elev_i)/tilt = 0.264/0.7 = 0.377 during exactly the fall it exists to
+# arrest, and the floor net adds FLOOR_CLIMB_THRUST on top of that.
+#
+# Acts on COLLECTIVE ONLY. The attitude wire is error-space shipped as an
+# absolute quaternion and its large-angle response is already known to be
+# counterintuitive -- at 107° roll the pilot demanded +93° and drove the tumble
+# (see ROLL_WIRE_MAX_DEG). A bounded wire clamp is the only attitude-side
+# remedy that has ever been validated here, so this does not touch attitude:
+# thrust and q are separate fields on the wire, so cutting collective costs no
+# righting authority.
+#
+# 0.5 cannot fire on a tick the guidance intended. Even at BOTH wire clamps at
+# once, cos(25°)*cos(18°) = 0.862 -- roughly 4x margin. That asymmetry is the
+# whole argument: 6a10771 altered every nominal approach and flight-tested
+# worse; this alters zero nominal ticks and only acts where the aircraft is
+# somewhere guidance never asked it to be. Verify with `min up` / `ticks up <
+# 0.50` from scripts/gp_score.py before trusting the threshold.
+UPSET_COS = _env_f("GP_UPSET_COS", 0.5)
+GP_UPSET_GUARD = _env_flag("GP_UPSET_GUARD", True)
 # Floor safety net for the flat arena floor. The drone starts on the pad and
 # the descending course keeps every gate above that floor, so GO-time NED z is
 # a valid ground reference. Below this clearance above it, blend climb thrust
@@ -579,7 +603,7 @@ LOG_COLUMNS = (
     # Measured attitude. `up` is the UNCLIPPED cos(roll)*cos(pitch): the tilt
     # used by the thrust divisor is clamped to [0.7, 1.0], which hides exactly
     # the inversion you want to see in a crash trace.
-    "roll", "pitch", "yaw", "up",
+    "roll", "pitch", "yaw", "up", "upset",
     "cmd_roll_deg", "cmd_pitch_deg", "cmd_yaw_deg", "thrust",
     # Guidance. desired_roll/bearing_deg are the PRE-clamp demand -- with only
     # cmd_roll_deg (post-slew, post-SEARCH_ROLL_SCALE) saturation is
@@ -1026,7 +1050,21 @@ def compute_guidance(
             thrust = max(thrust, climb_t)
     thrust = float(np.clip(thrust, 0.0, 1.0))
 
+    # LAST, after the clip, so it overrides the descent cap and the floor net.
+    # Both are max() floors that push collective UP, and inverted they aim it
+    # at the ground -- the guard has to be able to win against them.
+    #
+    # Scales to zero linearly and is exactly 1.0 at the threshold, so there is
+    # no step for the slew limiter to smear and no discontinuity a test has to
+    # special-case. Past 90° `up` is negative and max(0, .) pins collective at
+    # zero, which is the only non-harmful command when thrust points down.
+    up = math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg))
+    upset = GP_UPSET_GUARD and up < UPSET_COS
+    if upset:
+        thrust *= max(0.0, up) / UPSET_COS
+
     dbg = {
+        "upset": upset,
         "bearing_deg": bearing_body,
         "blend": blend,
         "elev_err": elev_err,
@@ -1106,21 +1144,33 @@ class CommandSlew:
         self._prev: tuple[float, float, float, float] | None = None
 
     def apply(
-        self, roll: float, pitch: float, yaw: float, thrust: float
+        self,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        thrust: float,
+        thrust_immediate: bool = False,
     ) -> tuple[float, float, float, float]:
+        """`thrust_immediate` bypasses the thrust rate limit for this tick.
+
+        Used only by the upset guard. The limiter is sized in per-second terms
+        against GP_CONTROL_HZ, but the loop actually runs ~32 Hz, so the real
+        rate is about half the nominal 1.0/s -- cutting collective from the
+        descent cap's 0.377 to zero would take ~0.7 s, and a drone that is past
+        60° of bank spends that falling. Scoped to a state that provably cannot
+        occur in nominal flight (see UPSET_COS), so it cannot smooth away
+        anything the guidance meant to command."""
         if self._prev is None:
             self._prev = (roll, pitch, yaw, thrust)
             return self._prev
         pr, pp, py, pt = self._prev
         m = self._max_step_deg
+        mt = self._max_step_thrust
         out = (
             pr + float(np.clip(roll - pr, -m, m)),
             pp + float(np.clip(pitch - pp, -m, m)),
             py + float(np.clip(yaw - py, -m, m)),
-            pt
-            + float(
-                np.clip(thrust - pt, -self._max_step_thrust, self._max_step_thrust)
-            ),
+            thrust if thrust_immediate else pt + float(np.clip(thrust - pt, -mt, mt)),
         )
         self._prev = out
         return out
@@ -1338,6 +1388,7 @@ class GPPilot:
                 # UNCLIPPED on purpose -- goes negative past 90 deg, which is
                 # the signature of the inversion the clamped tilt divisor hides.
                 "up": f"{math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)):.4f}",
+                "upset": str(int(bool(dbg.get("upset", False)))),
                 "cmd_roll_deg": f"{cmds[0]:.3f}",
                 "cmd_pitch_deg": f"{cmds[1]:.3f}",
                 "cmd_yaw_deg": f"{cmds[2]:.3f}",
@@ -1691,7 +1742,11 @@ class GPPilot:
         if self._search_active:
             roll_cmd *= SEARCH_ROLL_SCALE
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
-            roll_cmd, pitch_cmd, yaw_cmd, thrust
+            roll_cmd,
+            pitch_cmd,
+            yaw_cmd,
+            thrust,
+            thrust_immediate=bool(dbg.get("upset", False)),
         )
         # Degree commands on the attitude-quaternion wire (original encoding).
         self.controller.set_attitude_quat_deg(roll_cmd, pitch_cmd, yaw_cmd, thrust)

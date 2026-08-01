@@ -140,6 +140,22 @@ class GateStallWatchdog:
         # Drops the pilot to WAIT_FOR_DATA holding neutral, so it is not banking
         # into the teleport; also zeroes n_passed and closes the attempt log.
         self.pilot.reset_for_attempt()
+        # The shared StateEstimator is deliberately NOT reset here.
+        #
+        # Re-running its init would hold `ready` False for its whole ground
+        # buffer (~1 s at the IMU rate), and MAVLinkRX._publish_estimated_state
+        # early-returns while not ready -- so vel_ned and attitude would go
+        # missing for the first second after the teleport. Under the VQ2 block
+        # those are the ONLY source for the speed PD and the error-space
+        # attitude wire, so the pilot would re-launch blind to its own motion,
+        # which is worse than the drift a reset would clear.
+        #
+        # What the reset would fix is position and gyro-integrated attitude.
+        # Neither reaches this pilot: GPPilot flies GPEstimation's own AHRS
+        # (re-seeded in its _reset_state), and no consumer on the auto_gp path
+        # reads the ESKF's position. Baro would have re-anchored z on its own
+        # anyway if it existed -- it does not; `make probe` on 2026-08-01 still
+        # reports pressure_alt=nan, as state_estimator recorded on 2026-07-01.
         self.controller.send_sim_reset_command()
         self._reset_at = now
         self._second_sent = False
