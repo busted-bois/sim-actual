@@ -2254,7 +2254,7 @@ class FlightLogSchemaTests(unittest.TestCase):
             "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
             "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
             "bl_hdg_valid bl_span bl_paired bl_cy src_switch "
-            "source gate".split()
+            "source gate peek_side peek_strength peek_active collision".split()
         )
         _r, _p, _y, thrust, dbg = compute_guidance(
             roll_deg=0.0,
@@ -2296,6 +2296,54 @@ class FlightLogSchemaTests(unittest.TestCase):
         self.assertEqual(row[header.index("bl_paired")], "3")
         self.assertAlmostEqual(float(row[header.index("bl_cy")]), 0.31, places=3)
 
+
+
+class PeekOcclusionTests(unittest.TestCase):
+    """Occlusion PEEK bias in compute_guidance (gate-3 pillar dodge)."""
+
+    def _guide(self, occ, state, bx=8.0):
+        vision = {
+            "frame_id": 1, "body_x_m": bx, "body_y_m": 0.0, "body_z_m": 0.0,
+            "reliable": True, "source": "yolo", "normal_body": None, "method": "x",
+        }
+        return compute_guidance(
+            roll_deg=0.0, pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=0.0, vD=0.0, vision=vision, vision_vel=None, state=state,
+            vX=2.0, dt=1.0 / 60.0, occlusion=occ,
+        )
+
+    def test_none_is_inert(self):
+        # occlusion=None must not perturb anything -> gates 1-2 unchanged.
+        _, _, _, _, dbg = self._guide(None, _fresh_hold_state())
+        self.assertFalse(dbg["peek_active"])
+        self.assertEqual(dbg["peek_side"], 0)
+        self.assertEqual(dbg["peek_strength"], 0.0)
+
+    def test_occlusion_shifts_desired_roll(self):
+        _, _, _, _, base = self._guide(None, _fresh_hold_state())
+        st = _fresh_hold_state()
+        out = None
+        for _ in range(30):  # ramp the bias in
+            _, _, _, _, out = self._guide({"side": 1, "strength": 1.0}, st)
+        self.assertTrue(out["peek_active"])
+        self.assertEqual(out["peek_side"], 1)
+        self.assertGreater(out["desired_roll"], base["desired_roll"] + 0.05)
+        # opposite side biases the other way
+        st2 = _fresh_hold_state()
+        out2 = None
+        for _ in range(30):
+            _, _, _, _, out2 = self._guide({"side": -1, "strength": 1.0}, st2)
+        self.assertLess(out2["desired_roll"], base["desired_roll"] - 0.05)
+
+    def test_disengaged_below_min_bx(self):
+        st = _fresh_hold_state()
+        out = None
+        for _ in range(30):
+            _, _, _, _, out = self._guide({"side": 1, "strength": 1.0}, st, bx=4.0)
+        self.assertFalse(out["peek_active"])
+        _, _, _, _, base = self._guide(None, _fresh_hold_state(), bx=4.0)
+        self.assertAlmostEqual(out["desired_roll"], base["desired_roll"], places=5)
 
 
 if __name__ == "__main__":

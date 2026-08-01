@@ -87,6 +87,25 @@ def stats():
     }
 
 
+def _annotate_occlusion(img, occ):
+    """Draw the occlusion PEEK cue (gate-3 pillar dodge) on its OWN HUD row so it
+    doesn't collide with the t= row (tick) or the blue-line overlay. Inert when
+    there is no cue."""
+    if img is None or not occ:
+        return img
+    side = int(occ.get("side", 0))
+    strength = float(occ.get("strength", 0.0))
+    lr = "R" if side > 0 else "L" if side < 0 else "-"
+    txt = f"PEEK {lr} s={strength:.2f} {occ.get('gate_lr', '')} [{occ.get('reason', '')}]"
+    color = (0, 200, 255)  # amber
+    cv2.putText(img, txt, (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+    if side != 0:
+        h, w = img.shape[:2]
+        cx = w // 2
+        cv2.arrowedLine(img, (cx, 72), (cx + side * 60, 72), color, 3, tipLength=0.4)
+    return img
+
+
 def pick(data):
     """Choose what to show from the shared data dict, returning (img, tag).
     Prefers the YOLO-pose annotated frame (data["pose"]), then the classical
@@ -99,10 +118,12 @@ def pick(data):
     frame = data.get("frame")
     bl = data.get("blue_line")
     bl_fid = bl.get("frame_id") if bl is not None else None
+    occ = data.get("occlusion")
+    occ_fid = occ.get("frame_id") if occ else None
 
     if pose is not None and pose.get("annotated") is not None:
         img = pose["annotated"]
-        tag = ("p", pose["frame_id"], bl_fid)
+        tag = ("p", pose["frame_id"], bl_fid, occ_fid)
         if img is not None and bl is not None:
             from simulator.blue_line_vision import (
                 annotate_blue_lines,
@@ -110,9 +131,10 @@ def pick(data):
             )
 
             img = annotate_blue_lines(img, estimate_from_dict(bl), None)
-        return img, tag
+        return _annotate_occlusion(img, occ), tag
     if frame is not None:
-        return frame.get("annotated", frame.get("img")), ("f", frame["frame_id"], bl_fid)
+        img = frame.get("annotated", frame.get("img"))
+        return _annotate_occlusion(img, occ), ("f", frame["frame_id"], bl_fid, occ_fid)
     return None, None
 
 

@@ -159,6 +159,17 @@ TURN_FF_MIN_CONF = 0.5
 # where the corridor was seen.
 GP_TURN_FF_VG = _env_flag("GP_TURN_FF_VG", True)
 
+# --- Occlusion PEEK: dodge a non-gate pillar occluding the gate (gate-3 fix,
+# fed by simulator/gate_occlusion.py -> data["occlusion"]). AIM-POINT bias only:
+# MAX_BANK_DEG / BEARING_RATE_CLAMP_DEG_S / CommandSlew still bound the result.
+# Must disengage BEFORE the crossing (never hold a stale bias -- the c0d51f9
+# revert), so PEEK_MIN_BX_M is both the engage and the disengage floor.
+PEEK_LAT_M = 0.8              # lateral aim bias (m); well under SEARCH_LAT_M(4.0)
+PEEK_MIN_BX_M = 6.0           # engage while blend~1; also the disengage floor
+PEEK_MIN_STRENGTH = 0.2       # deadband on occluder strength
+PEEK_RAMP_S = 0.3            # ease the bias in/out over ~0.3 s so p_lat never steps
+GP_PEEK = os.environ.get("GP_PEEK", "1").strip() not in ("0", "false", "no")
+
 
 def _turn_yaw_ff(blue_line, bx: float, virtual: bool = False) -> float:
     """Bounded yaw feed-forward from the corridor's measured bend (deg).
@@ -570,6 +581,7 @@ def compute_guidance(
     floor_clearance_m: float = float("nan"),
     yaw_rate_rps: float = 0.0,
     blue_line: dict | None = None,
+    occlusion: dict | None = None,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -867,6 +879,30 @@ def compute_guidance(
             PITCH_WIRE_MAX_DEG,
         )
     )
+    # Occlusion PEEK: bias the predictive aim toward the side the gate lies on so
+    # we step AROUND a pillar. Engage only far out (blend still ~1, bx>=floor) and
+    # only while an occluder is confirmed; ramp in/out so p_lat never steps; the
+    # aim bias stays bounded by MAX_BANK/slew downstream. Below PEEK_MIN_BX_M the
+    # bias ramps to zero -- never held at the crossing (the c0d51f9 failure).
+    peek_active = (
+        GP_PEEK
+        and occlusion is not None
+        and int(occlusion.get("side", 0)) != 0
+        and float(occlusion.get("strength", 0.0)) >= PEEK_MIN_STRENGTH
+        and math.isfinite(bx)
+        and bx >= PEEK_MIN_BX_M
+    )
+    if peek_active:
+        state["peek_side"] = float(occlusion["side"])
+        state["peek_str"] = float(occlusion["strength"])
+    ramp = float(state.get("peek_ramp", 0.0))
+    step = dt / max(PEEK_RAMP_S, 1e-3)
+    ramp = min(1.0, ramp + step) if peek_active else max(0.0, ramp - step)
+    state["peek_ramp"] = ramp
+    peek_bias = (
+        PEEK_LAT_M * float(state.get("peek_side", 0.0)) * float(state.get("peek_str", 0.0)) * ramp
+    )
+
     if vision_valid:
         # Predictive lateral aim: null where the gate will be at the crossing
         # given current sideslip, not its instantaneous bearing. t_lead grows at
@@ -874,7 +910,7 @@ def compute_guidance(
         # because vY, though vision-fused, is not exact.
         vx_eff = vX if not math.isnan(vX) and vX > 0.5 else 2.0
         t_lead = min(bx / vx_eff, LAT_LEAD_S_MAX)
-        by_pred = by - vY * t_lead
+        by_pred = by - vY * t_lead + peek_bias
         bearing_ctrl = float(
             np.clip(math.degrees(math.atan2(by_pred, bx)), -25.0, 25.0)
         )
@@ -981,6 +1017,10 @@ def compute_guidance(
         # Logged next to agl so the altitude cue can be calibrated offline
         # before GP_BL_ALT_CUE is ever switched on. See its constant block.
         "bl_cy": float((blue_line or {}).get("cy_norm", float("nan"))),
+        # Occlusion PEEK diagnostics (gate-3 pillar dodge).
+        "peek_side": int(state.get("peek_side", 0)) if ramp > 0.0 else 0,
+        "peek_strength": float(state.get("peek_str", 0.0)) * ramp,
+        "peek_active": bool(peek_active),
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -1177,7 +1217,7 @@ class GPPilot:
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
                 "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
                 "bl_hdg_valid bl_span bl_paired bl_cy src_switch "
-                "source gate".split()
+                "source gate peek_side peek_strength peek_active collision".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
             run_meta.note_attempt_start(self._attempt, path)
@@ -1206,6 +1246,13 @@ class GPPilot:
             agl = dbg.get("agl", float("nan"))
             tff = dbg.get("turn_ff_deg", 0.0)
             src = str(dbg.get("source", "") or "")
+            # Occlusion PEEK + collision (proximity/threat stream: also fires
+            # ~3 m from gate frames and continuously on the pad -- not a clean hit).
+            _d = getattr(self, "data", None)
+            col = _d.get("collision") if isinstance(_d, dict) else None
+            col_threat = int(col[1]) if isinstance(col, (list, tuple)) and len(col) > 1 else (
+                int(col.get("threat_level", 0)) if isinstance(col, dict) else 0
+            )
             self._log_wr.writerow(
                 [f"{now:.3f}"]
                 + [f"{v:.3f}" for v in att]
@@ -1226,6 +1273,12 @@ class GPPilot:
                     str(int(dbg.get("src_switch", False))),
                 ]
                 + [src, str(self.n_passed)]
+                + [
+                    str(int(dbg.get("peek_side", 0))),
+                    f"{dbg.get('peek_strength', 0.0):.3f}",
+                    str(int(bool(dbg.get("peek_active", False)))),
+                    str(col_threat),
+                ]
             )
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
@@ -1468,7 +1521,17 @@ class GPPilot:
                 # instead of spinning away forever.
                 search_ticks = self._blind_ticks - SEARCH_START_TICKS
                 flip = -1.0 if (search_ticks // SEARCH_SWEEP_TICKS) % 2 == 1 else 1.0
-                side = math.copysign(1.0, self._course_cue) * flip
+                # Start the sweep toward where an occluder says the gate is (peek
+                # side = away from the pillar), else toward the course cue. The
+                # flip still reverses a wrong start, so this only sets the STARTING
+                # direction -- never disables the sweep.
+                occ = self.data.get("occlusion")
+                base_side = (
+                    float(occ["side"])
+                    if GP_PEEK and occ and int(occ.get("side", 0)) != 0
+                    else math.copysign(1.0, self._course_cue)
+                )
+                side = base_side * flip
                 # Size the arc to the corridor's last measured bend instead of
                 # always demanding the full 45°. The fixed demand is what threw
                 # the drone into a wall mid-arc after gate 1.
@@ -1520,6 +1583,7 @@ class GPPilot:
             floor_clearance_m=floor_clearance,
             yaw_rate_rps=yaw_rate_rps,
             blue_line=bl,
+            occlusion=self.data.get("occlusion"),
         )
         # In search, keep the yaw (reorient toward the next gate) but soften the
         # bank so it faces the gate instead of slamming sideways past it.
