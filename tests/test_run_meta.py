@@ -29,6 +29,9 @@ class _Sidecar:
             patch.object(run_meta, "_DIR", self._tmp),
             patch.object(run_meta, "_PATH", self.path),
             patch.object(run_meta, "_finalized", False),
+            # Identity is captured once per process; reset it per test so each
+            # gets a clean slate the way a fresh flight process would.
+            patch.object(run_meta, "_identified", False),
             patch.dict(
                 run_meta._state,
                 {"attempts": [], "video": None, "ended_utc": None},
@@ -181,6 +184,29 @@ class ConfigCaptureTests(unittest.TestCase):
             # sha identified nothing. These are what make it identifiable.
             for key in ("sha", "branch", "dirty", "diff_sha", "untracked", "submodule"):
                 self.assertIn(key, git)
+
+    def test_identity_survives_a_kill_that_never_reaches_finalize(self):
+        # Run 20260801_134651 was hard-killed and its sidecar has git, config,
+        # entry, pilot and target ALL null -- 18 attempts of telemetry that
+        # cannot be attributed to a commit or a config, so unusable as a
+        # baseline. Identity is immutable and known at import; capture it on
+        # the first write, not at finalize.
+        with _Sidecar(self) as sc:
+            run_meta.note_attempt_start(1, "x.csv")  # no finalize()
+            got = sc.read()
+            self.assertIsNotNone(got["config"])
+            self.assertIsNotNone(got["git"])
+            self.assertIsNotNone(got["entry"])
+            self.assertIsNone(got["ended_utc"])  # finalize alone stamps this
+
+    def test_identity_is_captured_once_not_per_write(self):
+        with _Sidecar(self) as sc:
+            with patch.object(run_meta, "_git", return_value={"sha": "x"}) as g:
+                run_meta.note_attempt_start(1, "x.csv")
+                run_meta.note_attempt_end(gates=1)
+                run_meta.note_log_columns(["t"])
+            self.assertEqual(g.call_count, 1)  # not once per _write()
+            self.assertEqual(sc.read()["git"], {"sha": "x"})
 
     def test_a_broken_git_does_not_discard_the_rest(self):
         # _git() shells out; @_guard wraps all of finalize, so an exception

@@ -48,6 +48,7 @@ _state = {
     "attempts": [],
 }
 _finalized = False
+_identified = False
 
 # Every tuning knob on this branch is an env var (docs/blueline-method.md
 # "Switches"), and none of them were recorded -- so two runs at the same sha
@@ -158,8 +159,32 @@ def _totals():
     }
 
 
+def _identify():
+    """Capture WHAT FLEW on the first write, not at finalize.
+
+    All of this is known at import and cannot change during a run, but it used
+    to be written only by finalize() -- which runs from display.close() or
+    atexit, and neither survives a hard kill. Run 20260801_134651 was killed
+    mid-attempt and its sidecar has git/config/entry/pilot/target ALL null, so
+    18 attempts of telemetry cannot be attributed to a commit or a config and
+    are unusable as an A/B baseline. Written once, then never touched again.
+    """
+    global _identified
+    if _identified:
+        return
+    _identified = True
+    entry, pilot, target = _describe_process()
+    _state["entry"], _state["pilot"], _state["target"] = entry, pilot, target
+    _state["config"] = _config()
+    try:
+        _state["git"] = _git()
+    except Exception:  # noqa: BLE001 - see module docstring
+        _state["git"] = None
+
+
 def _write():
     os.makedirs(_DIR, exist_ok=True)
+    _identify()
     _state["totals"] = _totals()
     tmp = _PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -266,8 +291,11 @@ def note_video(stats):
 
 @_guard
 def finalize():
-    """Stamp the end and record which commit flew. Idempotent -- called from
-    display.close() and again via atexit."""
+    """Stamp the end. Idempotent -- called from display.close() and atexit.
+
+    Identity (git/config/entry/pilot/target) is NOT recorded here: _write()
+    captures it on the first write via _identify(), so it survives a kill that
+    never reaches this function. All this adds is the ending."""
     global _finalized
     if _finalized:
         return
@@ -277,16 +305,6 @@ def finalize():
         return
     _finalized = True
     _state["ended_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    entry, pilot, target = _describe_process()
-    _state["entry"], _state["pilot"], _state["target"] = entry, pilot, target
-    # Config first: it cannot fail, while _git() shells out. Guarded
-    # separately because @_guard wraps this whole function -- a git that is
-    # missing, slow, or unreachable used to discard every other field with it.
-    _state["config"] = _config()
-    try:
-        _state["git"] = _git()
-    except Exception:  # noqa: BLE001 - see module docstring
-        _state["git"] = None
     _write()
 
 
