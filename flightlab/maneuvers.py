@@ -1,134 +1,102 @@
-"""Maneuver primitives: hold, step, ramp, timed vz schedules."""
+"""Test maneuver helpers and phase targets."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
-from flightlab.protocol import Target
+from flightlab.state import Target
+
+HOVER_Z_NED = -3.0
 
 
 @dataclass
-class Segment:
-    """One timed segment of a maneuver schedule."""
-
-    duration: float
-    z: float | None = None
-    vz: float | None = None
-    lean_roll: float = 0.0
-    lean_pitch: float = 0.0
-    label: str = ""
-
-
-class Schedule:
-    """Piecewise-constant setpoint schedule over time since start."""
-
-    def __init__(self, segments: list[Segment]) -> None:
-        self.segments = segments
-        self._bounds: list[tuple[float, float, Segment]] = []
-        t = 0.0
-        for seg in segments:
-            self._bounds.append((t, t + seg.duration, seg))
-            t += seg.duration
-        self.total = t
-
-    def target_at(self, elapsed: float) -> Target | None:
-        if elapsed < 0 or elapsed >= self.total:
-            return None
-        for t0, t1, seg in self._bounds:
-            if t0 <= elapsed < t1:
-                return Target(
-                    z=seg.z,
-                    vz=seg.vz,
-                    lean_roll=seg.lean_roll,
-                    lean_pitch=seg.lean_pitch,
-                )
-        return None
-
-    def label_at(self, elapsed: float) -> str:
-        for t0, t1, seg in self._bounds:
-            if t0 <= elapsed < t1:
-                return seg.label
-        return ""
-
-    def done(self, elapsed: float) -> bool:
-        return elapsed >= self.total
+class Phase:
+    name: str
+    duration_s: float
+    target: Target
+    open_loop_rates: tuple[float, float, float] | None = None
+    open_loop_thrust: float | None = None
+    # Damp body rates toward zero using the signs measured so far
+    # (ctx.sign_accum); axes without a measured sign get zero command.
+    rate_null: bool = False
 
 
-def hold(z: float, duration: float, label: str = "hold") -> Schedule:
-    return Schedule([Segment(duration=duration, z=z, vz=0.0, label=label)])
+def hover_target(
+    z: float = HOVER_Z_NED, roll: float = 0.0, pitch: float = 0.0
+) -> Target:
+    return Target(roll=roll, pitch=pitch, yaw=0.0, z=z)
 
 
-def step_then_hold(
-    z0: float,
-    z1: float,
-    hold0: float,
-    hold1: float,
-    label0: str = "pre",
-    label1: str = "step",
-) -> Schedule:
-    return Schedule(
-        [
-            Segment(duration=hold0, z=z0, vz=0.0, label=label0),
-            Segment(duration=hold1, z=z1, vz=0.0, label=label1),
-        ]
-    )
-
-
-def altitude_steps(z_base: float, delta: float = 5.0, hold_s: float = 5.0) -> Schedule:
-    """+delta hold, then −delta (back to base), each hold_s. NED: climb = −z."""
-    z_up = z_base - delta  # climb
-    return Schedule(
-        [
-            Segment(duration=hold_s, z=z_up, vz=0.0, label="climb_step"),
-            Segment(duration=hold_s, z=z_base, vz=0.0, label="descend_step"),
-        ]
-    )
-
-
-def vz_rate_schedule(
-    rates: list[float],
-    each_s: float = 3.0,
-    z_hold: float | None = None,
-) -> Schedule:
-    """Timed vz setpoints. If z_hold set, also pin altitude softly via z target None."""
-    segs = [
-        Segment(duration=each_s, z=z_hold, vz=vz, label=f"vz={vz:+.1f}") for vz in rates
+def sign_doublet_phases(
+    axis: str,
+    z: float = HOVER_Z_NED,
+    pulse: float = 0.2,
+    dur: float = 0.3,
+    gap: float = 0.4,
+) -> list[Phase]:
+    """B0: open-loop ± rate doublet on one axis (net rate ~ 0, so tilt does
+    not accumulate across axes the way single pulses did)."""
+    i = ("roll", "pitch", "yaw").index(axis)
+    pos = tuple(pulse if j == i else 0.0 for j in range(3))
+    neg = tuple(-pulse if j == i else 0.0 for j in range(3))
+    zero = (0.0, 0.0, 0.0)
+    tgt = hover_target(z)
+    return [
+        Phase(f"sign_{axis}_base0", gap, tgt, open_loop_rates=zero),
+        Phase(f"sign_{axis}_pulse_pos", dur, tgt, open_loop_rates=pos),
+        Phase(f"sign_{axis}_mid", gap, tgt, open_loop_rates=zero),
+        Phase(f"sign_{axis}_pulse_neg", dur, tgt, open_loop_rates=neg),
+        Phase(f"sign_{axis}_base1", gap, tgt, open_loop_rates=zero),
     ]
-    return Schedule(segs)
 
 
-def soft_land(z_start: float, vz_descend: float = 1.5) -> Schedule:
-    """Descend at +vz (NED down) from z_start. Duration long; suite ends on settle."""
-    # Generous upper bound; runner aborts on ground settle.
-    return Schedule(
-        [
-            Segment(
-                duration=60.0,
-                z=None,
-                vz=vz_descend,
-                label="soft_land",
-            )
-        ]
-    )
+def rate_null_phase(z: float = HOVER_Z_NED, duration_s: float = 0.5) -> Phase:
+    """Damp residual body rates between B0 axes (uses measured signs only)."""
+    return Phase("rate_null", duration_s, hover_target(z), rate_null=True)
 
 
-def lean_hold(
-    z: float,
-    lean_rad: float,
-    duration: float,
-    axis: str = "roll",
-) -> Schedule:
-    lean_roll = lean_rad if axis == "roll" else 0.0
-    lean_pitch = lean_rad if axis == "pitch" else 0.0
-    return Schedule(
-        [
-            Segment(
-                duration=duration,
-                z=z,
-                vz=0.0,
-                lean_roll=lean_roll,
-                lean_pitch=lean_pitch,
-                label=f"lean_{axis}",
-            )
-        ]
-    )
+def rate_tracking_phase(z: float = HOVER_Z_NED) -> list[Phase]:
+    return [
+        Phase("hover_settle", 1.0, hover_target(z)),
+        Phase(
+            "rate_roll_cmd",
+            1.0,
+            hover_target(z),
+            open_loop_rates=(0.3, 0.0, 0.0),
+        ),
+        Phase("rate_recover", 1.0, hover_target(z)),
+    ]
+
+
+def angle_step_phases(
+    axis: str, step_deg: float = 8.0, z: float = HOVER_Z_NED
+) -> list[Phase]:
+    step = math.radians(step_deg)
+    tgt = hover_target(z)
+    if axis == "roll":
+        tgt = Target(roll=step, pitch=0.0, yaw=0.0, z=z)
+    elif axis == "pitch":
+        tgt = Target(roll=0.0, pitch=step, yaw=0.0, z=z)
+    return [
+        Phase("hover_settle", 1.5, hover_target(z)),
+        Phase(f"step_{axis}", 3.0, tgt),
+        Phase("hold", 2.0, tgt),
+    ]
+
+
+def hover_jitter_phase(duration_s: float = 20.0, z: float = HOVER_Z_NED) -> list[Phase]:
+    return [Phase("hover_jitter", duration_s, hover_target(z))]
+
+
+def disturbance_phase(z: float = HOVER_Z_NED) -> list[Phase]:
+    return [
+        Phase("hover_settle", 1.5, hover_target(z)),
+        Phase(
+            "disturb_roll",
+            0.3,
+            hover_target(z),
+            open_loop_rates=(0.8, 0.0, 0.0),
+        ),
+        Phase("recover", 3.0, hover_target(z)),
+    ]

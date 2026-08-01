@@ -56,11 +56,15 @@ class VisionRX:
         self._no_gate_frames = 0
         self._last_no_gate_log = 0.0
         self._gate_was_detected = False
+        from simulator.anduril_gate_detect import AndurilGateTracker
+
+        self._anduril = AndurilGateTracker()
         self.thread = threading.Thread(target=self._vision_loop, daemon=True)
         self.is_running = True
         self.thread.start()
         # YOLO-pose gate detector, on its own thread (CPU inference is too slow
         # to run inline here). Reads data["frame"], writes data["pose"].
+        # Kept for make view / IBVS; GPPilot prefers Anduril HSV via anduril_gate.
         from simulator.gate_pose import GatePoseRunner
 
         self.gate_pose = GatePoseRunner(data)
@@ -154,6 +158,16 @@ class VisionRX:
                 "sim_time_ns": sim_time_ns,
                 "received_at": _time.monotonic(),
             }
+
+            # Anduril HSV-red detection for GPPilot (make control-flight).
+            try:
+                self.data["anduril_gate"] = self._anduril.process(frame_id, img)
+            except Exception as e:
+                from simulator import config
+
+                if config.DEBUG:
+                    print(f"[vision_rx] anduril detect error: {e}")
+                self.data["anduril_gate"] = None
 
             if detection is not None:
                 nx = (detection.centroid_x_px - w / 2.0) / (w / 2.0)
@@ -257,7 +271,9 @@ class VisionRX:
     ) -> None:
         from simulator.auto_flight import auto_flight_enabled
 
-        if auto_flight_enabled():
+        # Quiet modes: overnight auto, or tools that set data["_quiet_vision"]
+        # (fly-policy / fly2) so Race/arm prompts stay readable.
+        if auto_flight_enabled() or self.data.get("_quiet_vision"):
             if detected and not self._gate_was_detected:
                 print("[vision] GATE acquired", flush=True)
             elif not detected and self._gate_was_detected:

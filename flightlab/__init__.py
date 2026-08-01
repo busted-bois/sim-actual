@@ -1,3 +1,1 @@
-"""Automated vertical-axis flight harness for the AI Grand Prix sim."""
-
-__version__ = "0.1.0"
+"""Automated attitude-loop test harness for the AI Grand Prix drone sim."""
