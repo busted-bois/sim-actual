@@ -379,49 +379,33 @@ class GuidanceTests(unittest.TestCase):
             )
         return out
 
-    def test_stale_frame_damping_is_off_by_default(self):
-        # GP_DVERT_HOLD flight-tested WORSE (gate >=3: 9/17 -> 1/7) and is
-        # default OFF. Locked in here so it cannot drift back on unnoticed.
-        self.assertFalse(gp_pilot.GP_DVERT_HOLD)
-        _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=5)
-        self.assertFalse(dbg["is_new_d"])
-        self.assertAlmostEqual(dbg["d_vert"], 0.0, places=6)
-
-    def test_the_null_can_outrank_the_position_term(self):
-        # WHY it was worse, in numbers: clip(vD) is a velocity null, not a
-        # damper, and at full scale it beats the P term -- so a standing
-        # position error is never closed and the drone parks below the gate.
-        from simulator.gp_pilot import (
-            BLIND_VD_CLAMP_MPS,
-            ELEV_ERR_CLAMP_M,
-            K_D_THRUST,
-            K_P_THRUST,
-        )
-
-        self.assertGreater(
-            BLIND_VD_CLAMP_MPS * K_D_THRUST, ELEV_ERR_CLAMP_M * K_P_THRUST
-        )
-
-    def test_fresh_frame_still_uses_the_measured_elevation_rate(self):
-        # The new-frame path is untouched either way: a real rate measurement
-        # beats the vD fallback, so is_new_d ticks keep -elev_rate.
-        _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=6)
-        self.assertTrue(dbg["is_new_d"])
-        self.assertNotAlmostEqual(dbg["d_vert"], 0.7, places=6)
-
-    def test_enabling_the_flag_reproduces_the_measured_behaviour(self):
-        with patch.object(gp_pilot, "GP_DVERT_HOLD", True):
-            _r, _p, _y, thrust, dbg = self._sink_two_ticks(second_fid=5)
+    def test_stale_frame_on_a_locked_gate_still_damps(self):
+        # YOLO publishes ~10.9 Hz against a 32.3 Hz loop, so ~66% of locked
+        # ticks repeat a frame id. d_vert used to collapse to ~0 on those,
+        # leaving the elevation loop with no D term two ticks in three.
+        _r, _p, _y, thrust, dbg = self._sink_two_ticks(second_fid=5)
         self.assertFalse(dbg["is_new_d"])
         self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
         self.assertGreater(thrust, HOVER_THRUST)
 
+    def test_fresh_frame_still_uses_the_measured_elevation_rate(self):
+        # The new-frame path must be untouched: a real rate measurement beats
+        # the vD fallback, so is_new_d ticks keep -elev_rate.
+        _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=6)
+        self.assertTrue(dbg["is_new_d"])
+        self.assertNotAlmostEqual(dbg["d_vert"], 0.7, places=6)
+
+    def test_disabled_flag_restores_the_stale_collapse(self):
+        with patch.object(gp_pilot, "GP_DVERT_HOLD", False):
+            _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=5)
+        self.assertFalse(dbg["is_new_d"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.0, places=6)  # pre-fix behaviour
+
     def test_damping_is_sign_locked_against_sink(self):
         # Cannot hold a descend command: sinking adds thrust, climbing removes
         # it. This is what distinguishes it from the stale-P bottom-bar strike.
-        with patch.object(gp_pilot, "GP_DVERT_HOLD", True):
-            sink = self._sink_two_ticks(second_fid=5, vD=+0.9)
-            climb = self._sink_two_ticks(second_fid=5, vD=-0.9)
+        sink = self._sink_two_ticks(second_fid=5, vD=+0.9)
+        climb = self._sink_two_ticks(second_fid=5, vD=-0.9)
         self.assertGreater(sink[3], climb[3])
 
     def test_blind_climb_also_nulled(self):
