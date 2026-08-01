@@ -7,14 +7,29 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+import simulator.gp_pilot as gp_pilot
 from simulator.gp_pilot import (
+    ELEV_BLIND_DECAY,
     ELEV_I_SEED,
     HOVER_THRUST,
     K_BEARING,
     MAX_BANK_DEG,
+    MAX_CLIMB_RATE_MPS,
     MAX_DESCENT_RATE_MPS,
     PERP_BLEND_DIST,
+    PITCH_WIRE_MAX_DEG,
+    ROLL_WIRE_MAX_DEG,
+    TILT_COMP_MIN,
+    UPSET_COS,
+    TRACK_LAT_GAIN,
+    TRACK_LOOKAHEAD_M,
+    TURN_FF_GAIN,
+    TURN_FF_MAX_DEG,
+    TURN_FF_MIN_BX_M,
+    TrackVirtualGate,
+    _course_direction_cue,
     _fresh_hold_state,
+    _turn_yaw_ff,
     compute_guidance,
 )
 from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
@@ -337,6 +352,61 @@ class GuidanceTests(unittest.TestCase):
         )
         self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
         self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED + 0.02)
+
+    def _locked_gate(self, fid):
+        # bx well beyond MIN_BX_FOR_ELEV so elev_fresh is True: a real lock.
+        return {
+            "frame_id": fid,
+            "body_x_m": 8.0,
+            "body_y_m": 0.0,
+            "body_z_m": -0.4,
+            "normal_body": None,
+        }
+
+    def _sink_two_ticks(self, second_fid, vD=0.7):
+        """Tick once to seed the D-frame, then again with `second_fid`."""
+        state = _fresh_hold_state()
+        for fid in (5, second_fid):
+            out = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=vD,
+                vision=self._locked_gate(fid),
+                vision_vel=None,
+                state=state,
+            )
+        return out
+
+    def test_stale_frame_on_a_locked_gate_still_damps(self):
+        # YOLO publishes ~10.9 Hz against a 32.3 Hz loop, so ~66% of locked
+        # ticks repeat a frame id. d_vert used to collapse to ~0 on those,
+        # leaving the elevation loop with no D term two ticks in three.
+        _r, _p, _y, thrust, dbg = self._sink_two_ticks(second_fid=5)
+        self.assertFalse(dbg["is_new_d"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
+        self.assertGreater(thrust, HOVER_THRUST)
+
+    def test_fresh_frame_still_uses_the_measured_elevation_rate(self):
+        # The new-frame path must be untouched: a real rate measurement beats
+        # the vD fallback, so is_new_d ticks keep -elev_rate.
+        _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=6)
+        self.assertTrue(dbg["is_new_d"])
+        self.assertNotAlmostEqual(dbg["d_vert"], 0.7, places=6)
+
+    def test_disabled_flag_restores_the_stale_collapse(self):
+        with patch.object(gp_pilot, "GP_DVERT_HOLD", False):
+            _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=5)
+        self.assertFalse(dbg["is_new_d"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.0, places=6)  # pre-fix behaviour
+
+    def test_damping_is_sign_locked_against_sink(self):
+        # Cannot hold a descend command: sinking adds thrust, climbing removes
+        # it. This is what distinguishes it from the stale-P bottom-bar strike.
+        sink = self._sink_two_ticks(second_fid=5, vD=+0.9)
+        climb = self._sink_two_ticks(second_fid=5, vD=-0.9)
+        self.assertGreater(sink[3], climb[3])
 
     def test_blind_climb_also_nulled(self):
         from simulator.gp_pilot import ELEV_I_SEED
@@ -750,9 +820,32 @@ class VisionAdapterTests(unittest.TestCase):
         self.assertEqual(est["source"], "yolo")
         self.assertAlmostEqual(est["body_x_m"], 9.0)
 
-    def test_stale_yolo_falls_back_to_anduril(self):
-        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=10)
+    def test_stale_yolo_propagates_instead_of_falling_back(self):
+        # With inference on CPU (100-350 ms/frame) YOLO is stale most frames, so
+        # dropping it handed the pilot to a different estimator 13x/s — and the
+        # estimators disagree about the same gate by |dby| p90 0.81 m. Within the
+        # propagation window the packet is advanced by our own motion instead.
+        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=10)  # 7-frame gap
+        est = vision_gate_estimate(data, motion={"vX": 2.0})
+        self.assertEqual(est["source"], "yolo")
+        self.assertTrue(est.get("propagated"))
+        # 7 frames at 30 Hz closing 2 m/s => the gate is 0.467 m nearer than the
+        # pose packet said. _anduril_plus_yolo puts the YOLO gate at bx=9.0.
+        self.assertAlmostEqual(est["body_x_m"], 9.0 - 2.0 * 7 / 30.0, places=6)
+
+    def test_yolo_beyond_propagation_ceiling_falls_back(self):
+        # Propagation is bounded: past YOLO_PROPAGATE_MAX_GAP_FR the packet
+        # describes too old a world to advance, and anduril takes over.
+        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=3 + 13)
         est = vision_gate_estimate(data)
+        self.assertEqual(est["source"], "anduril")
+        self.assertAlmostEqual(est["body_x_m"], 7.0)
+
+    def test_stale_yolo_falls_back_when_propagation_disabled(self):
+        # GP_YOLO_PROPAGATE=0 restores the original stale-drop behaviour.
+        data = self._anduril_plus_yolo(pose_fid=3, latest_fid=10)
+        with patch("simulator.gp_vision.GP_YOLO_PROPAGATE", False):
+            est = vision_gate_estimate(data)
         self.assertEqual(est["source"], "anduril")
         self.assertAlmostEqual(est["body_x_m"], 7.0)
 
@@ -1017,17 +1110,55 @@ class SmootherIdentityTests(unittest.TestCase):
         data2["frame"] = {"frame_id": 11}  # pose fid 8 < anduril's 10
         e2 = sm.update(data2)
         self.assertEqual(e2["frame_id"], 11)  # monotonic camera clock
-        # anduril -> yolo is a SOURCE FLIP: snap + track_break (blending
-        # across estimators used to sweep the aim through their offset).
-        self.assertAlmostEqual(e2["body_x_m"], 7.0, places=6)
+        # anduril -> yolo is a SOURCE FLIP: never EMA-blend the two estimators
+        # together (that swept the aim through their offset). The published
+        # value RAMPS from the old source to the new one instead of stepping,
+        # so the P term sees a slope rather than a 1 m jump.
         self.assertTrue(e2.get("track_break"))
+        self.assertTrue(e2.get("src_blend"))
+        self.assertAlmostEqual(e2["body_x_m"], 8.0, places=6)  # starts at old
+        # ...and converges on the new source's value.
+        for fid in range(12, 24):
+            data = _pose_data(fid - 3, 7.0, by=0.3)
+            data["frame"] = {"frame_id": fid}
+            last = sm.update(data)
+        self.assertFalse(last.get("src_blend"))
+        self.assertAlmostEqual(last["body_x_m"], 7.0, places=6)
+
+    def test_source_flip_snaps_when_blend_disabled(self):
+        # GP_SRC_BLEND_S=0 restores the original instant snap.
+        from simulator.gp_vision import GateEstimateSmoother
+
+        sm = GateEstimateSmoother()
+        data1 = {
+            "anduril_gate": {
+                "frame_id": 10,
+                "body_x_m": 8.0,
+                "body_y_m": 0.0,
+                "body_z_m": 0.0,
+                "pnp_ok": False,
+                "reliable": True,
+                "source": "anduril",
+                "normal_body": None,
+            },
+            "frame": {"frame_id": 10},
+        }
+        sm.update(data1)
+        data2 = _pose_data(8, 7.0, by=0.3)
+        data2["frame"] = {"frame_id": 11}
+        with patch("simulator.gp_vision.GP_SRC_BLEND_S", 0.0):
+            e2 = sm.update(data2)
+        self.assertTrue(e2.get("track_break"))
+        self.assertAlmostEqual(e2["body_x_m"], 7.0, places=6)
 
 
 class SourceFlipTests(unittest.TestCase):
-    def test_source_flip_snaps_without_blending(self):
+    def test_source_flip_ramps_without_ema_blending(self):
         # yolo -> anduril handoff: systematic offsets differ ~0.9 m vertically
         # on clipped views and the step passes _same_target — EMA-blending it
-        # sweeps the aim point through the offset. Must SNAP + track_break.
+        # sweeps the aim point through the offset. Still must not EMA; the
+        # published value instead RAMPS old -> new so the controller sees a
+        # slope, carrying track_break throughout so nothing differentiates it.
         from simulator.gp_vision import GateEstimateSmoother
 
         sm = GateEstimateSmoother()
@@ -1072,7 +1203,17 @@ class SourceFlipTests(unittest.TestCase):
         est = sm.update(data)
         self.assertEqual(est["source"], "anduril")
         self.assertTrue(est.get("track_break"))
-        self.assertAlmostEqual(est["body_z_m"], -0.8, places=6)  # snap, no EMA
+        # Ramp starts at the OLD source's height, not a 0.8 m step to the new.
+        self.assertAlmostEqual(est["body_z_m"], 0.0, places=6)
+        self.assertTrue(est.get("src_blend"))
+        # An EMA would land strictly between the two and STAY there; the ramp
+        # must reach the new source exactly and then stop blending.
+        for fid in range(9, 21):
+            data["frame"] = {"frame_id": fid}
+            data["anduril_gate"]["frame_id"] = fid
+            est = sm.update(data)
+        self.assertFalse(est.get("src_blend"))
+        self.assertAlmostEqual(est["body_z_m"], -0.8, places=6)
 
     def test_source_flip_to_different_gate_debounces_not_snaps(self):
         # Regression: the source-flip snap must NOT bypass identity debounce.
@@ -1501,6 +1642,7 @@ class GpRaceGateTests(unittest.TestCase):
         from simulator.gp_pilot import Phase
 
         ctrl, data, pilot = self._pilot()
+        pilot._backoff_on = True  # backoff is opt-in now; test the mechanism
         try:
             self._go_flying(ctrl, data, pilot)
             data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
@@ -1518,6 +1660,22 @@ class GpRaceGateTests(unittest.TestCase):
             ):
                 pilot.tick()
             self.assertEqual(pilot.phase, Phase.FLYING)
+        finally:
+            pilot.shutdown()
+
+    def test_collision_default_no_backoff_keeps_flying(self):
+        """Default (GP_BACKOFF off): a collision must NOT reverse — just consume
+        the event and keep flying the guidance forward."""
+        from simulator.gp_pilot import Phase
+
+        ctrl, data, pilot = self._pilot()
+        self.assertFalse(pilot._backoff_on)  # off by default
+        try:
+            self._go_flying(ctrl, data, pilot)
+            data["collision"] = {"id": 1, "threat_level": 1, "delta": 0.0}
+            pilot.tick()
+            self.assertEqual(pilot.phase, Phase.FLYING)  # never enters BACKOFF
+            self.assertIsNone(data.get("collision"))  # event consumed
         finally:
             pilot.shutdown()
 
@@ -1574,6 +1732,7 @@ class GpRaceGateTests(unittest.TestCase):
         from simulator.gp_pilot import DESIRED_PITCH_DEG, PITCH_DES_MIN_DEG, Phase
 
         ctrl, data, pilot = self._pilot()
+        pilot._backoff_on = True  # backoff is opt-in now; test the mechanism
         try:
             self._go_flying(ctrl, data, pilot)
             flying_since_go = pilot._flying_since
@@ -1692,6 +1851,672 @@ class EstimatorResilienceTests(unittest.TestCase):
                 self.assertGreater(abs(yaw), 0.5)
             finally:
                 est.stop()
+
+
+class SourceSwitchDerivativeTests(unittest.TestCase):
+    """A source change is a discontinuity, exactly like a gate change."""
+
+    @staticmethod
+    def _two_frames(src_a, src_b, by_b):
+        quat = np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+        state = _fresh_hold_state()
+        dbg = None
+        for fid, (src, by) in enumerate(((src_a, 0.0), (src_b, by_b)), start=1):
+            _r, _p, _y, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=quat,
+                vY=0.0,
+                vD=0.0,
+                vision={
+                    "frame_id": fid,
+                    "body_x_m": 8.9,  # measured median lock range
+                    "body_y_m": by,
+                    "body_z_m": 0.0,
+                    "normal_body": None,
+                    "source": src,
+                },
+                vision_vel=None,
+                state=state,
+            )
+        return dbg
+
+    def test_switch_suppresses_the_phantom_rate(self):
+        # 0.807 m is the measured p90 lateral disagreement across a switch. At
+        # bx 8.9 m that is 5.18 deg in one tick = 311 deg/s, which pins
+        # BEARING_RATE_CLAMP_DEG_S (60) and saturates roll in whichever
+        # direction the two estimators happened to differ.
+        same = self._two_frames("yolo", "yolo", 0.807)
+        switched = self._two_frames("yolo", "anduril", 0.807)
+        self.assertFalse(same["src_switch"])
+        self.assertTrue(switched["src_switch"])
+        self.assertLess(abs(same["d_lat"]), 9.4)
+        self.assertGreater(abs(same["d_lat"]), 9.3)  # pinned at the clamp
+        self.assertAlmostEqual(switched["d_lat"], 0.0, places=9)
+        self.assertLess(abs(switched["desired_roll"]), abs(same["desired_roll"]))
+
+    def test_same_motion_within_one_source_still_differentiates(self):
+        # The reset must key on the SOURCE changing, not fire on every tick —
+        # real closing motion has to keep reaching the D term.
+        dbg = self._two_frames("yolo", "yolo", 0.2)
+        self.assertFalse(dbg["src_switch"])
+        self.assertNotAlmostEqual(dbg["d_lat"], 0.0, places=6)
+
+    def test_flag_off_restores_the_phantom_rate(self):
+        with patch("simulator.gp_pilot.GP_SRC_RESET", False):
+            dbg = self._two_frames("yolo", "anduril", 0.807)
+        self.assertFalse(dbg["src_switch"])
+        self.assertGreater(abs(dbg["d_lat"]), 9.3)
+
+
+class CorridorPilotIntegrationTests(unittest.TestCase):
+    """How the corridor's quality reaches (and is kept out of) the control law."""
+
+    @staticmethod
+    def _bl_data(fid=7, *, conf=1.0, cx=0.0, hdg=0.0, hdg_valid=True, cy=0.0):
+        return {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": fid},
+            "blue_line": {
+                "found": True,
+                "frame_id": fid,
+                "cx_norm": cx,
+                "cy_norm": cy,
+                "heading_err": hdg,
+                "heading_valid": hdg_valid,
+                "left_found": True,
+                "right_found": True,
+                "conf": conf,
+            },
+        }
+
+    def test_detector_conf_reaches_the_virtual_gate(self):
+        # A 2-band conf-0.2 lock used to score the same 1.0 "strength" as a
+        # 12-band conf-1.0 one, because strength was left_found and right_found.
+        vg = TrackVirtualGate()
+        strong = vg.synth(self._bl_data(1, conf=0.95))
+        vg2 = TrackVirtualGate()
+        weak = vg2.synth(self._bl_data(1, conf=0.2))
+        self.assertAlmostEqual(strong["strength"], 0.95)
+        self.assertAlmostEqual(weak["strength"], 0.2)
+        self.assertTrue(strong["reliable"])
+        self.assertFalse(weak["reliable"])
+
+    def test_weak_corridor_gets_less_lateral_authority(self):
+        quat = np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+        rolls = {}
+        for label, conf in (("strong", 0.95), ("weak", 0.2)):
+            vg = TrackVirtualGate()
+            vision = vg.synth(self._bl_data(1, conf=conf, cx=0.3))
+            _r, _p, _y, _t, dbg = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=quat,
+                vY=0.0,
+                vD=0.0,
+                vision=vision,
+                vision_vel=None,
+                state=_fresh_hold_state(),
+            )
+            rolls[label] = abs(dbg["desired_roll"])
+        self.assertLess(rolls["weak"], rolls["strong"])
+
+    def test_virtual_gate_does_not_overwrite_elevation_error(self):
+        # body_z is fabricated (hold level) yet body_x = TRACK_LOOKAHEAD_M (4.0)
+        # is past MIN_BX_FOR_ELEV (2.5), so it used to qualify as a FRESH
+        # elevation sample and wipe the real gate's error with a hard zero.
+        quat = np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+        kw = dict(roll_deg=0.0, pitch_deg=0.0, quat=quat, vY=0.0, vD=0.0)
+        state = _fresh_hold_state()
+        real = {
+            "frame_id": 1,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": 1.5,  # gate 1.5 m below
+            "normal_body": None,
+            "source": "yolo",
+        }
+        compute_guidance(vision=real, vision_vel=None, state=state, **kw)
+        self.assertAlmostEqual(state["last_elev_err"], 1.5, places=6)
+
+        vg = TrackVirtualGate()
+        corridor = vg.synth(self._bl_data(2))
+        self.assertFalse(corridor["elev_valid"])
+        compute_guidance(vision=corridor, vision_vel=None, state=state, **kw)
+        # Decays like any blind window; must NOT be zeroed by the fabrication.
+        self.assertAlmostEqual(state["last_elev_err"], 1.5 * ELEV_BLIND_DECAY, places=6)
+
+    def test_heading_only_used_when_the_detector_vouches_for_it(self):
+        vg = TrackVirtualGate()
+        vouched = vg.synth(self._bl_data(1, hdg=0.4, hdg_valid=True))
+        vg2 = TrackVirtualGate()
+        unvouched = vg2.synth(self._bl_data(1, hdg=0.4, hdg_valid=False))
+        # With a vouched heading the lookahead term swings body_y; without it
+        # only the (zero) lateral offset remains.
+        self.assertGreater(abs(vouched["body_y_m"]), abs(unvouched["body_y_m"]))
+        self.assertAlmostEqual(unvouched["body_y_m"], 0.0, places=6)
+
+
+class TrackVirtualGateBluelineTests(unittest.TestCase):
+    """Blue-line centroid fuses ahead of detect_track in the ribbon fallback."""
+
+    def test_prefers_blue_line_over_track(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 7},
+            "blue_line": {
+                "found": True,
+                "cx_norm": 0.4,
+                "heading_err": 0.0,
+                "left_found": True,
+                "right_found": True,
+                "frame_id": 7,
+            },
+        }
+        with patch("simulator.gp_pilot.detect_track") as det:
+            out = vg.synth(data)
+            det.assert_not_called()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "blueline")
+        self.assertAlmostEqual(out["body_x_m"], TRACK_LOOKAHEAD_M)
+        self.assertAlmostEqual(out["body_y_m"], 0.4 * TRACK_LAT_GAIN)
+        self.assertEqual(vg._last["offset"], 0.4)
+
+    def test_falls_back_to_track_when_blue_line_missing(self):
+        vg = TrackVirtualGate()
+        data = {
+            "frame": {"img": np.zeros((360, 640, 3), np.uint8), "frame_id": 3},
+            "blue_line": {"found": False, "frame_id": 3},
+        }
+        fake = {"offset": -0.2, "angle": 0.0, "strength": 0.75}
+        with patch("simulator.gp_pilot.detect_track", return_value=fake) as det:
+            out = vg.synth(data)
+            det.assert_called_once()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "track")
+        self.assertAlmostEqual(out["body_y_m"], -0.2 * TRACK_LAT_GAIN)
+
+    def test_course_cue_prefers_blueline_over_gate(self):
+        bl = {
+            "found": True,
+            "cx_norm": -0.4,
+            "left_found": True,
+            "right_found": True,
+        }
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        cue = _course_direction_cue(bl, gate, {"offset": 0.5})
+        self.assertEqual(cue, -1.0)
+
+    def test_course_cue_falls_back_to_gate_then_track(self):
+        gate = {
+            "reliable": True,
+            "body_x_m": 8.0,
+            "body_y_m": 2.0,
+            "body_z_m": 0.0,
+        }
+        self.assertEqual(_course_direction_cue(None, gate, None), 1.0)
+        self.assertEqual(
+            _course_direction_cue({"found": False}, None, {"offset": -0.3}),
+            -1.0,
+        )
+
+
+class ClimbCapAndUpsetGuardTests(unittest.TestCase):
+    """Bounds added after gp_log_20260728_183724 went full-throttle inverted."""
+
+    def _level_quat(self):
+        return np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+
+    def _gate_above(self):
+        # bz negative at level = gate ABOVE -> elev-P commands climb.
+        return {
+            "frame_id": 5,
+            "body_x_m": 10.0,
+            "body_y_m": 0.0,
+            "body_z_m": -3.0,
+            "normal_body": None,
+        }
+
+    def _run(self, roll_deg=0.0, pitch_deg=0.0, vD=0.0, vision=None, **kw):
+        state = _fresh_hold_state()
+        vision = self._gate_above() if vision is None else vision
+        # Two ticks: the first seeds last_elev_err, the second acts on it.
+        for _ in range(2):
+            out = compute_guidance(
+                roll_deg=roll_deg,
+                pitch_deg=pitch_deg,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=vD,
+                vision=vision,
+                vision_vel=None,
+                state=state,
+                **kw,
+            )
+        return out
+
+    def test_climb_cap_holds_thrust_at_hover_ceiling(self):
+        _rr, _pr, _yr, thrust, _dbg = self._run(vD=-(MAX_CLIMB_RATE_MPS + 1.0))
+        ceiling = HOVER_THRUST + ELEV_I_SEED
+        self.assertLessEqual(thrust, ceiling + 1e-6)
+
+    def test_climb_cap_inert_below_threshold(self):
+        # Same climbing gate, but slower than the cap -> elev-P still boosts.
+        _rr, _pr, _yr, thrust, _dbg = self._run(vD=-(MAX_CLIMB_RATE_MPS * 0.25))
+        self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED)
+
+    def test_descent_cap_still_floors_thrust(self):
+        # Regression: the new min() must not undo the existing sink floor.
+        vision = dict(self._gate_above(), body_z_m=3.0)  # gate BELOW -> cut thrust
+        _rr, _pr, _yr, thrust, _dbg = self._run(
+            vD=MAX_DESCENT_RATE_MPS + 1.0, vision=vision
+        )
+        self.assertGreaterEqual(thrust, HOVER_THRUST + ELEV_I_SEED - 1e-6)
+
+    def test_inverted_attitude_does_not_command_full_thrust(self):
+        # cos(108)*cos(45) is NEGATIVE; the old max(0.01, .) floor made this 1.0.
+        _rr, _pr, _yr, thrust, _dbg = self._run(roll_deg=108.0, pitch_deg=45.0)
+        self.assertLess(thrust, 1.0)
+        self.assertLessEqual(thrust, (HOVER_THRUST + 0.09) / TILT_COMP_MIN + 1e-6)
+
+    def test_tilt_compensation_unaffected_in_normal_bank(self):
+        level = self._run(roll_deg=0.0)[3]
+        banked = self._run(roll_deg=14.0)[3]
+        # 14 deg of bank is a ~3% boost, nowhere near the TILT_COMP_MIN clamp.
+        self.assertGreater(banked, level)
+        self.assertLess(banked, level * 1.10)
+
+    # --- Upset guard: collective only, and provably inert in nominal flight ---
+
+    def test_guard_inert_at_the_commanded_attitude_envelope(self):
+        # MAX_BANK_DEG / PITCH_DES_MAX_DEG is what guidance can ASK for.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=14.0, pitch_deg=6.0)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            on = self._run(roll_deg=14.0, pitch_deg=6.0)[3]
+        self.assertEqual(off, on)
+
+    def test_guard_inert_even_at_both_wire_clamps_at_once(self):
+        # cos(25)*cos(18) = 0.862, ~4x above UPSET_COS. If this ever fires, the
+        # threshold is wrong -- the guard must never touch an intended tick.
+        self.assertGreater(
+            math.cos(math.radians(ROLL_WIRE_MAX_DEG))
+            * math.cos(math.radians(PITCH_WIRE_MAX_DEG)),
+            UPSET_COS,
+        )
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=ROLL_WIRE_MAX_DEG, pitch_deg=PITCH_WIRE_MAX_DEG)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            on = self._run(roll_deg=ROLL_WIRE_MAX_DEG, pitch_deg=PITCH_WIRE_MAX_DEG)[3]
+        self.assertEqual(off, on)
+
+    def test_guard_overrides_the_descent_floor_when_inverted(self):
+        # The gap test_descent_cap_still_floors_thrust cannot cover: sinking
+        # AND inverted, the descent cap forces (hover+elev_i)/tilt = ~0.377
+        # aimed at the ground. The guard has to win against that floor.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            _r, _p, _y, thrust, dbg = self._run(
+                roll_deg=108.0, pitch_deg=45.0, vD=MAX_DESCENT_RATE_MPS + 2.0
+            )
+        self.assertTrue(dbg["upset"])
+        self.assertEqual(thrust, 0.0)
+
+    def test_guard_is_continuous_at_the_threshold(self):
+        # The multiplier is exactly 1.0 at the boundary, so crossing it is not
+        # a step the slew limiter has to smear. (Not bit-identical: `tilt` also
+        # moves with roll, hence a ~1e-6 drift rather than 0.)
+        roll = math.degrees(math.acos(UPSET_COS))
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            just_under = self._run(roll_deg=roll - 1e-4)[3]
+            just_over = self._run(roll_deg=roll + 1e-4)[3]
+        self.assertLess(abs(just_under - just_over), 1e-4)
+
+    def test_guard_scales_collective_down_mid_range(self):
+        # At 70 deg the guard cuts to 0.684x but does NOT zero: the vertical
+        # component is thrust*cos(70) either way, so a partial cut here is a
+        # sink, not a save. Full cut only arrives at 90 deg, where any
+        # collective at all is pointed sideways or down.
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            off = self._run(roll_deg=70.0)[3]
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", True):
+            _r, _p, _y, on, dbg = self._run(roll_deg=70.0)
+        self.assertTrue(dbg["upset"])
+        self.assertGreater(on, 0.0)
+        self.assertLess(on, off)
+        self.assertAlmostEqual(on / off, math.cos(math.radians(70.0)) / UPSET_COS, places=6)
+
+    def test_disabled_guard_matches_previous_behaviour_exactly(self):
+        with patch.object(gp_pilot, "GP_UPSET_GUARD", False):
+            _r, _p, _y, thrust, dbg = self._run(roll_deg=108.0, pitch_deg=45.0)
+        self.assertFalse(dbg["upset"])
+        # The pre-guard bound: clamped tilt compensation, nothing more.
+        self.assertLessEqual(thrust, (HOVER_THRUST + 0.09) / TILT_COMP_MIN + 1e-6)
+
+    def test_upset_bypasses_the_thrust_slew(self):
+        # At the real ~32 Hz loop rate the limiter needs ~0.7 s to reach zero,
+        # which is several metres of fall. The guard must land in one tick.
+        slew = gp_pilot.CommandSlew(hz=60.0)
+        slew.apply(0.0, 0.0, 0.0, 0.377)
+        _r, _p, _y, limited = slew.apply(0.0, 0.0, 0.0, 0.0)
+        self.assertGreater(limited, 0.3)  # rate-limited, still nearly full
+
+        slew2 = gp_pilot.CommandSlew(hz=60.0)
+        slew2.apply(0.0, 0.0, 0.0, 0.377)
+        _r, _p, _y, immediate = slew2.apply(0.0, 0.0, 0.0, 0.0, thrust_immediate=True)
+        self.assertEqual(immediate, 0.0)
+
+    # NOTE: BACKOFF sends unclamped roll/pitch and uncompensated thrust and is
+    # deliberately NOT covered by this guard -- it is safe only because it is
+    # dead code. test_collision_default_no_backoff_keeps_flying already asserts
+    # the default stays off, which is the tripwire if that ever changes.
+
+    def test_roll_command_clamped_when_upset(self):
+        roll_cmd, _pr, _yr, _t, _dbg = self._run(roll_deg=107.0)
+        self.assertLessEqual(abs(roll_cmd), ROLL_WIRE_MAX_DEG + 1e-6)
+
+    def test_normal_bank_demand_not_clamped(self):
+        # Gate well off to the right at range: real turn authority must survive.
+        vision = dict(self._gate_above(), body_y_m=3.0, body_z_m=0.0)
+        roll_cmd, _pr, _yr, _t, _dbg = self._run(roll_deg=0.0, vision=vision)
+        self.assertLess(abs(roll_cmd), ROLL_WIRE_MAX_DEG)
+        self.assertGreater(abs(roll_cmd), 0.0)
+
+
+class TurnYawFeedForwardTests(unittest.TestCase):
+    """Corridor bend biases yaw so the drone rotates into a curve."""
+
+    def _bl(self, hdg, **kw):
+        d = {
+            "found": True,
+            "left_found": True,
+            "right_found": True,
+            "conf": 1.0,
+            "heading_err": hdg,
+            # The gate is heading_valid, not left_found/right_found: those are
+            # frame-global and go True as soon as one band pairs, while 28.6% of
+            # band centres are inferred from a single rail plus a remembered width.
+            "heading_valid": True,
+        }
+        d.update(kw)
+        return d
+
+    def test_right_bend_yaws_right(self):
+        far = TURN_FF_MIN_BX_M + 5.0
+        ff = _turn_yaw_ff(self._bl(0.2), far)
+        self.assertGreater(ff, 0.0)
+        self.assertAlmostEqual(ff, TURN_FF_GAIN * math.degrees(0.2), places=6)
+
+    def test_left_bend_yaws_left(self):
+        self.assertLess(_turn_yaw_ff(self._bl(-0.2), TURN_FF_MIN_BX_M + 5.0), 0.0)
+
+    def test_bounded(self):
+        self.assertAlmostEqual(
+            _turn_yaw_ff(self._bl(1.5), 20.0), TURN_FF_MAX_DEG, places=6
+        )
+
+    def test_unvouched_heading_ignored(self):
+        # A single-rail frame (and any frame whose band centres span too few
+        # rows to constrain the slope) reports heading_valid False.
+        bl = self._bl(0.3, heading_valid=False, right_found=False)
+        self.assertEqual(_turn_yaw_ff(bl, 20.0), 0.0)
+
+    def test_paired_flags_alone_do_not_vouch(self):
+        # Regression for the old gate: both rails "found" is not evidence the
+        # HEADING is the corridor's, and must no longer be enough on its own.
+        bl = self._bl(0.3, heading_valid=False)
+        self.assertTrue(bl["left_found"] and bl["right_found"])
+        self.assertEqual(_turn_yaw_ff(bl, 20.0), 0.0)
+
+    def test_low_confidence_ignored(self):
+        self.assertEqual(_turn_yaw_ff(self._bl(0.3, conf=0.1), 20.0), 0.0)
+
+    def test_not_found_ignored(self):
+        self.assertEqual(_turn_yaw_ff({"found": False}, 20.0), 0.0)
+        self.assertEqual(_turn_yaw_ff(None, 20.0), 0.0)
+
+    def test_disabled_inside_crossing(self):
+        # Inside TURN_FF_MIN_BX_M a REAL gate owns the aim.
+        self.assertEqual(_turn_yaw_ff(self._bl(0.3), TURN_FF_MIN_BX_M - 1.0), 0.0)
+
+    def test_active_on_virtual_gate_inside_min_bx(self):
+        # TrackVirtualGate reports the constant TRACK_LOOKAHEAD_M (4.0), which
+        # is inside TURN_FF_MIN_BX_M (5.0) — so the crossing cutoff used to fire
+        # on EVERY corridor-steered tick, killing the curvature term exactly
+        # when the corridor was the only thing that knew about the curve.
+        self.assertLess(TRACK_LOOKAHEAD_M, TURN_FF_MIN_BX_M)
+        self.assertEqual(_turn_yaw_ff(self._bl(0.3), TRACK_LOOKAHEAD_M), 0.0)
+        self.assertGreater(
+            _turn_yaw_ff(self._bl(0.3), TRACK_LOOKAHEAD_M, virtual=True), 0.0
+        )
+
+    def test_active_when_blind(self):
+        # No gate -> bx is NaN; the corridor should still steer yaw.
+        self.assertGreater(_turn_yaw_ff(self._bl(0.3), float("nan")), 0.0)
+
+    def test_reaches_guidance_yaw_command(self):
+        quat = np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+        vision = {
+            "frame_id": 3,
+            "body_x_m": 14.0,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        kw = dict(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=quat,
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+        )
+        _r, _p, yaw_plain, _t, d0 = compute_guidance(state=_fresh_hold_state(), **kw)
+        _r, _p, yaw_ff, _t, d1 = compute_guidance(
+            state=_fresh_hold_state(), blue_line=self._bl(0.3), **kw
+        )
+        self.assertNotEqual(yaw_plain, yaw_ff)
+        self.assertGreater(d1["turn_ff_deg"], 0.0)
+        self.assertEqual(d0["turn_ff_deg"], 0.0)
+        self.assertTrue(d1["bl_found"])
+        self.assertFalse(d0["bl_found"])
+
+
+
+class SearchArcScalingTests(unittest.TestCase):
+    """Blind post-pass arc is sized to the corridor's last measured bend."""
+
+    def _arc(self, hdg):
+        from simulator.gp_pilot import (
+            SEARCH_HDG_REF_RAD,
+            SEARCH_LAT_MIN_FRAC,
+        )
+
+        return float(
+            np.clip(abs(hdg) / SEARCH_HDG_REF_RAD, SEARCH_LAT_MIN_FRAC, 1.0)
+        )
+
+    def test_sharp_bend_gives_full_arc(self):
+        from simulator.gp_pilot import SEARCH_HDG_REF_RAD
+
+        self.assertAlmostEqual(self._arc(SEARCH_HDG_REF_RAD * 2), 1.0)
+
+    def test_gentle_bend_floors_not_zeroes(self):
+        from simulator.gp_pilot import SEARCH_LAT_MIN_FRAC
+
+        # A straight corridor must still sweep, or a lost gate is never found.
+        self.assertAlmostEqual(self._arc(0.0), SEARCH_LAT_MIN_FRAC)
+
+    def test_arc_is_monotonic_in_bend(self):
+        self.assertLess(self._arc(0.10), self._arc(0.25))
+
+    def test_course_hdg_ema_tracks_both_rails_only(self):
+        from simulator.gp_pilot import SEARCH_HDG_ALPHA
+
+        hdg = 0.0
+        bl = {"found": True, "left_found": True, "right_found": True,
+              "heading_err": 0.4}
+        for _ in range(50):
+            if bl.get("found") and bl.get("left_found") and bl.get("right_found"):
+                hdg += SEARCH_HDG_ALPHA * (float(bl["heading_err"]) - hdg)
+        self.assertGreater(hdg, 0.3)
+        # Single rail contributes nothing.
+        single = {"found": True, "left_found": True, "right_found": False,
+                  "heading_err": -0.9}
+        before = hdg
+        if single.get("left_found") and single.get("right_found"):
+            hdg += SEARCH_HDG_ALPHA * (float(single["heading_err"]) - hdg)
+        self.assertEqual(hdg, before)
+
+
+
+class AttemptOutcomeRecordingTests(unittest.TestCase):
+    """The gate count must survive the reset that ends the attempt.
+
+    _reset_state used to zero n_passed BEFORE _close_log recorded it, and every
+    attempt ends through _reset_state -- so every sidecar in the repo recorded
+    gates_passed: 0 regardless of how far the drone actually flew. It made the
+    only outcome number in the tooling permanently, silently wrong.
+    """
+
+    def test_reset_records_the_gates_actually_flown(self):
+        from simulator.gp_pilot import GPPilot
+
+        import io
+
+        pilot = GPPilot.__new__(GPPilot)
+        pilot._log = io.StringIO()  # _close_log no-ops without an open log
+        pilot._log_wr = None
+        pilot.n_passed = 3
+        pilot.controller = MagicMock()
+        pilot.data = {}
+        pilot.vel_tracker = MagicMock()
+        pilot.gate_smoother = MagicMock()
+        pilot._trackline = None
+        pilot._cmd_slew = MagicMock()
+        pilot.est = MagicMock()
+
+        with patch.object(gp_pilot.run_meta, "note_attempt_end") as note:
+            pilot._reset_state()
+
+        note.assert_called_once()
+        self.assertEqual(note.call_args.kwargs["gates"], 3)
+        self.assertEqual(pilot.n_passed, 0)  # still cleared for the next attempt
+
+
+class FlightLogSchemaTests(unittest.TestCase):
+    """Header and row must stay the same width (new diagnostic columns)."""
+
+    def test_header_and_row_widths_match(self):
+        import csv as _csv
+        import io
+        import time as _time
+
+        from simulator.gp_pilot import LOG_COLUMNS, GPPilot
+
+        pilot = GPPilot.__new__(GPPilot)  # no controller/MAVLink needed
+        buf = io.StringIO()
+        pilot._log = buf
+        pilot._log_wr = _csv.writer(buf)
+        pilot._log_last_flush = _time.time()
+        pilot.n_passed = 2
+
+        # The header the writer actually emits, not a copy of it. The previous
+        # hardcoded duplicate asserted width only, so any rename or reorder
+        # passed silently -- which is how the schema drifted nine times.
+        header = list(LOG_COLUMNS)
+        _r, _p, _y, thrust, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=0.0,
+            vD=0.0,
+            vision={
+                "frame_id": 1,
+                "body_x_m": 12.0,
+                "body_y_m": 0.5,
+                "body_z_m": 0.0,
+                "normal_body": None,
+            },
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            blue_line={
+                "found": True,
+                "left_found": True,
+                "right_found": True,
+                "conf": 0.9,
+                "heading_err": 0.2,
+                "heading_valid": True,
+                "span_frac": 0.42,
+                "paired_bands": 3,
+                "cy_norm": 0.31,
+            },
+        )
+        pilot._log_tick((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), thrust, 0.0, 0.0, dbg)
+        row = next(_csv.reader(io.StringIO(buf.getvalue())))
+        self.assertEqual(len(row), len(header))
+        # Diagnostics actually carry a value, not a placeholder.
+        self.assertEqual(row[header.index("bl_found")], "1")
+        self.assertEqual(row[header.index("source")], "")
+        self.assertEqual(row[header.index("gate")], "2")
+        self.assertGreater(float(row[header.index("turn_ff")]), 0.0)
+        self.assertEqual(row[header.index("bl_hdg_valid")], "1")
+        self.assertAlmostEqual(float(row[header.index("bl_span")]), 0.42, places=3)
+        self.assertEqual(row[header.index("bl_paired")], "3")
+        self.assertAlmostEqual(float(row[header.index("bl_cy")]), 0.31, places=3)
+
+
+
+class PeekOcclusionTests(unittest.TestCase):
+    """Occlusion PEEK bias in compute_guidance (gate-3 pillar dodge)."""
+
+    def _guide(self, occ, state, bx=8.0):
+        vision = {
+            "frame_id": 1, "body_x_m": bx, "body_y_m": 0.0, "body_z_m": 0.0,
+            "reliable": True, "source": "yolo", "normal_body": None, "method": "x",
+        }
+        return compute_guidance(
+            roll_deg=0.0, pitch_deg=0.0,
+            quat=np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64),
+            vY=0.0, vD=0.0, vision=vision, vision_vel=None, state=state,
+            vX=2.0, dt=1.0 / 60.0, occlusion=occ,
+        )
+
+    def test_none_is_inert(self):
+        # occlusion=None must not perturb anything -> gates 1-2 unchanged.
+        _, _, _, _, dbg = self._guide(None, _fresh_hold_state())
+        self.assertFalse(dbg["peek_active"])
+        self.assertEqual(dbg["peek_side"], 0)
+        self.assertEqual(dbg["peek_strength"], 0.0)
+
+    def test_occlusion_shifts_desired_roll(self):
+        _, _, _, _, base = self._guide(None, _fresh_hold_state())
+        st = _fresh_hold_state()
+        out = None
+        for _ in range(30):  # ramp the bias in
+            _, _, _, _, out = self._guide({"side": 1, "strength": 1.0}, st)
+        self.assertTrue(out["peek_active"])
+        self.assertEqual(out["peek_side"], 1)
+        self.assertGreater(out["desired_roll"], base["desired_roll"] + 0.05)
+        # opposite side biases the other way
+        st2 = _fresh_hold_state()
+        out2 = None
+        for _ in range(30):
+            _, _, _, _, out2 = self._guide({"side": -1, "strength": 1.0}, st2)
+        self.assertLess(out2["desired_roll"], base["desired_roll"] - 0.05)
+
+    def test_disengaged_below_min_bx(self):
+        st = _fresh_hold_state()
+        out = None
+        for _ in range(30):
+            _, _, _, _, out = self._guide({"side": 1, "strength": 1.0}, st, bx=4.0)
+        self.assertFalse(out["peek_active"])
+        _, _, _, _, base = self._guide(None, _fresh_hold_state(), bx=4.0)
+        self.assertAlmostEqual(out["desired_roll"], base["desired_roll"], places=5)
 
 
 if __name__ == "__main__":

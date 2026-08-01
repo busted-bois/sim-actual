@@ -18,6 +18,13 @@
 - Make all plans multi-phase.
 - While working on the plan, ensure that tasks within the plan file are marked as completed once they are completed.
 
+## Diagnosing a flight run
+
+- Every run writes `runs/videos/vision_<RUN_ID>.mp4`, `runs/videos/vision_<RUN_ID>.json` (gates reached, outcome, git sha), and `rl/data/gp_log_<RUN_ID>_a<N>.csv` per attempt. **Same `<RUN_ID>`** — pair by id, not by timestamp.
+- **The CSVs are the tuning source of truth**, not the video. Practically every tuned constant in `simulator/gp_pilot.py` cites one by filename.
+- `make videos-index` lists the team's shared runs (gates, outcome, length) **without switching branches** and without spending LFS bandwidth. Then `make videos-sync` (sidecars + telemetry), `make videos-get RUN=<run>` (one ~65 MB mp4), `make videos-frames RUN=<run> AT=12.5`.
+- Never `git checkout videos` — it swaps the working tree mid-session. The targets above read the branch in place.
+
 ## Codebase Rules
 
 - Do NOT use python (.py) for anything other than actual simulator logic. Use shell scripts (ex. bash, powershell) for other tasks, ONLY AS NEEDED.

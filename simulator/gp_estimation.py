@@ -7,6 +7,7 @@ daemon thread; GPPilot takes an atomic snapshot each control tick.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 import traceback
@@ -20,13 +21,31 @@ G = 9.81
 ACC_SMOOTH_N = 5
 ESTIMATION_POLL_HZ = 400
 LAUNCH_PITCH_DEG = -17.8
+# Gyro sign convention differs by sim build: VQ2 delivers gyro inverted vs NED
+# (-1, AndurilGP-empirical), but VQ1 delivers it un-inverted (+1, measured
+# against VQ1 ATTITUDE truth, R^2=1.0 all axes). Wrong sign spins the integrated
+# attitude the wrong way -> phantom yaw -> fly-away. Default -1 preserves VQ2.
+GYRO_SIGN = float(os.environ.get("GP_GYRO_SIGN", "-1.0"))
 
 
 class GPEstimation:
     """Background IMU propagator. Call start() after first IMU appears."""
 
-    def __init__(self, data: dict, launch_pitch_deg: float = LAUNCH_PITCH_DEG):
+    def __init__(self, data: dict, launch_pitch_deg: float = LAUNCH_PITCH_DEG,
+                 gyro_sign: float | None = None):
         self.data = data
+        # Read the gyro sign at CONSTRUCTION (runtime), not import, so setting
+        # GP_GYRO_SIGN before the pilot is built takes effect (VQ1=+1, VQ2=-1).
+        self._gyro_sign = (
+            gyro_sign if gyro_sign is not None
+            else float(os.environ.get("GP_GYRO_SIGN", "-1.0"))
+        )
+        # Per-axis accel sign, sim-dependent (GP_ACC_SIGN="x,y,z"). VQ1 flips the
+        # forward axis ("-1,1,1", measured vs ATTITUDE truth); VQ2 default "1,1,1".
+        # Wrong ax sign corrupts forward velocity and (in the EKF) inverts pitch.
+        self._acc_sign = tuple(
+            float(v) for v in os.environ.get("GP_ACC_SIGN", "1,1,1").split(",")
+        )
         self._lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
@@ -114,18 +133,19 @@ class GPEstimation:
             dt = max(0.0005, min(0.1, (ts_us - self._last_imu_ts_us) * 1e-6))
             self._last_imu_ts_us = ts_us
 
-            # Gyro signs inverted vs NED in this simulator (AndurilGP empirical).
-            gx = -float(imu.get("gx", imu.get("xgyro", 0.0)))
-            gy = -float(imu.get("gy", imu.get("ygyro", 0.0)))
-            gz = -float(imu.get("gz", imu.get("zgyro", 0.0)))
+            # Gyro sign is sim-dependent (GP_GYRO_SIGN): -1 for VQ2, +1 for VQ1.
+            s = self._gyro_sign
+            gx = s * float(imu.get("gx", imu.get("xgyro", 0.0)))
+            gy = s * float(imu.get("gy", imu.get("ygyro", 0.0)))
+            gz = s * float(imu.get("gz", imu.get("zgyro", 0.0)))
             self._att_deg = self.ahrs.update(gx, gy, gz, dt)
             self.rates_body[0] = math.degrees(gx)
             self.rates_body[1] = math.degrees(gy)
             self.rates_body[2] = math.degrees(gz)
 
-            ax = float(imu.get("ax", imu.get("xacc", 0.0)))
-            ay = float(imu.get("ay", imu.get("yacc", 0.0)))
-            az = float(imu.get("az", imu.get("zacc", 0.0)))
+            ax = self._acc_sign[0] * float(imu.get("ax", imu.get("xacc", 0.0)))
+            ay = self._acc_sign[1] * float(imu.get("ay", imu.get("yacc", 0.0)))
+            az = self._acc_sign[2] * float(imu.get("az", imu.get("zacc", 0.0)))
             self._acc_buf.append((ax, ay, az))
             n = len(self._acc_buf)
             ax_s = sum(s[0] for s in self._acc_buf) / n
