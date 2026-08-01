@@ -20,13 +20,51 @@ from enum import Enum, auto
 
 import numpy as np
 
+from simulator import run_meta
 from simulator.gp_estimation import GPEstimation
+from simulator.run_id import RUN_ID
 from simulator.gp_vision import (
     GateEstimateSmoother,
     VisionVelocityTracker,
     gate_tilt_deg_from_normal,
 )
 from simulator.track_line import detect_track
+
+
+def _env_f(name: str, default: float) -> float:
+    """Env-overridable float, ignoring anything unparseable."""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    """Env-overridable on/off switch. Everything but 0/false/no/off is on."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# --- Gate-source continuity ---------------------------------------------------
+# The source ladder (yolo -> anduril -> hsv) is re-picked EVERY tick, and with
+# YOLO on CPU (100-350 ms/frame = 3-10 camera frames of lag) YOLO_STALE_GAP_FR
+# trips constantly: measured 15.9 source changes/s, median lock streak 0.17 s.
+# Each switch is a step in the estimate, because the estimators disagree about
+# the SAME gate:
+#     within one source   |dby| p50 0.000  p90 0.074 m
+#     across a switch     |dby| p50 0.180  p90 0.807 m   (|dbx| p90 2.25 m)
+# At the median lock range (bx 8.9 m) a 0.807 m lateral step is 5.18 deg of
+# bearing in ONE tick = 311 deg/s, which pins BEARING_RATE_CLAMP_DEG_S (60) and
+# drives d_lat = -radians(60)*8.9 into K_LAT_D — roll saturates at MAX_BANK_DEG,
+# in whichever direction the two estimators happened to disagree. The P term
+# moves too: 5.18 deg * K_BEARING = 12.9 deg of roll demand against a 14 deg cap.
+#
+# compute_guidance already resets its derivative state on `track_break` (the
+# smoother switching gate IDENTITY). A source change produces identical symptoms
+# from a different cause and was not covered — so reuse the same reset.
+GP_SRC_RESET = _env_flag("GP_SRC_RESET", True)
 
 # --- Blue-track-line fallback -------------------------------------------------
 # The VQ2 course is marked by a glowing cyan floor ribbon that is visible to the
@@ -42,6 +80,35 @@ TRACK_LAT_GAIN = 3.5  # m of body-y per unit image offset (normalized -1..1)
 TRACK_ANGLE_GAIN = 0.8  # weight on the ribbon-heading lookahead term (curves)
 TRACK_ANGLE_CLAMP = 0.6  # rad; ignore near-horizontal (low-strength) headings
 TRACK_MIN_STRENGTH = 0.33  # require >= ~1/3 of bands (matches the detector floor)
+# Corridor quality at/above which the virtual gate steers at FULL lateral
+# authority; below it compute_guidance's existing WEAK_BLEND_SCALE applies.
+# conf p50 is 0.64 overall and 0.90 on frames whose heading the detector
+# vouches for, so this passes good locks and fades the thin ones.
+TRACK_CONF_RELIABLE = 0.5
+GP_BL_CONF_BLEND = _env_flag("GP_BL_CONF_BLEND", True)
+GP_BL_ELEV_FIX = _env_flag("GP_BL_ELEV_FIX", True)
+
+# --- Corridor altitude cue: WIRED BUT OFF, pending calibration ----------------
+# cy_norm is the only vertical reference between gates, so using it is tempting.
+# Measured over the full 3113-frame recording it is not yet trustworthy enough
+# to drive the thrust loop:
+#   * it is confounded with the band geometry, not just altitude — median
+#     +0.422 over all found frames but +0.060 on the subset whose heading fit
+#     is valid, because a valid fit needs bands reaching higher up the frame.
+#     A cue that moves 0.36 on a change in DETECTION quality would command a
+#     climb for a reason that has nothing to do with height.
+#   * it is noisier than cx: |d cy| p90 0.217, max 0.673 per frame.
+#   * neither its neutral point nor its metres-per-unit is calibrated, and the
+#     20 deg camera tilt means neutral is nowhere near 0.
+# Vertical is where this airframe actually crashes (see the bottom-bar strike
+# forensics on K_P_THRUST and MAX_DESCENT_RATE_MPS), so it does not get an
+# uncalibrated open-loop input on a hunch. bl_cy is now logged next to agl:
+# correlate them over a few runs, set GP_BL_CY_NEUTRAL from the fit, then turn
+# this on. Until then the virtual gate stays elev_valid False (C3).
+GP_BL_ALT_CUE = _env_flag("GP_BL_ALT_CUE", False)
+GP_BL_CY_NEUTRAL = _env_f("GP_BL_CY_NEUTRAL", 0.42)  # measured p50; UNVALIDATED
+GP_BL_ALT_GAIN_M = _env_f("GP_BL_ALT_GAIN", 1.5)  # m of body-z per unit cy
+GP_BL_ALT_MAX_M = 1.0  # hard bound on the fabricated elevation error
 TRACK_ANGLE_MIN_STRENGTH = 0.5  # trust the ribbon HEADING only above this (>=6 bands)
 
 # --- Post-pass turn search ----------------------------------------------------
@@ -83,24 +150,37 @@ TURN_FF_GAIN = 0.5  # deg of yaw per deg of corridor heading (0 disables)
 TURN_FF_MAX_DEG = 8.0  # bounded under the ±12° gate bearing term
 TURN_FF_MIN_BX_M = 5.0  # far approach only — off through the crossing
 TURN_FF_MIN_CONF = 0.5
+# The min-bx cutoff exists so a corridor bend cannot drag the aim off a gate we
+# are threading. A VIRTUAL gate is not a gate: TrackVirtualGate reports the
+# constant TRACK_LOOKAHEAD_M (4.0), which is <= TURN_FF_MIN_BX_M (5.0), so the
+# cutoff fired on EVERY tick where the corridor was the sole guidance source —
+# switching the curvature term off exactly when it was the only thing that knew
+# about the curve. Measured: turn_ff active on 18% of ticks, 26.7% of frames
+# where the corridor was seen.
+GP_TURN_FF_VG = _env_flag("GP_TURN_FF_VG", True)
 
 
-def _turn_yaw_ff(blue_line, bx: float) -> float:
+def _turn_yaw_ff(blue_line, bx: float, virtual: bool = False) -> float:
     """Bounded yaw feed-forward from the corridor's measured bend (deg).
 
-    Requires BOTH rails: a single rail's slope is that rail's, not the
-    corridor's — the same reason TrackVirtualGate gates its `use_angle`.
+    Requires a heading the detector vouches for. `left_found`/`right_found` do
+    NOT vouch for one — they are frame-global and go True as soon as a single
+    band pairs, while 28.6% of band centres are inferred from one rail plus a
+    remembered width. `heading_valid` is the real test: the band centres spanned
+    enough rows to constrain the slope and the fit explained them.
     """
     if blue_line is None or not blue_line.get("found"):
         return 0.0
-    if not (blue_line.get("left_found") and blue_line.get("right_found")):
+    if not blue_line.get("heading_valid", False):
         return 0.0
     if float(blue_line.get("conf", 0.0)) < TURN_FF_MIN_CONF:
         return 0.0
     # Inside the crossing the gate owns the aim; a corridor bend there is the
-    # NEXT leg and would drag us off the opening.
-    if math.isfinite(bx) and bx <= TURN_FF_MIN_BX_M:
-        return 0.0
+    # NEXT leg and would drag us off the opening. A synthetic lookahead point is
+    # not a crossing, so the cutoff must not apply to it.
+    if not (virtual and GP_TURN_FF_VG):
+        if math.isfinite(bx) and bx <= TURN_FF_MIN_BX_M:
+            return 0.0
     hdg_deg = math.degrees(float(blue_line.get("heading_err", 0.0)))
     return float(np.clip(TURN_FF_GAIN * hdg_deg, -TURN_FF_MAX_DEG, TURN_FF_MAX_DEG))
 
@@ -172,36 +252,57 @@ class TrackVirtualGate:
     def __init__(self):
         self._last_fid = None
         self._last = None
-
-        def _f(name, default):
-            try:
-                return float(os.environ.get(name, default))
-            except (TypeError, ValueError):
-                return default
-
-        self.lookahead = _f("GP_TRACK_LOOKAHEAD", TRACK_LOOKAHEAD_M)
-        self.lat_gain = _f("GP_TRACK_LATGAIN", TRACK_LAT_GAIN)
-        self.angle_gain = _f("GP_TRACK_ANGGAIN", TRACK_ANGLE_GAIN)
+        self.detect_errors = 0
+        self.lookahead = _env_f("GP_TRACK_LOOKAHEAD", TRACK_LOOKAHEAD_M)
+        self.lat_gain = _env_f("GP_TRACK_LATGAIN", TRACK_LAT_GAIN)
+        self.angle_gain = _env_f("GP_TRACK_ANGGAIN", TRACK_ANGLE_GAIN)
 
     def reset(self) -> None:
         self._last_fid = None
         self._last = None
 
-    def _vg_from_offset_angle(self, offset, angle, strength, fid, source, use_angle):
+    def _vg_from_offset_angle(
+        self, offset, angle, strength, fid, source, use_angle, cy=None
+    ):
         by = float(offset) * self.lat_gain
         if use_angle:
             ang = max(-TRACK_ANGLE_CLAMP, min(TRACK_ANGLE_CLAMP, float(angle)))
             by += math.tan(ang) * self.lookahead * self.angle_gain
+        # Corridor low in the image => we are riding high above it => the target
+        # sits below us => +body_z in FRD. Scaled by the detection's own
+        # confidence and hard-bounded, because this is a fabricated elevation.
+        bz = 0.0
+        elev_valid = False
+        if GP_BL_ALT_CUE and cy is not None:
+            bz = float(
+                np.clip(
+                    (float(cy) - GP_BL_CY_NEUTRAL)
+                    * GP_BL_ALT_GAIN_M
+                    * float(np.clip(strength, 0.0, 1.0)),
+                    -GP_BL_ALT_MAX_M,
+                    GP_BL_ALT_MAX_M,
+                )
+            )
+            elev_valid = True
         return {
             "body_x_m": self.lookahead,
             "body_y_m": float(by),
-            "body_z_m": 0.0,
+            "body_z_m": bz,
             "frame_id": fid,
-            "reliable": True,
+            # `reliable` drives compute_guidance's WEAK_BLEND_SCALE. Reporting a
+            # flat True made a 2-band, conf-0.2 corridor bank exactly as hard as
+            # a 12-band, conf-1.0 one; the detector's own quality number decides.
+            "reliable": (not GP_BL_CONF_BLEND) or float(strength) >= TRACK_CONF_RELIABLE,
             "source": source,
             "normal_body": None,
             "method": None,
             "strength": float(strength),
+            # body_z_m above is FABRICATED unless the (default-off) altitude cue
+            # filled it in. At body_x_m = TRACK_LOOKAHEAD_M (4.0) >
+            # MIN_BX_FOR_ELEV (2.5) the guidance would otherwise treat a
+            # hold-level zero as a fresh elevation sample, overwrite the decayed
+            # real-gate elev error with it and charge elev_i off it.
+            "elev_valid": elev_valid,
         }
 
     def synth(self, data) -> dict | None:
@@ -223,19 +324,32 @@ class TrackVirtualGate:
                 and bl.get("frame_id") == fid
                 and (bl.get("left_found") or bl.get("right_found"))
             ):
-                both = bool(bl.get("left_found")) and bool(bl.get("right_found"))
                 self._last = {
                     "offset": float(bl["cx_norm"]),
                     "angle": float(bl.get("heading_err", 0.0)),
-                    "strength": 1.0 if both else 0.5,
+                    # The detector's own 0-1 quality, not a two-valued proxy.
+                    # 1.0/0.5-by-left_found-and-right_found threw the number
+                    # away: those flags are frame-global and go True as soon as
+                    # ONE band pairs, so a 2-band lock scored the same 1.0 as a
+                    # 12-band one and banked just as hard.
+                    "strength": float(bl.get("conf", 0.0)),
+                    "cy": float(bl.get("cy_norm", 0.0)),
                     "source": "blueline",
-                    "both": both,
+                    # Heading is only the CORRIDOR's when the detector vouches
+                    # for the fit; otherwise a single rail's slope leaks in.
+                    "both": bool(bl.get("heading_valid", False)),
                 }
             else:
                 try:
                     t = detect_track(frame["img"])
-                except Exception:
+                except Exception as exc:
+                    # Silently swallowing made a persistently throwing detector
+                    # indistinguishable from "no ribbon in view" — the pilot
+                    # flew the blind fallback and the logs showed nothing.
                     t = None
+                    self.detect_errors += 1
+                    if self.detect_errors == 1:
+                        print(f"[gp] detect_track failed ({exc!r}); ribbon fallback off")
                 if t is not None:
                     t = dict(t)
                     t["source"] = "track"
@@ -254,6 +368,7 @@ class TrackVirtualGate:
                 fid,
                 "blueline",
                 use_angle=bool(t.get("both")),
+                cy=t.get("cy"),
             )
         if t.get("strength", 0.0) < TRACK_MIN_STRENGTH:
             return None
@@ -484,7 +599,22 @@ def compute_guidance(
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
 
-    if vision_valid and vision.get("track_break"):
+    # A source change is the same discontinuity as a gate change: the previous
+    # frames came from a DIFFERENT estimator whose idea of this gate is offset
+    # (measured |dby| p90 0.807 m vs 0.074 m within one source), so every
+    # derivative taken across it is a phantom rate.
+    src_now = vision.get("source") if vision_valid else None
+    src_switch = bool(
+        GP_SRC_RESET
+        and vision_valid
+        and src_now
+        and state.get("prev_source")
+        and src_now != state["prev_source"]
+    )
+    if vision_valid:
+        state["prev_source"] = src_now
+
+    if vision_valid and (vision.get("track_break") or src_switch):
         # The smoother switched gates: previous frames describe a DIFFERENT
         # target, so any derivative across the switch is a phantom rate (a
         # 2 m by-jump in one frame reads as ~570 deg/s bearing rate → pins
@@ -497,7 +627,17 @@ def compute_guidance(
         state["gate_tilt_ema"] = None
 
     elev_rate = 0.0
-    elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
+    # `elev_valid: False` marks an estimate whose body_z is fabricated rather
+    # than measured (the corridor virtual gate holds level). Treating one as a
+    # fresh sample overwrites the decayed real-gate error with a hard zero and
+    # charges the elevation integrator off it.
+    elev_declared = (not GP_BL_ELEV_FIX) or (vision or {}).get("elev_valid", True)
+    elev_fresh = (
+        vision_valid
+        and bool(elev_declared)
+        and bx > MIN_BX_FOR_ELEV
+        and vis_frame_id is not None
+    )
     if elev_fresh:
         qw, qx, qy, qz = quat
         gate_pD = (
@@ -620,7 +760,9 @@ def compute_guidance(
     # bank, so this can bias which way we face without ever pulling the aim off
     # a locked opening. Inert when no gate is in view too (bx is NaN there),
     # which is exactly the post-pass window the turns were failing in.
-    turn_ff_deg = _turn_yaw_ff(blue_line, bx)
+    turn_ff_deg = _turn_yaw_ff(
+        blue_line, bx, virtual=(vision or {}).get("source") in ("blueline", "track")
+    )
     yaw_err += turn_ff_deg
 
     is_new_d = (
@@ -829,9 +971,16 @@ def compute_guidance(
         # is USED (no gate), never when it is merely SEEN, so detection rate was
         # unmeasurable from the logs.
         "turn_ff_deg": turn_ff_deg,
+        "src_switch": src_switch,
         "bl_found": bool((blue_line or {}).get("found", False)),
         "bl_hdg": float((blue_line or {}).get("heading_err", float("nan"))),
         "bl_conf": float((blue_line or {}).get("conf", float("nan"))),
+        "bl_hdg_valid": bool((blue_line or {}).get("heading_valid", False)),
+        "bl_span": float((blue_line or {}).get("span_frac", float("nan"))),
+        "bl_paired": int((blue_line or {}).get("paired_bands", 0) or 0),
+        # Logged next to agl so the altitude cue can be calibrated offline
+        # before GP_BL_ALT_CUE is ever switched on. See its constant block.
+        "bl_cy": float((blue_line or {}).get("cy_norm", float("nan"))),
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -951,6 +1100,10 @@ class GPPilot:
         self._log = None
         self._log_wr = None
         self._log_last_flush = 0.0
+        # A reset closes the log and the next flying tick opens a new one, so
+        # one process writes several CSVs. Numbering them keeps each attempt
+        # distinct under the single shared RUN_ID.
+        self._attempt = 0
         self._debug = os.environ.get("GP_DEBUG", "").strip() in ("1", "true", "yes")
         # Original AndurilGP wire behavior: degree commands on the attitude
         # quaternion at 60 Hz (the encoding that flew the course).
@@ -962,6 +1115,11 @@ class GPPilot:
     @property
     def gates_passed(self) -> int:
         return self.n_passed
+
+    @property
+    def flying(self) -> bool:
+        """True while actually flying the course — not holding on the pad."""
+        return self.phase in (Phase.FLYING, Phase.BACKOFF)
 
     def on_attempt_start(self) -> None:
         self._reset_state()
@@ -1002,32 +1160,38 @@ class GPPilot:
         self._flying_since = None
         self._go_start_ms = None
         self._floor_z0 = None
-        self._close_log()
+        self._close_log(reason="reset")
 
     def _open_log(self) -> None:
         self._close_log()
+        self._attempt += 1
         try:
             os.makedirs(os.path.join("rl", "data"), exist_ok=True)
-            path = os.path.join("rl", "data", time.strftime("gp_log_%Y%m%d_%H%M%S.csv"))
+            # RUN_ID (not the wall clock) so this pairs exactly with the run's
+            # recording, which used to stamp itself minutes earlier.
+            path = os.path.join("rl", "data", f"gp_log_{RUN_ID}_a{self._attempt}.csv")
             self._log = open(path, "w", newline="")
             self._log_wr = csv.writer(self._log)
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
                 "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
+                "bl_hdg_valid bl_span bl_paired bl_cy src_switch "
                 "source gate".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
+            run_meta.note_attempt_start(self._attempt, path)
         except OSError as e:  # telemetry must never ground the pilot
             print(f"[gp] flight log unavailable: {e}", flush=True)
             self._log, self._log_wr = None, None
 
-    def _close_log(self) -> None:
+    def _close_log(self, reason: str | None = None) -> None:
         if self._log is not None:
             try:
                 self._log.close()
             except OSError:
                 pass
+            run_meta.note_attempt_end(gates=self.n_passed, reason=reason)
         self._log, self._log_wr = None, None
 
     def _log_tick(self, att, cmds, thrust, vY, vD, dbg, vX=float("nan")) -> None:
@@ -1055,6 +1219,11 @@ class GPPilot:
                     str(int(dbg.get("bl_found", False))),
                     f"{dbg.get('bl_hdg', float('nan')):.4f}",
                     f"{dbg.get('bl_conf', float('nan')):.3f}",
+                    str(int(dbg.get("bl_hdg_valid", False))),
+                    f"{dbg.get('bl_span', float('nan')):.3f}",
+                    str(int(dbg.get("bl_paired", 0) or 0)),
+                    f"{dbg.get('bl_cy', float('nan')):.3f}",
+                    str(int(dbg.get("src_switch", False))),
                 ]
                 + [src, str(self.n_passed)]
             )
@@ -1062,7 +1231,7 @@ class GPPilot:
                 self._log.flush()
                 self._log_last_flush = now
         except (OSError, ValueError, KeyError):
-            self._close_log()
+            self._close_log(reason="log_error")
 
     def _physics_live(self, imu) -> bool:
         """Track the IMU sensor clock; frozen clock = sim idled the physics.
@@ -1225,7 +1394,13 @@ class GPPilot:
             self._trackline.synth(self.data) if self._trackline is not None else None
         )
 
-        vision = self.gate_smoother.update(self.data)
+        # Own-motion lets the smoother advance a stale YOLO packet instead of
+        # handing the pilot to a different estimator (13 switches/s on CPU
+        # inference); harmless when GP_YOLO_PROPAGATE is off.
+        vision = self.gate_smoother.update(
+            self.data,
+            motion={"vX": vX, "vY": vY, "vD": vD, "yaw_rate_rps": yaw_rate_rps},
+        )
         # Drop far/phantom locks (post-pass background gate, garbage YOLO) BEFORE
         # they can steer or feed the velocity tracker — banking at a 70 m phantom
         # is what crashed the run after gate 4.
@@ -1553,4 +1728,4 @@ class GPPilot:
 
     def shutdown(self) -> None:
         self.est.stop()
-        self._close_log()
+        self._close_log(reason="shutdown")

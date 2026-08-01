@@ -22,8 +22,14 @@ import time
 
 import cv2
 
+from simulator.run_id import RUN_ID
+
 _WINDOW_NAME = "drone vision"
 _FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
+# Written into the container header, but frames are only written when a new
+# camera frame arrives, so the real rate is lower and varies per run. The true
+# rate is measured below and published in the sidecar -- do not use this to map
+# a timestamp to a frame number.
 _FPS = 30.0
 # All recordings collect in one folder of their own. runs/ itself is shared
 # with the attitude harness, which drops a directory per run — mixing 67 MB
@@ -31,12 +37,11 @@ _FPS = 30.0
 _RECORD_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "runs", "videos"
 )
-# Stamped per recording so runs accumulate instead of overwriting each other —
-# a rare good run used to be destroyed by the next launch. Same %Y%m%d_%H%M%S
-# convention as rl/data/gp_log_*.csv, so a video pairs with its telemetry by
-# filename (stamped at the first frame vs the log's race start, so expect a few
-# seconds of skew — pair by nearest, not exact).
-_RECORD_FMT = "vision_%Y%m%d_%H%M%S.mp4"
+# Named from RUN_ID, not the wall clock at the first frame. Both this and
+# rl/data/gp_log_<RUN_ID>_a<N>.csv key off the same id, so a recording and its
+# telemetry pair exactly instead of by nearest timestamp — the video used to
+# stamp before the countdown and the log after it, minutes apart on a slow start.
+_RECORD_FMT = "vision_{run_id}.mp4"
 
 # Set False to skip the mp4 (live window only).
 RECORD = True
@@ -44,6 +49,42 @@ RECORD = True
 _video_writer = None
 _record_path = None
 _window_open = False
+
+# Measured while recording, read by run_meta at close() to publish the real
+# frame rate and the epoch origin of the burned-in t= overlay.
+_frames = 0
+_first_unix = None
+_first_elapsed = None
+_last_unix = None
+_size = None
+
+
+def _record_name():
+    """Filename for this process's recording. Reads the globals at call time so
+    tests can patch either piece."""
+    return _RECORD_FMT.format(run_id=RUN_ID)
+
+
+def stats():
+    """What was recorded this run, for the sidecar. Empty dict if nothing was."""
+    if not _frames or _first_unix is None:
+        return {}
+    span = (_last_unix or _first_unix) - _first_unix
+    return {
+        "path": _record_path,
+        "fps_nominal": _FPS,
+        # Frames land at the camera's rate, not _FPS. Mapping a telemetry
+        # timestamp to a frame needs this measured value.
+        "fps_actual": round(_frames / span, 3) if span > 0 else None,
+        "frames": _frames,
+        "width": _size[0] if _size else None,
+        "height": _size[1] if _size else None,
+        "first_frame_unix": round(_first_unix, 3),
+        # The overlay clock differs per entry point (time.time in auto_gp,
+        # time.monotonic in main/vision_view), so record where it started
+        # rather than assuming an epoch.
+        "first_frame_overlay_s": _first_elapsed,
+    }
 
 
 def pick(data):
@@ -87,6 +128,7 @@ def tick(frame, elapsed):
     pump waitKey so the window stays responsive while waiting for the first
     sim frame. `elapsed` (s) is drawn so screen-recordings self-timestamp."""
     global _video_writer, _record_path
+    global _frames, _first_unix, _first_elapsed, _last_unix, _size
     if not _window_open:
         return
 
@@ -106,12 +148,14 @@ def tick(frame, elapsed):
             if _video_writer is None:
                 os.makedirs(_RECORD_DIR, exist_ok=True)
                 h, w = frame.shape[:2]
-                _record_path = os.path.join(
-                    _RECORD_DIR, time.strftime(_RECORD_FMT)
-                )
+                _record_path = os.path.join(_RECORD_DIR, _record_name())
                 _video_writer = cv2.VideoWriter(_record_path, _FOURCC, _FPS, (w, h))
+                _frames, _last_unix = 0, None
+                _first_unix, _first_elapsed, _size = time.time(), elapsed, (w, h)
                 print(f"[display] recording -> {_record_path}", flush=True)
             _video_writer.write(frame)
+            _frames += 1
+            _last_unix = time.time()
         cv2.imshow(_WINDOW_NAME, frame)
 
     # waitKey is what actually paints the window + pumps OS events.
@@ -125,6 +169,12 @@ def close():
         _video_writer.release()
         _video_writer = None
         print(f"[display] video saved -> {_record_path}", flush=True)
+        # Publish the measured rate + size next to the mp4. Imported here, not
+        # at module scope, so the recorder keeps working if run_meta is missing.
+        from simulator import run_meta
+
+        run_meta.note_video(stats())
+        run_meta.finalize()
         _record_path = None
     if _window_open:
         cv2.destroyAllWindows()

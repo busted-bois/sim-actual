@@ -11,15 +11,24 @@ import traceback
 # Select GP pilot before Controller is constructed (via setup → main path).
 os.environ["AUTO_PILOT"] = "gp"
 
+# race_monitor reads these at import time and the import chain below reaches it
+# (setup → controller → auto_flight → race_monitor), so they must be set first.
+# Gate 1 gets the looser budget: spawn is ~15 m before gate 0 at ~2.2 m/s cruise,
+# so 10 s would reset before the drone could ever reach it.
+os.environ.setdefault("GATE_PROGRESS_TIMEOUT_S", "10")
+os.environ.setdefault("GATE1_TIMEOUT_S", "20")
+
 from simulator import display
+from simulator.gate_watchdog import GateStallWatchdog
 from simulator.setup import setup_components
 
+_OFF = ("0", "false", "no")
+
 # Live vision window (YOLO-annotated camera feed). GP_DISPLAY=0 to disable.
-SHOW_VISION = os.environ.get("GP_DISPLAY", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
+SHOW_VISION = os.environ.get("GP_DISPLAY", "1").strip().lower() not in _OFF
+
+# Reset the sim and re-fly when gate progress stops. GP_STALL_RESET=0 to disable.
+STALL_RESET = os.environ.get("GP_STALL_RESET", "1").strip().lower() not in _OFF
 
 SIM_SERVER_UDP_IP = "127.0.0.1"
 SIM_SERVER_UDP_PORT = 14550
@@ -43,6 +52,10 @@ vision_rx = components["vision_rx"]
 print("Arming drone...", flush=True)
 controller.arm()
 
+watchdog = GateStallWatchdog(
+    controller, controller.pilot, shared_data, enabled=STALL_RESET
+)
+
 print("Starting control loop...", flush=True)
 if SHOW_VISION:
     # imshow/waitKey must run on the thread that created the window — this
@@ -63,6 +76,9 @@ try:
                 traceback.print_exc()
                 _last_tb = now
             time.sleep(1.0 / 90.0)  # keep loop cadence if update() bailed early
+        # Outside the try above on purpose: a watchdog fault must be loud, not
+        # swallowed by the rate-limited tick-error path.
+        watchdog.tick()
         if SHOW_VISION:
             img, tag = display.pick(shared_data)
             if tag is not None and tag != _last_shown_tag:

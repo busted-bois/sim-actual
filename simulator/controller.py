@@ -221,6 +221,24 @@ class Controller:
         self._yaw_rate = yaw_rate
         self._thrust = thrust
 
+    def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        """Send body-rate + thrust directly this tick (used by manual flight).
+
+        Manual flight drives its own control loop (manual.py) rather than
+        Controller.update(), so it commands the wire immediately instead of
+        latching values for update() to send.
+        """
+        if self.estimator is not None:
+            self.estimator.thrust_cmd = float(thrust)
+        _send_attitude_rates(
+            self.sim_conn,
+            self.system_boot_ms,
+            roll_rate=float(roll_rate),
+            pitch_rate=float(pitch_rate),
+            yaw_rate=float(yaw_rate),
+            thrust=float(thrust),
+        )
+
     def set_attitude_quat_deg(self, roll_deg, pitch_deg, yaw_deg, thrust):
         self._quat_roll_deg = roll_deg
         self._quat_pitch_deg = pitch_deg

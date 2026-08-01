@@ -1,43 +1,55 @@
-# Run recordings
+# Run archive
 
-Vision recordings from the sim -- one mp4 per run -- kept as shared reference
-for review and finetuning. Stored with [Git LFS](https://git-lfs.com); the
-files here are pointers until you pull them.
+Every run the team publishes, kept as shared reference for review and
+finetuning. Three things travel together, all keyed by the same run id:
 
-Naming:
+    videos/<member>_vision_<RUN_ID>.mp4          the recording      (Git LFS)
+    videos/<member>_vision_<RUN_ID>.json         what the run did   (regular git)
+    telemetry/<member>_gp_log_<RUN_ID>_a<N>.csv  40 Hz trace, per attempt
 
-    <member>_vision_<YYYYmmdd_HHMMSS>.mp4
+`RUN_ID` is `%Y%m%d_%H%M%S`, minted once per process, so a video and its
+telemetry pair **exactly** -- no nearest-timestamp guessing.
 
-The stamp is the run's first frame and uses the same `%Y%m%d_%H%M%S`
-convention as `rl/data/gp_log_*.csv`, so a video pairs with its telemetry by
-filename. The log stamps at race start, so expect a few seconds of skew --
-pair by nearest, not exact.
+The sidecar is the point: it says how far the run got before you download
+anything. Gates reached, outcome, attempt count, the git sha that flew it, and
+the video's real frame rate.
 
-## Getting the videos
+## Reading it
 
-```bash
-git lfs install
-git fetch origin videos
-git checkout videos
-```
-
-That gives you pointer files. Then fetch the payload you actually want --
-everything here is ~65 MB per video, so prefer a filter:
+Do **not** `git checkout videos` -- it swaps your working tree mid-session.
+From your normal branch:
 
 ```bash
-git lfs pull --include "videos/ryan_*"        # one member
-git lfs pull --include "videos/*_20260728_*"  # one day
-git lfs pull                                  # all of it
+make videos-index                     # every run: target, gates, outcome, length
+make videos-sync                      # sidecars + telemetry -> runs/archive/
+make videos-get RUN=<run>             # one recording (~65 MB)
+make videos-frames RUN=<run> AT=12.5  # write the frame at t=12.5s
 ```
+
+`videos-index` and `videos-sync` cost **zero LFS bandwidth** -- they read
+sidecars and CSVs, which are regular git objects, never video payload. Only
+`videos-get` downloads, and it prints the size first.
+
+Frame extraction uses the sidecar's measured `fps_actual`, not the container's
+nominal 30 -- the recorder only writes a frame when the camera delivers one, so
+seeking on the header value drifts badly.
 
 ## Adding your own
 
-From your working branch, with recordings sitting in `runs/videos/`:
+From your working branch, with recordings in `runs/videos/`:
 
 ```bash
-make push-videos
+make push-videos       # or: make push-videos-dry, to see what would upload
 ```
 
-It copies every local recording that is not already here, commits, and pushes
-to this branch. Re-running is safe: files already published are skipped. Use
-`make push-videos-dry` first if you want to see what would be uploaded.
+Publishes every local recording, sidecar, and CSV not already here. Re-running
+is safe, and each artifact is judged on its own -- a video published before
+sidecars existed picks one up on the next run. Needs
+[git-lfs](https://git-lfs.com) installed.
+
+## Quota
+
+GitHub's free LFS tier is **1 GB storage / 1 GB per month bandwidth** for the
+org -- roughly 15 videos at ~65 MB each. Only the mp4s count against it;
+sidecars and telemetry are ordinary git objects. Prefer publishing runs worth
+keeping over every run, and `make videos-index` before `videos-get`.

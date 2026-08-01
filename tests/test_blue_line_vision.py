@@ -7,7 +7,10 @@ import cv2
 import numpy as np
 
 from simulator.blue_line_vision import (
+    _MAX_CX_STEP,
+    _MIN_HDG_SPAN_FRAC,
     BlueLineTracker,
+    _fit,
     cyan_mask,
     detect_blue_lines,
     estimate_from_dict,
@@ -216,6 +219,91 @@ class TrackerHeadingGuardTests(unittest.TestCase):
         self.assertGreater(est3.heading_err, est2.heading_err)  # converges
 
 
+class HeadingValidityTests(unittest.TestCase):
+    """heading_err is only published when the fit can actually support it."""
+
+    def test_short_span_reports_no_heading(self):
+        # Corridor confined to the bottom of the frame: the band centres span
+        # too few rows to constrain a slope, so the honest answer is "none".
+        img = _frame()
+        _draw_corridor(img, 260, 380, y0=320, y1=355)
+        est, _ = detect_blue_lines(img)
+        if est.found:
+            self.assertLess(est.span_frac, _MIN_HDG_SPAN_FRAC)
+            self.assertFalse(est.heading_valid)
+            self.assertEqual(est.heading_err, 0.0)
+
+    def test_full_height_bend_reports_a_heading(self):
+        img = _frame()
+        _draw_bend(img, 200, 430, 440, 640)
+        est, _ = detect_blue_lines(img)
+        self.assertTrue(est.found)
+        self.assertGreaterEqual(est.span_frac, _MIN_HDG_SPAN_FRAC)
+        self.assertTrue(est.heading_valid)
+        self.assertGreater(est.heading_err, 0.0)  # bends right
+
+    def test_span_frac_is_reported_even_when_gated(self):
+        img = _frame()
+        _draw_corridor(img, 200, 440)
+        est, _ = detect_blue_lines(img)
+        self.assertTrue(est.found)
+        self.assertGreater(est.span_frac, 0.0)
+        self.assertGreaterEqual(est.paired_bands, 1)
+
+
+class RailFitTests(unittest.TestCase):
+    def test_fitted_rails_cannot_cross(self):
+        # Independently fitted rails invert on 15.4% of real frames, which
+        # flips the inferred side and puts the centre a full width wrong.
+        # centre +- |half_width| makes that unrepresentable.
+        vs = [40.0, 90.0, 140.0]
+        pl = [100.0, 90.0, 80.0]
+        pr = [110.0, 140.0, 170.0]  # diverging fast enough to cross above
+        fit_c = _fit(vs, [0.5 * (a + b) for a, b in zip(pl, pr)])
+        fit_hw = _fit(vs, [0.5 * (b - a) for a, b in zip(pl, pr)])
+        indep_l, indep_r = _fit(vs, pl), _fit(vs, pr)
+        crossed = False
+        for v in range(-200, 400, 5):
+            lo = fit_c(v) - abs(fit_hw(v))
+            hi = fit_c(v) + abs(fit_hw(v))
+            self.assertLessEqual(lo, hi, f"centre-fit rails crossed at v={v}")
+            crossed = crossed or indep_r(v) < indep_l(v)
+        self.assertTrue(crossed, "test data must actually cross under indep fits")
+
+
+class CxFilterTests(unittest.TestCase):
+    def test_single_frame_jump_is_clamped(self):
+        # cx reaches the roll command through TRACK_LAT_GAIN and had no filter
+        # at all; measured jumps up to 0.709 in one frame.
+        tracker = BlueLineTracker()
+        left = _frame()
+        _draw_corridor(left, 120, 260)
+        est1, _ = tracker.update(left, 1)
+        self.assertTrue(est1.found)
+
+        right = _frame()
+        _draw_corridor(right, 400, 540)
+        est2, _ = tracker.update(right, 2)
+        self.assertTrue(est2.found)
+        self.assertLessEqual(abs(est2.cx_norm - est1.cx_norm), _MAX_CX_STEP + 1e-6)
+        self.assertLess(est2.conf, est1.conf)  # flagged as suspect
+
+        est3, _ = tracker.update(right, 3)
+        self.assertGreater(est3.cx_norm, est2.cx_norm)  # converges toward truth
+
+    def test_reset_clears_cx_memory(self):
+        tracker = BlueLineTracker()
+        left = _frame()
+        _draw_corridor(left, 120, 260)
+        tracker.update(left, 1)
+        tracker.reset()
+        right = _frame()
+        _draw_corridor(right, 400, 540)
+        est, _ = tracker.update(right, 2)
+        raw, _ = detect_blue_lines(right)
+        self.assertAlmostEqual(est.cx_norm, raw.cx_norm, places=6)
+
+
 class SerializationTests(unittest.TestCase):
     def test_round_trip_preserves_new_fields(self):
         img = _frame()
@@ -228,6 +316,9 @@ class SerializationTests(unittest.TestCase):
         self.assertEqual(back.single_rail, est.single_rail)
         self.assertEqual(back.frame_id, 7)
         self.assertEqual(len(back.points), len(est.points))
+        self.assertEqual(back.heading_valid, est.heading_valid)
+        self.assertAlmostEqual(back.span_frac, est.span_frac)
+        self.assertEqual(back.paired_bands, est.paired_bands)
 
 
 if __name__ == "__main__":
