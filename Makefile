@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry videos-index videos-sync videos-get videos-frames probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
+.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry videos-index videos-sync videos-get videos-frames gp-score bl-replay peek-replay probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_gate_watchdog tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display tests.test_gate_occlusion tests.test_run_id tests.test_run_meta -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_gate_watchdog tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display tests.test_gate_occlusion tests.test_run_id tests.test_run_meta tests.test_gp_score -v
 
 sim:
 	uv run main.py
@@ -94,6 +94,30 @@ videos-frames:
 	uv run scripts/video_frames.py runs/archive/videos/$(RUN).mp4 \
 		$(if $(AT),--at $(AT),) $(if $(EVERY),--every $(EVERY),) \
 		--out runs/archive/frames/$(RUN)
+
+# --- Did that change help? ----------------------------------------------------
+# All three score a change WITHOUT flying it again, and all three take
+# --json <f> to save a baseline and --baseline <f> to diff against one.
+#
+# gp-score reads the flight CSVs + sidecars for the PILOT. It splits the report
+# in two on purpose: gate counts (0-5, high variance, a handful of attempts) get
+# NO verdict, while per-tick metrics -- command saturation, inversion, blind
+# time -- are judged at 10^3-10^4 samples, where a difference is real.
+#   make gp-score                       every run, grouped by config
+#   make gp-score ARGS="--run 20260731_181602"
+#   make gp-score ARGS="--json before.json"   then later:  ARGS="--baseline before.json"
+gp-score:
+	uv run scripts/gp_score.py $(ARGS)
+
+# bl-replay scores the blue-line corridor DETECTOR off a recorded mp4. It has
+# already falsified two plausible-looking detector changes offline.
+#   make bl-replay ARGS="runs/videos/vision_<run>.mp4 --json before.json"
+bl-replay:
+	uv run scripts/bl_replay.py $(ARGS)
+
+# peek-replay does the same for the occlusion PEEK cue (gate-3 pillar dodge).
+peek-replay:
+	uv run scripts/peek_replay.py $(ARGS)
 
 # Same, but only prints what would be uploaded.
 push-videos-dry:

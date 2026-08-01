@@ -19,6 +19,7 @@ lost run.
 
 import atexit
 import functools
+import hashlib
 import json
 import os
 import subprocess
@@ -31,19 +32,30 @@ _DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runs", "videos"
 _PATH = os.path.join(_DIR, f"vision_{RUN_ID}.json")
 
 _state = {
-    "schema": 1,
+    "schema": 2,
     "run_id": RUN_ID,
     # Filled at finalize; declared here so the JSON reads top-down.
     "target": None,
     "entry": None,
     "pilot": None,
     "git": None,
+    "config": None,
+    "track": None,
+    "log_columns": None,
     "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "ended_utc": None,
     "video": None,
     "attempts": [],
 }
 _finalized = False
+
+# Every tuning knob on this branch is an env var (docs/blueline-method.md
+# "Switches"), and none of them were recorded -- so two runs at the same sha
+# were indistinguishable and A/B was impossible. Captured by PREFIX, not by a
+# hand-written list: there are already 26+ names and a list drifts out of date
+# the same way the CSV header did. Only vars actually set are captured, which
+# is right -- the defaults live in code, and sha+diff_sha pin that.
+_CONFIG_PREFIXES = ("GP_", "BL_", "GATE", "AUTO_", "SIM_RESET", "RACE_", "SKIP_")
 
 
 def _guard(fn):
@@ -86,7 +98,20 @@ def _describe_process():
 
 def _git():
     """Which code flew this. One subprocess at finalize -- never at import, so
-    nothing is added to a flight process's startup."""
+    nothing is added to a flight process's startup.
+
+    `dirty` alone is useless for A/B: every recorded run so far flew dirty, so
+    the sha identified nothing. The three fields below make a dirty tree
+    identifiable without storing the diff itself:
+
+      diff_sha   hash of the tracked-file diff.
+      untracked  a brand-new module is invisible to `git diff HEAD`, and a new
+                 module is exactly the thing you would be A/B-ing.
+      submodule  vendor/AndurilGP is a submodule; its dirt does not appear in
+                 the parent's diff at all. Without this, two runs against
+                 different vendor trees hash identically -- silently poisoning
+                 the exact comparison these fields exist to protect.
+    """
     root = os.path.dirname(os.path.dirname(__file__))
 
     def run(*args):
@@ -94,10 +119,32 @@ def _git():
             args, cwd=root, capture_output=True, text=True, timeout=5
         ).stdout.strip()
 
+    porcelain = run("git", "status", "--porcelain")
+    diff = run("git", "diff", "HEAD")
     return {
         "sha": run("git", "rev-parse", "--short", "HEAD") or None,
         "branch": run("git", "rev-parse", "--abbrev-ref", "HEAD") or None,
-        "dirty": bool(run("git", "status", "--porcelain")),
+        "dirty": bool(porcelain),
+        "diff_sha": hashlib.sha1(diff.encode("utf-8", "replace")).hexdigest()[:12]
+        if diff
+        else None,
+        "untracked": sorted(
+            ln[3:] for ln in porcelain.splitlines() if ln.startswith("?? ")
+        )
+        or None,
+        "submodule": run("git", "rev-parse", "HEAD:vendor/AndurilGP")[:12] or None,
+    }
+
+
+def _config():
+    """Env knobs actually set for this run, plus the raw argv."""
+    return {
+        "env": {
+            k: v
+            for k, v in sorted(os.environ.items())
+            if k.startswith(_CONFIG_PREFIXES)
+        },
+        "argv": list(sys.argv),
     }
 
 
@@ -177,6 +224,34 @@ def note_outcome(outcome, attempt=None, lap_s=None, active=None):
 
 
 @_guard
+def note_track(gates):
+    """Which course was flown. `gates` is data["track_gates"].
+
+    Two runs on different courses are not comparable, and nothing otherwise
+    stops an aggregate pass averaging across them. Gate 0 pins the layout
+    without storing the whole map."""
+    if not gates:
+        return
+    pos = (gates[0] or {}).get("position_ned")
+    _state["track"] = {
+        "n_gates": len(gates),
+        "gate0_ned": [round(float(v), 2) for v in tuple(pos)[:3]]
+        if pos is not None and len(tuple(pos)) >= 3
+        else None,
+    }
+    _write()
+
+
+@_guard
+def note_log_columns(columns):
+    """The flight-log header. Recorded so an aggregate pass can reject a
+    legacy schema without opening a single CSV -- the header IS the version,
+    which also catches column REORDERING that a version int would not."""
+    _state["log_columns"] = list(columns)
+    _write()
+
+
+@_guard
 def note_video(stats):
     """What display recorded: real frame rate, size, and the epoch origin of
     the burned-in t= overlay. `stats` is simulator.display.stats()."""
@@ -204,7 +279,14 @@ def finalize():
     _state["ended_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     entry, pilot, target = _describe_process()
     _state["entry"], _state["pilot"], _state["target"] = entry, pilot, target
-    _state["git"] = _git()
+    # Config first: it cannot fail, while _git() shells out. Guarded
+    # separately because @_guard wraps this whole function -- a git that is
+    # missing, slow, or unreachable used to discard every other field with it.
+    _state["config"] = _config()
+    try:
+        _state["git"] = _git()
+    except Exception:  # noqa: BLE001 - see module docstring
+        _state["git"] = None
     _write()
 
 

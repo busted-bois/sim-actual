@@ -148,6 +148,80 @@ class SidecarTests(unittest.TestCase):
             self.assertIsInstance(sc.read(), dict)
 
 
+class ConfigCaptureTests(unittest.TestCase):
+    """What made two runs at the same sha indistinguishable, and now doesn't."""
+
+    def test_finalize_captures_tuning_env_by_prefix(self):
+        with _Sidecar(self) as sc:
+            env = {"GP_PEEK": "1", "BL_CRUISE_KMH": "9", "PATH": "/nope"}
+            with patch.dict(os.environ, env, clear=True):
+                run_meta.note_attempt_start(1, "x.csv")
+                run_meta.finalize()
+            cfg = sc.read()["config"]
+            self.assertEqual(cfg["env"], {"GP_PEEK": "1", "BL_CRUISE_KMH": "9"})
+            # Unrelated vars must not bloat the sidecar.
+            self.assertNotIn("PATH", cfg["env"])
+            self.assertIsInstance(cfg["argv"], list)
+
+    def test_unset_knobs_are_absent_not_defaulted(self):
+        # Defaults live in code, which sha+diff_sha already pin. Recording a
+        # guessed default would claim a value the run never actually used.
+        with _Sidecar(self) as sc:
+            with patch.dict(os.environ, {}, clear=True):
+                run_meta.note_attempt_start(1, "x.csv")
+                run_meta.finalize()
+            self.assertEqual(sc.read()["config"]["env"], {})
+
+    def test_git_identifies_a_dirty_tree(self):
+        with _Sidecar(self) as sc:
+            run_meta.note_attempt_start(1, "x.csv")
+            run_meta.finalize()
+            git = sc.read()["git"]
+            # `dirty` alone was useless: every recorded run flew dirty, so the
+            # sha identified nothing. These are what make it identifiable.
+            for key in ("sha", "branch", "dirty", "diff_sha", "untracked", "submodule"):
+                self.assertIn(key, git)
+
+    def test_a_broken_git_does_not_discard_the_rest(self):
+        # _git() shells out; @_guard wraps all of finalize, so an exception
+        # there used to take config/entry/ended_utc down with it.
+        with _Sidecar(self) as sc:
+            with patch.object(run_meta, "_git", side_effect=OSError("no git")):
+                run_meta.note_attempt_start(1, "x.csv")
+                run_meta.finalize()
+            got = sc.read()
+            self.assertIsNone(got["git"])
+            self.assertIsNotNone(got["config"])
+            self.assertIsNotNone(got["ended_utc"])
+
+    def test_track_records_the_course_flown(self):
+        with _Sidecar(self) as sc:
+            run_meta.note_attempt_start(1, "x.csv")
+            run_meta.note_track(
+                [
+                    {"gate_id": 0, "position_ned": (1.234, -2.0, 3.0)},
+                    {"gate_id": 1, "position_ned": (9.0, 9.0, 9.0)},
+                ]
+            )
+            track = sc.read()["track"]
+            self.assertEqual(track["n_gates"], 2)
+            self.assertEqual(track["gate0_ned"], [1.23, -2.0, 3.0])
+
+    def test_track_ignores_an_empty_burst(self):
+        with _Sidecar(self) as sc:
+            run_meta.note_attempt_start(1, "x.csv")
+            run_meta.note_track([])
+            self.assertIsNone(sc.read()["track"])
+
+    def test_log_columns_let_a_reader_reject_a_schema_unopened(self):
+        from simulator.gp_pilot import LOG_COLUMNS
+
+        with _Sidecar(self) as sc:
+            run_meta.note_attempt_start(1, "x.csv")
+            run_meta.note_log_columns(LOG_COLUMNS)
+            self.assertEqual(sc.read()["log_columns"], list(LOG_COLUMNS))
+
+
 class NeverGroundsThePilotTests(unittest.TestCase):
     """The contract that actually matters: sidecar trouble is swallowed."""
 

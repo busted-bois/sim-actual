@@ -564,6 +564,48 @@ class Phase(Enum):
     BACKOFF = auto()
 
 
+# Flight-log schema. THE HEADER IS THE VERSION: scripts/gp_score.py compares a
+# log's header against this tuple and refuses anything that differs, which
+# catches a reordering that a version integer would wave through. The schema
+# has already drifted nine times unversioned (16/20/22/23/27/28/32/33 columns
+# across 63 logs), so no reader can assume a layout.
+#
+# Rows are built as a dict and emitted in THIS order (_log_tick), so a column
+# added here can never desync from the row -- the previous positional build
+# made that a live risk and `dbg[k]` on a missing key silently killed telemetry
+# mid-flight via _close_log(reason="log_error").
+LOG_COLUMNS = (
+    "t",
+    # Measured attitude. `up` is the UNCLIPPED cos(roll)*cos(pitch): the tilt
+    # used by the thrust divisor is clamped to [0.7, 1.0], which hides exactly
+    # the inversion you want to see in a crash trace.
+    "roll", "pitch", "yaw", "up",
+    "cmd_roll_deg", "cmd_pitch_deg", "cmd_yaw_deg", "thrust",
+    # Guidance. desired_roll/bearing_deg are the PRE-clamp demand -- with only
+    # cmd_roll_deg (post-slew, post-SEARCH_ROLL_SCALE) saturation is
+    # indistinguishable from a small demand.
+    "bx", "by", "bz", "blend", "bearing_deg", "desired_roll", "d_lat", "d_vert",
+    # vY_imu is the raw body velocity; vY_fused is what compute_guidance
+    # actually steers on after the optical-flow blend at the OF_ALPHA line.
+    # The old single `vY` column logged the raw one, so past sideslip analysis
+    # read a signal the controller never used.
+    "vY_imu", "vY_fused", "vD", "vX", "v_target", "pitch_des",
+    "elev_i", "elev_err", "agl", "turn_ff",
+    # Whether vision drove the command at all -- the first question a crash
+    # trace has to answer, and previously computed then discarded.
+    "reliable", "vision_valid",
+    "bl_found", "bl_hdg", "bl_conf", "bl_hdg_valid", "bl_span", "bl_paired",
+    "bl_cy", "bl_gap",
+    "src_switch", "source", "infer_ms",
+    # `gate` is the pilot's passed COUNT; `gate_id` is the sim's active index.
+    # They disagree when a pass is registered on one side only, which is
+    # diagnostic on its own.
+    "mode", "gate", "gate_id",
+    "peek_side", "peek_strength", "peek_active", "occ_gap",
+    "collision",
+)
+
+
 def compute_guidance(
     *,
     roll_deg: float,
@@ -1212,15 +1254,11 @@ class GPPilot:
             path = os.path.join("rl", "data", f"gp_log_{RUN_ID}_a{self._attempt}.csv")
             self._log = open(path, "w", newline="")
             self._log_wr = csv.writer(self._log)
-            self._log_wr.writerow(
-                "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
-                "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des elev_i elev_err agl turn_ff bl_found bl_hdg bl_conf "
-                "bl_hdg_valid bl_span bl_paired bl_cy src_switch "
-                "source gate peek_side peek_strength peek_active collision".split()
-            )
+            self._log_wr.writerow(LOG_COLUMNS)
             print(f"[gp] flight log -> {path}", flush=True)
             run_meta.note_attempt_start(self._attempt, path)
+            run_meta.note_log_columns(LOG_COLUMNS)
+            run_meta.note_track(self.data.get("track_gates"))
         except OSError as e:  # telemetry must never ground the pilot
             print(f"[gp] flight log unavailable: {e}", flush=True)
             self._log, self._log_wr = None, None
@@ -1234,52 +1272,115 @@ class GPPilot:
             run_meta.note_attempt_end(gates=self.n_passed, reason=reason)
         self._log, self._log_wr = None, None
 
+    def _mode_str(self, src: str) -> str:
+        """Which steering path produced this tick.
+
+        Phase alone is too coarse -- SEARCH, TRACK and BLUELINE all report
+        FLYING, so a crash could not be attributed to a mode from the log. The
+        debug print built this string already; it is hoisted here so the print
+        and the log can never diverge. `src` is dbg["source"], which is just
+        vision["source"], so "blueline" identifies the corridor path directly.
+
+        Reads state via getattr: _log_tick only catches OSError/ValueError/
+        KeyError, so an AttributeError here would escape into the flight loop
+        -- the one thing the telemetry contract forbids."""
+        phase = getattr(self, "phase", None)
+        if phase is not None and phase is not Phase.FLYING:
+            return phase.name
+        if getattr(self, "_search_active", False):
+            return "SEARCH"
+        if getattr(self, "_track_active", False):
+            return "BLUELINE" if src == "blueline" else "TRACK"
+        return src or "FLYING"
+
+    @staticmethod
+    def _frame_gap(data, pkt) -> int:
+        """How many camera frames stale `pkt` is.
+
+        data["frame"] is published BEFORE the detector block and inside the
+        same try, so when a detector raises the frame id advances while its
+        output freezes -- this delta detects that exactly. -1 when either side
+        has no id (never seen a frame / detector never ran)."""
+        if not isinstance(pkt, dict):
+            return -1
+        fid = (data.get("frame") or {}).get("frame_id") if isinstance(data, dict) else None
+        pid = pkt.get("frame_id")
+        if fid is None or pid is None:
+            return -1
+        return int(fid) - int(pid)
+
     def _log_tick(self, att, cmds, thrust, vY, vD, dbg, vX=float("nan")) -> None:
         if self._log_wr is None:
             return
         try:
             now = time.time()
-            vt = dbg.get("v_target", float("nan"))
-            pd = dbg.get("pitch_des_deg", float("nan"))
-            ei = dbg.get("elev_i", 0.0) or 0.0
-            ee = dbg.get("elev_err", float("nan"))
-            agl = dbg.get("agl", float("nan"))
-            tff = dbg.get("turn_ff_deg", 0.0)
+            roll_deg, pitch_deg, yaw_deg = att
             src = str(dbg.get("source", "") or "")
-            # Occlusion PEEK + collision (proximity/threat stream: also fires
-            # ~3 m from gate frames and continuously on the pad -- not a clean hit).
-            _d = getattr(self, "data", None)
-            col = _d.get("collision") if isinstance(_d, dict) else None
+            data = self.data if isinstance(getattr(self, "data", None), dict) else {}
+            # Collision is a proximity/threat stream: also fires ~3 m from gate
+            # frames and continuously on the pad -- not a clean hit.
+            col = data.get("collision")
             col_threat = int(col[1]) if isinstance(col, (list, tuple)) and len(col) > 1 else (
                 int(col.get("threat_level", 0)) if isinstance(col, dict) else 0
             )
-            self._log_wr.writerow(
-                [f"{now:.3f}"]
-                + [f"{v:.3f}" for v in att]
-                + [f"{v:.3f}" for v in cmds]
-                + [f"{thrust:.4f}"]
-                + [f"{dbg[k]:.3f}" for k in ("bx", "by", "bz")]
-                + [f"{dbg['blend']:.3f}", f"{dbg['d_lat']:.4f}", f"{dbg['d_vert']:.4f}"]
-                + [f"{vY:.3f}", f"{vD:.3f}", f"{vX:.3f}", f"{vt:.3f}", f"{pd:.3f}"]
-                + [f"{ei:.4f}", f"{ee:.3f}", f"{agl:.3f}", f"{tff:.2f}"]
-                + [
-                    str(int(dbg.get("bl_found", False))),
-                    f"{dbg.get('bl_hdg', float('nan')):.4f}",
-                    f"{dbg.get('bl_conf', float('nan')):.3f}",
-                    str(int(dbg.get("bl_hdg_valid", False))),
-                    f"{dbg.get('bl_span', float('nan')):.3f}",
-                    str(int(dbg.get("bl_paired", 0) or 0)),
-                    f"{dbg.get('bl_cy', float('nan')):.3f}",
-                    str(int(dbg.get("src_switch", False))),
-                ]
-                + [src, str(self.n_passed)]
-                + [
-                    str(int(dbg.get("peek_side", 0))),
-                    f"{dbg.get('peek_strength', 0.0):.3f}",
-                    str(int(bool(dbg.get("peek_active", False)))),
-                    str(col_threat),
-                ]
-            )
+            infer = dbg.get("infer_ms")
+            nan = float("nan")
+
+            def f(key, prec=3, default=nan):
+                v = dbg.get(key, default)
+                return f"{float(v if v is not None else default):.{prec}f}"
+
+            row = {
+                "t": f"{now:.3f}",
+                "roll": f"{roll_deg:.3f}",
+                "pitch": f"{pitch_deg:.3f}",
+                "yaw": f"{yaw_deg:.3f}",
+                # UNCLIPPED on purpose -- goes negative past 90 deg, which is
+                # the signature of the inversion the clamped tilt divisor hides.
+                "up": f"{math.cos(math.radians(roll_deg)) * math.cos(math.radians(pitch_deg)):.4f}",
+                "cmd_roll_deg": f"{cmds[0]:.3f}",
+                "cmd_pitch_deg": f"{cmds[1]:.3f}",
+                "cmd_yaw_deg": f"{cmds[2]:.3f}",
+                "thrust": f"{thrust:.4f}",
+                "bx": f("bx"), "by": f("by"), "bz": f("bz"),
+                "blend": f("blend"),
+                "bearing_deg": f("bearing_deg"),
+                "desired_roll": f("desired_roll"),
+                "d_lat": f("d_lat", 4),
+                "d_vert": f("d_vert", 4),
+                "vY_imu": f"{vY:.3f}",
+                "vY_fused": f("vY_fused"),
+                "vD": f"{vD:.3f}",
+                "vX": f"{vX:.3f}",
+                "v_target": f("v_target"),
+                "pitch_des": f("pitch_des_deg"),
+                "elev_i": f("elev_i", 4, 0.0),
+                "elev_err": f("elev_err"),
+                "agl": f("agl"),
+                "turn_ff": f("turn_ff_deg", 2, 0.0),
+                "reliable": str(int(bool(dbg.get("reliable", False)))),
+                "vision_valid": str(int(bool(dbg.get("vision_valid", False)))),
+                "bl_found": str(int(bool(dbg.get("bl_found", False)))),
+                "bl_hdg": f("bl_hdg", 4),
+                "bl_conf": f("bl_conf"),
+                "bl_hdg_valid": str(int(bool(dbg.get("bl_hdg_valid", False)))),
+                "bl_span": f("bl_span"),
+                "bl_paired": str(int(dbg.get("bl_paired", 0) or 0)),
+                "bl_cy": f("bl_cy"),
+                "bl_gap": str(self._frame_gap(data, data.get("blue_line"))),
+                "src_switch": str(int(bool(dbg.get("src_switch", False)))),
+                "source": src,
+                "infer_ms": f"{float(infer):.1f}" if infer is not None else "",
+                "mode": self._mode_str(src),
+                "gate": str(self.n_passed),
+                "gate_id": str(data.get("active_gate_index", "")),
+                "peek_side": str(int(dbg.get("peek_side", 0))),
+                "peek_strength": f("peek_strength", 3, 0.0),
+                "peek_active": str(int(bool(dbg.get("peek_active", False)))),
+                "occ_gap": str(self._frame_gap(data, data.get("occlusion"))),
+                "collision": str(col_threat),
+            }
+            self._log_wr.writerow([row[c] for c in LOG_COLUMNS])
             if now - self._log_last_flush >= 1.0:
                 self._log.flush()
                 self._log_last_flush = now
@@ -1609,17 +1710,7 @@ class GPPilot:
             src = dbg.get("source", "")
             infer = dbg.get("infer_ms")
             infer_s = f" yolo={infer:.0f}ms" if infer is not None else ""
-            steer = (
-                "SEARCH"
-                if self._search_active
-                else (
-                    "BLUELINE"
-                    if self._track_active
-                    and vision is not None
-                    and vision.get("source") == "blueline"
-                    else ("TRACK" if self._track_active else src)
-                )
-            )
+            steer = self._mode_str(src)
             trk = self._trackline._last if self._trackline is not None else None
             trk_s = (
                 f"trk(o={trk['offset']:+.2f},a={trk['angle']:+.2f},s={trk['strength']:.2f})"
