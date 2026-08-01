@@ -447,6 +447,28 @@ ELEV_RATE_CLAMP_M_S = 2.0
 # vertical analog of the K_BLIND_VY_DEG sideslip null; clamped because vD is
 # IMU dead-reckoning (bound the damage, like BLIND_BANK_DEG does laterally).
 BLIND_VD_CLAMP_MPS = 1.5
+# Extend that same null to LOCKED ticks whose vision frame is merely stale.
+#
+# d_vert is refreshed only on a NEW vision frame (`is_new_d`); on every other
+# tick the else-branch computes `vD - vD_at_vision`, which is ~0. YOLO publishes
+# at ~10.9 Hz (infer_ms p50 91.6 ms) against a 32.3 Hz control loop, so only
+# ~34% of ticks carry a new frame. Measured on run 20260801_134651, over 3704
+# locked ticks sinking faster than 0.3 m/s:
+#
+#   ticks with |d_vert| < 0.10 ......... 64.6%
+#   damping delivered vs available ..... 34%   (matches the frame duty exactly)
+#
+# The K_P/K_D pair is tuned for zeta ~0.72; at 34% duty the realised zeta is
+# ~0.19. That underdamping is the vertical overshoot that leaves the drone a
+# median 0.70 m off centre at the gate, against a 0.75 m half-extent.
+#
+# This is NOT the stale-P failure that caused the gate-2 bottom-bar strike (see
+# the MIN_BX_FOR_ELEV else-branch): that held a frozen POSITION sample and flew
+# a below-hover command open-loop into the gate. This touches D only, with a
+# live measurement of present vertical speed, and is sign-locked against sink
+# by construction -- descending gives d_vert > 0, which adds thrust. It cannot
+# hold a descend command for even one tick.
+GP_DVERT_HOLD = _env_flag("GP_DVERT_HOLD", True)
 # Descent-rate cap. Overshoot into gate 2's bottom bar came from building more
 # sink than the (slow) elevation loop could arrest before the near-gate blind
 # window. Once descending faster than this, thrust is not allowed below the
@@ -617,7 +639,7 @@ LOG_COLUMNS = (
     "elev_i", "elev_err", "agl", "turn_ff",
     # Whether vision drove the command at all -- the first question a crash
     # trace has to answer, and previously computed then discarded.
-    "reliable", "vision_valid",
+    "reliable", "vision_valid", "elev_fresh", "is_new_d",
     "bl_found", "bl_hdg", "bl_conf", "bl_hdg_valid", "bl_span", "bl_paired",
     "bl_cy", "bl_gap",
     "src_switch", "source", "infer_ms",
@@ -868,7 +890,12 @@ def compute_guidance(
         d_lat = vY - state["vY_at_vision"]
         d_vert = vD - state["vD_at_vision"]
 
-    if not elev_fresh and not math.isnan(vD):
+    # `not elev_fresh` is the blind/close-range case. `GP_DVERT_HOLD and not
+    # is_new_d` extends the identical treatment to a LOCKED gate whose frame is
+    # merely stale — ~66% of locked ticks, where d_vert otherwise collapses to
+    # ~0 and the elevation loop simply has no D term. See GP_DVERT_HOLD.
+    stale_d = GP_DVERT_HOLD and not is_new_d
+    if (not elev_fresh or stale_d) and not math.isnan(vD):
         # Vertical analog of the blind sideslip null: with no fresh elevation
         # measurement the vision D-term reads ~0 exactly when it matters (log:
         # d_vert 0.01 vs vD 0.70 inside bx<2.5, 0.000 while blind) and 0.5 m/s
@@ -1065,6 +1092,11 @@ def compute_guidance(
 
     dbg = {
         "upset": upset,
+        # Why d_vert has the value it does: elev_fresh gates the P term,
+        # is_new_d gates the D term. Logged so the damping-duty metric in
+        # scripts/gp_score.py reads them instead of inferring from |d_vert|.
+        "elev_fresh": elev_fresh,
+        "is_new_d": is_new_d,
         "bearing_deg": bearing_body,
         "blend": blend,
         "elev_err": elev_err,
@@ -1262,6 +1294,13 @@ class GPPilot:
         self.controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
 
     def _reset_state(self) -> None:
+        # FIRST, while n_passed still belongs to the attempt that just ended.
+        # This used to sit at the bottom of the method, after n_passed was
+        # zeroed, so note_attempt_end() recorded gates=0 for EVERY attempt --
+        # and every attempt ends through here. That silently zeroed the outcome
+        # column in every sidecar in the repo: run 20260801_134651 reads
+        # 0,0,0... while its own gate_id column shows 3,3,3,3,0,4,1,3,2,...
+        self._close_log(reason="reset")
         self.n_passed = 0
         self.phase = Phase.WAIT_FOR_DATA
         self._hold = _fresh_hold_state()
@@ -1292,7 +1331,6 @@ class GPPilot:
         self._flying_since = None
         self._go_start_ms = None
         self._floor_z0 = None
-        self._close_log(reason="reset")
 
     def _open_log(self) -> None:
         self._close_log()
@@ -1411,6 +1449,8 @@ class GPPilot:
                 "turn_ff": f("turn_ff_deg", 2, 0.0),
                 "reliable": str(int(bool(dbg.get("reliable", False)))),
                 "vision_valid": str(int(bool(dbg.get("vision_valid", False)))),
+                "elev_fresh": str(int(bool(dbg.get("elev_fresh", False)))),
+                "is_new_d": str(int(bool(dbg.get("is_new_d", False)))),
                 "bl_found": str(int(bool(dbg.get("bl_found", False)))),
                 "bl_hdg": f("bl_hdg", 4),
                 "bl_conf": f("bl_conf"),

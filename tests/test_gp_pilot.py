@@ -353,6 +353,61 @@ class GuidanceTests(unittest.TestCase):
         self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
         self.assertGreater(thrust, HOVER_THRUST + ELEV_I_SEED + 0.02)
 
+    def _locked_gate(self, fid):
+        # bx well beyond MIN_BX_FOR_ELEV so elev_fresh is True: a real lock.
+        return {
+            "frame_id": fid,
+            "body_x_m": 8.0,
+            "body_y_m": 0.0,
+            "body_z_m": -0.4,
+            "normal_body": None,
+        }
+
+    def _sink_two_ticks(self, second_fid, vD=0.7):
+        """Tick once to seed the D-frame, then again with `second_fid`."""
+        state = _fresh_hold_state()
+        for fid in (5, second_fid):
+            out = compute_guidance(
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                quat=self._level_quat(),
+                vY=0.0,
+                vD=vD,
+                vision=self._locked_gate(fid),
+                vision_vel=None,
+                state=state,
+            )
+        return out
+
+    def test_stale_frame_on_a_locked_gate_still_damps(self):
+        # YOLO publishes ~10.9 Hz against a 32.3 Hz loop, so ~66% of locked
+        # ticks repeat a frame id. d_vert used to collapse to ~0 on those,
+        # leaving the elevation loop with no D term two ticks in three.
+        _r, _p, _y, thrust, dbg = self._sink_two_ticks(second_fid=5)
+        self.assertFalse(dbg["is_new_d"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.7, places=6)
+        self.assertGreater(thrust, HOVER_THRUST)
+
+    def test_fresh_frame_still_uses_the_measured_elevation_rate(self):
+        # The new-frame path must be untouched: a real rate measurement beats
+        # the vD fallback, so is_new_d ticks keep -elev_rate.
+        _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=6)
+        self.assertTrue(dbg["is_new_d"])
+        self.assertNotAlmostEqual(dbg["d_vert"], 0.7, places=6)
+
+    def test_disabled_flag_restores_the_stale_collapse(self):
+        with patch.object(gp_pilot, "GP_DVERT_HOLD", False):
+            _r, _p, _y, _t, dbg = self._sink_two_ticks(second_fid=5)
+        self.assertFalse(dbg["is_new_d"])
+        self.assertAlmostEqual(dbg["d_vert"], 0.0, places=6)  # pre-fix behaviour
+
+    def test_damping_is_sign_locked_against_sink(self):
+        # Cannot hold a descend command: sinking adds thrust, climbing removes
+        # it. This is what distinguishes it from the stale-P bottom-bar strike.
+        sink = self._sink_two_ticks(second_fid=5, vD=+0.9)
+        climb = self._sink_two_ticks(second_fid=5, vD=-0.9)
+        self.assertGreater(sink[3], climb[3])
+
     def test_blind_climb_also_nulled(self):
         from simulator.gp_pilot import ELEV_I_SEED
 
@@ -2317,6 +2372,40 @@ class SearchArcScalingTests(unittest.TestCase):
             hdg += SEARCH_HDG_ALPHA * (float(single["heading_err"]) - hdg)
         self.assertEqual(hdg, before)
 
+
+
+class AttemptOutcomeRecordingTests(unittest.TestCase):
+    """The gate count must survive the reset that ends the attempt.
+
+    _reset_state used to zero n_passed BEFORE _close_log recorded it, and every
+    attempt ends through _reset_state -- so every sidecar in the repo recorded
+    gates_passed: 0 regardless of how far the drone actually flew. It made the
+    only outcome number in the tooling permanently, silently wrong.
+    """
+
+    def test_reset_records_the_gates_actually_flown(self):
+        from simulator.gp_pilot import GPPilot
+
+        import io
+
+        pilot = GPPilot.__new__(GPPilot)
+        pilot._log = io.StringIO()  # _close_log no-ops without an open log
+        pilot._log_wr = None
+        pilot.n_passed = 3
+        pilot.controller = MagicMock()
+        pilot.data = {}
+        pilot.vel_tracker = MagicMock()
+        pilot.gate_smoother = MagicMock()
+        pilot._trackline = None
+        pilot._cmd_slew = MagicMock()
+        pilot.est = MagicMock()
+
+        with patch.object(gp_pilot.run_meta, "note_attempt_end") as note:
+            pilot._reset_state()
+
+        note.assert_called_once()
+        self.assertEqual(note.call_args.kwargs["gates"], 3)
+        self.assertEqual(pilot.n_passed, 0)  # still cleared for the next attempt
 
 
 class FlightLogSchemaTests(unittest.TestCase):

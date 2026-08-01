@@ -69,7 +69,8 @@ class _Workspace:
         shutil.rmtree(self.root, ignore_errors=True)
         return False
 
-    def add(self, run_id, rows, header=None, git=None, env=None, gates=2, schema=2):
+    def add(self, run_id, rows, header=None, git=None, env=None, gates=2,
+            schema=2, ended=1030.0):
         name = f"gp_log_{run_id}_a1.csv"
         with open(os.path.join("rl", "data", name), "w", newline="") as fh:
             wr = csv.writer(fh)
@@ -88,7 +89,8 @@ class _Workspace:
             "log_columns": list(header or LOG_COLUMNS),
             "attempts": [
                 {"n": 1, "telemetry": name, "gates_passed": gates,
-                 "outcome": "gate_stall", "lap_s": None, "end_reason": "reset"}
+                 "outcome": "gate_stall", "lap_s": None, "end_reason": "reset",
+                 "t_start_unix": 1000.0, "t_end_unix": ended}
             ],
         }
         with open(os.path.join("runs", "videos", f"vision_{run_id}.json"), "w") as fh:
@@ -127,6 +129,57 @@ class SchemaGateTests(unittest.TestCase):
                 ["runs/videos/vision_20260101_000002.json"]
             )
             self.assertEqual(skipped, 1)
+
+
+class UnterminatedAttemptTests(unittest.TestCase):
+    """An attempt killed mid-flight is not flight data.
+
+    Attempt 18 of run 20260801_134651 was killed while airborne. Its 1872 rows
+    of falling aircraft supplied EVERY upset tick in the run and a vD p95 of
+    153 m/s, so 17 stable attempts read as constant tumbling.
+    """
+
+    def test_unterminated_rows_are_not_pooled(self):
+        with _Workspace() as ws:
+            ws.add("20260101_000020", [_row(), _row()], ended=None)
+            groups, _ = gp_score.collect(
+                ["runs/videos/vision_20260101_000020.json"]
+            )
+            g = next(iter(groups.values()))
+            self.assertEqual(g["rows"], [])
+            self.assertEqual(g["unterminated"], 1)
+
+    def test_terminated_rows_still_pooled(self):
+        with _Workspace() as ws:
+            ws.add("20260101_000021", [_row(), _row()])
+            groups, _ = gp_score.collect(
+                ["runs/videos/vision_20260101_000021.json"]
+            )
+            g = next(iter(groups.values()))
+            self.assertEqual(len(g["rows"]), 1)
+            self.assertEqual(g["unterminated"], 0)
+
+
+class VirtualGateTests(unittest.TestCase):
+    """Synthetic targets must never enter gate-relative geometry.
+
+    TrackVirtualGate and the SEARCH arc publish bx=4.0/bz=0.0 held level. They
+    were 46% of the 4-5 m bin in run 20260801_134651 and made the approach look
+    perfectly centred when the real-gate median there is -0.17 m.
+    """
+
+    def test_virtual_rows_are_identified(self):
+        self.assertTrue(gp_score.is_virtual_gate({"bx": "4.000", "bz": "0.000"}))
+        self.assertFalse(gp_score.is_virtual_gate({"bx": "4.000", "bz": "-0.170"}))
+        self.assertFalse(gp_score.is_virtual_gate({"bx": "3.900", "bz": "0.000"}))
+        self.assertFalse(gp_score.is_virtual_gate({"bx": "", "bz": ""}))
+
+    def test_damping_duty_ignores_virtual_rows(self):
+        # Virtual rows carry d_vert 0 and would inflate the stale fraction.
+        rows = [_row(bx=4.0, bz=0.0, vD=1.0, d_vert=0.0) for _ in range(8)]
+        rows += [_row(bx=6.0, bz=-0.2, vD=1.0, d_vert=1.0)]
+        m = gp_score.tick_metrics([rows])
+        self.assertEqual(m["dvert_stale"], 0.0)
 
 
 class GroupingTests(unittest.TestCase):

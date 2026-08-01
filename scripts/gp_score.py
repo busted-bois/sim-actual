@@ -156,11 +156,22 @@ def collect(sidecar_paths, force=False):
             skipped += sum(1 for a in meta.get("attempts") or [] if a.get("telemetry"))
             continue
         key = ("ALL",) if force else config_key(meta)
-        g = groups.setdefault(key, {"meta": meta, "attempts": [], "rows": []})
+        g = groups.setdefault(
+            key, {"meta": meta, "attempts": [], "rows": [], "unterminated": 0}
+        )
         for att in meta.get("attempts") or []:
             g["attempts"].append(att)
             name = att.get("telemetry")
             if not name:
+                continue
+            # An attempt with no t_end_unix never closed -- the process was
+            # killed while the drone was still airborne, so its tail is the
+            # aircraft falling with no pilot, not flight. Attempt 18 of run
+            # 20260801_134651 is 1872 such rows: it alone supplied EVERY upset
+            # tick in the run and a vD p95 of 153 m/s, making 17 otherwise
+            # stable attempts read as constant tumbling. Counted, not pooled.
+            if att.get("t_end_unix") is None:
+                g["unterminated"] += 1
                 continue
             rows = load_rows(os.path.join(_LOGDIR, name))
             if rows is None:
@@ -182,6 +193,24 @@ def outcome_metrics(attempts):
         "best_lap_s": min(laps) if laps else None,
         "outcomes": Counter(a.get("outcome") or a.get("end_reason") or "?" for a in attempts),
     }
+
+
+def is_virtual_gate(r):
+    """True for a synthetic target rather than a measured gate.
+
+    TrackVirtualGate and the SEARCH arc both publish a fabricated target at
+    exactly bx = 4.0 (TRACK/SEARCH_LOOKAHEAD_M) with bz = 0.0 held level. Those
+    rows are NOT observations of a gate, and pooling them into range-binned
+    geometry silently fabricates the answer: they were 46% of the 4-5 m bin in
+    run 20260801_134651 and made the approach look perfectly centred (bz 0.00)
+    when the real-gate median there is -0.17.
+    """
+    try:
+        return abs(float(r.get("bx", "nan")) - 4.0) < 1e-9 and abs(
+            float(r.get("bz", "nan"))
+        ) < 1e-9
+    except (TypeError, ValueError):
+        return False
 
 
 def tick_metrics(row_sets):
@@ -242,6 +271,38 @@ def tick_metrics(row_sets):
         # upset: these two diverge if GP_UPSET_GUARD is off or the threshold
         # is retuned, and that divergence is the thing to look at.
         "guard_fired": sum(1 for r in rows if _f(r, "upset", 0.0) >= 0.5),
+        # Vertical damping duty. d_vert only refreshes on a NEW vision frame;
+        # otherwise it collapses to ~0 and the D term of the elevation loop is
+        # simply absent. Measured 0.646 on run 20260801_134651 -- YOLO
+        # publishes ~10.9 Hz against a 32.3 Hz loop, so damping is delivered on
+        # about a third of the ticks that need it. This is the direct readout
+        # of that mechanism: it should fall to ~0.
+        "dvert_stale": _frac(
+            [
+                abs(_f(r, "d_vert", 0.0))
+                for r in rows
+                if not is_virtual_gate(r)
+                and _f(r, "reliable", 0.0) >= 0.5
+                and abs(_f(r, "vD", 0.0)) > 0.3
+            ],
+            lambda v: v < 0.10,
+        ),
+        # Raw frame duty, straight from the column rather than inferred from
+        # |d_vert|. Does NOT change when the fix lands (YOLO is still ~10.9 Hz)
+        # -- it is the denominator that made dvert_stale what it was, so the
+        # two together show the fix decoupled damping from detector rate.
+        "newframe_duty": _frac(
+            [_f(r, "is_new_d", 0.0) for r in rows if _f(r, "reliable", 0.0) >= 0.5],
+            lambda v: v >= 0.5,
+        ),
+        # How far the drone actually got. gate_id is the sim's own
+        # active_gate_index -- verified against the video as a real pass, and
+        # the only progress signal that is not affected by the sidecar bug that
+        # recorded gates_passed: 0 for every attempt ever flown.
+        "gate_reached": [
+            max((int(_f(r, "gate_id", -1)) for r in rs if _f(r, "gate_id", -1) >= 0), default=-1)
+            for rs in row_sets
+        ],
         "over_descent": _frac(vD, lambda v: v > MAX_DESCENT_RATE_MPS),
         "vD_p95": _pct(vD, 0.95),
         "agl_min": min((v for v in agl if not math.isnan(v)), default=float("nan")),
@@ -270,6 +331,8 @@ _TICK_ROWS = [
     ("min up (cos*cos)", "up_min", "{:.3f}", +1),
     ("ticks up < 0.50", "upset_ticks", "{:.0f}", -1),
     ("upset guard fired", "guard_fired", "{:.0f}", -1),
+    ("vert damping absent", "dvert_stale", "{:.1%}", -1),
+    ("  new-frame duty", "newframe_duty", "{:.1%}", 0),
     ("ticks over descent cap", "over_descent", "{:.1%}", -1),
     ("vD p95 m/s", "vD_p95", "{:.2f}", -1),
     ("min agl m", "agl_min", "{:.2f}", +1),
@@ -298,12 +361,32 @@ def report(key, out, tk, baseline=None):
     # No verdicts here, deliberately -- see the module docstring.
     print(f"OUTCOME  (n={out['n_attempts']} attempts -- indicative only, no verdict)")
     gates = ",".join(str(g) for g in out["gates"]) or "-"
-    print(f"  {'gates reached':22s} {gates}    best {out['best_gates']}")
-    print(f"  {'reached gate >= 1':22s} {out['reached_1']}/{out['n_scored']}")
+    print(f"  {'gates (sidecar)':22s} {gates}    best {out['best_gates']}")
     if out["best_lap_s"] is not None:
         print(f"  {'best lap s':22s} {out['best_lap_s']:.2f}")
     ends = ", ".join(f"{k} x{v}" for k, v in out["outcomes"].most_common())
     print(f"  {'outcomes':22s} {ends}")
+    # Telemetry-derived progress, independent of the sidecar's gates_passed --
+    # which recorded 0 for every attempt ever flown until the reset-ordering
+    # fix, so every historical sidecar understates the run.
+    gr = [g for g in tk.get("gate_reached", []) if g >= 0]
+    if gr:
+        print(f"  {'gates (telemetry)':22s} {','.join(str(g) for g in gr)}")
+        for k in (1, 2, 3, 4):
+            n = sum(1 for g in gr if g >= k)
+            if n:
+                print(f"  {'  reached gate >= %d' % k:22s} {n}/{len(gr)}")
+        if max(gr) > (out["best_gates"] or 0):
+            print(
+                f"  {'':22s} ^ sidecar disagrees: it was written before the "
+                "reset-ordering fix\n"
+                f"  {'':22s}   and recorded 0 for every attempt. Trust telemetry."
+            )
+    if out.get("unterminated"):
+        print(
+            f"  {'unterminated':22s} {out['unterminated']} attempt(s) killed "
+            "mid-flight -- excluded from PER-TICK"
+        )
 
     if not tk.get("n_ticks"):
         print("\nPER-TICK  no readable telemetry for this config\n")
@@ -357,13 +440,31 @@ def main():
     if args.baseline:
         with open(args.baseline, encoding="utf-8") as fh:
             baseline = json.load(fh)
+        # --json now writes a list (one entry per config). Accept the old dict
+        # form too so an existing saved baseline keeps working.
+        if isinstance(baseline, list):
+            if len(baseline) > 1:
+                print(
+                    f"  baseline holds {len(baseline)} configs; comparing "
+                    f"against the first ({baseline[0].get('config')})\n"
+                )
+            baseline = baseline[0] if baseline else None
 
-    dump = {}
+    dump = []
     for key, g in sorted(groups.items(), key=lambda kv: str(kv[0])):
         out = outcome_metrics(g["attempts"])
+        out["unterminated"] = g.get("unterminated", 0)
         tk = tick_metrics(g["rows"])
         report(key, out, tk, (baseline or {}).get("per_tick") if baseline else None)
-        dump = {"config": describe_key(key), "outcome": {**out, "outcomes": dict(out["outcomes"])}, "per_tick": tk}
+        # Append: this used to assign, so --json silently wrote only the LAST
+        # group and a multi-config baseline was quietly the wrong config.
+        dump.append(
+            {
+                "config": describe_key(key),
+                "outcome": {**out, "outcomes": dict(out["outcomes"])},
+                "per_tick": tk,
+            }
+        )
 
     if skipped:
         print(f"  skipped {skipped} legacy logs (schema predates the current header)\n")
