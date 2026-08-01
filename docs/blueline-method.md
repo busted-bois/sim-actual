@@ -68,6 +68,17 @@ fallback was added and tightened.
 Plus quality metadata: `found`, `conf`, `single_rail`, `left_found`,
 `right_found`, `frame_id`, `points`.
 
+> **On `classical+blueline`, `heading_err` is not consumed on its own.** It is
+> paired with `heading_valid`, and consumers gate on that. Fitted through band
+> centres spanning a median of only 0.24 of frame height, the raw slope swung
+> ±70° and flipped sign 2.9×/s — riding the tracker's own 25°/frame rate limiter
+> at both p90 and max, i.e. the limiter was hiding the estimate rather than
+> smoothing it. `heading_valid`, `span_frac` and `paired_bands` accompany the
+> four scalars there. Do **not** substitute `left_found and right_found` for
+> `heading_valid`: those are frame-global and go True as soon as one band pairs,
+> while 28.6% of band centres are inferred from a single rail plus a remembered
+> width. See §6.2 for the knobs and the replay harness.
+
 ### 1.1 Two ways the signal is consumed
 
 **(a) Standalone corridor pilot** — `blueline`, `blueline-2`.
@@ -116,6 +127,45 @@ make control-flight   # same target again (also `make auto-gp`)
 `auto_blueline.py` sets `AUTO_PILOT=blueline`, arms, opens the vision window,
 and runs `controller.update()` until Ctrl+C. It deliberately does **not** use
 the overnight `AUTO_FLIGHT` retry loop.
+
+On this branch `auto_gp.py` is the same shape, with one supervisor bolted on:
+`GateStallWatchdog` (`simulator/gate_watchdog.py`) resets the sim when gate
+progress stops, so an unattended run keeps producing usable attempts instead of
+circling a post until someone notices. It reuses the `simulator/race_monitor.py`
+predicates that back `make auto`, but only the *pose* reset half of them — there
+is still no preflight re-handshake and no `wait_for_race_go`; GPPilot's own
+`WAIT_FOR_START` anchor picks up the countdown the sim restarts. See §1.4.
+
+### 1.4 Gate-stall self-reset (`classical+blueline`)
+
+`GateStallWatchdog` is ticked once per iteration of the `auto_gp.py` control
+loop. Its clock runs **only while the pilot reports `flying`** (`GPPilot.phase`
+in `FLYING`/`BACKOFF`) — the drone holding zero thrust on the pad before the
+countdown is not a stall, and a watchdog that fires there is worse than none.
+
+| Window | Default | Knob |
+|---|---|---|
+| No `active_gate_index` advance after gate 1 | **10 s** | `GATE_PROGRESS_TIMEOUT_S` |
+| Race GO → gate 1 | **20 s** | `GATE1_TIMEOUT_S` |
+| Settle before the clock re-arms | 5 s | `SIM_RESET_WAIT_S` |
+
+Gate 1 gets the looser budget because spawn is ~15 m before gate 0 at ~2.2 m/s
+cruise — a flat 10 s resets before the drone can reach it. (`auto.py` raises the
+same two to 30/25 s on the overnight path for the same reason.) `GP_STALL_RESET=0`
+disables the watchdog entirely.
+
+On a verdict, in this order: `run_meta.note_outcome()` (so the verdict lands on
+the attempt whose CSV is still open), `pilot.reset_for_attempt()` (neutral
+command, zeroed `n_passed`, closed log — the pilot must not be banking into the
+teleport), then MAVLink `31000`, repeated once 0.5 s later because the sim drops
+one of two back-to-back resets.
+
+The reset is modelled as a state machine rather than the inline `time.sleep()`s
+`simulator/auto_flight.py` uses, because this path owns the live vision window
+and the mp4 recorder: the loop keeps calling `controller.update()` and
+`display.tick()` right through the settle window, so the recording has no gap.
+Progress is read from `shared_data["active_gate_index"]` (sim truth);
+`pilot.gates_passed` only softens the gate-1 verdict, exactly as `make auto` does.
 
 ---
 
@@ -288,6 +338,14 @@ inferred throughout, and the pilot is told so.
 | `conf` | `clip(n_centres / 5, 0, 1) × (0.5 + 0.5 × paired_fraction)` — bands resolved, weighted by how many of them saw both rails. |
 
 Minimum `_MIN_VALID_BANDS = 2` corridor centres, or `found = False`.
+
+On `classical+blueline` three of these differ:
+
+| Output | Difference |
+|---|---|
+| `heading_err` | Published only when `span_frac ≥ 0.25` **and** the fit's RMS residual ≤ 12 px; otherwise `0.0` with `heading_valid = False`. The 0.25 threshold was swept on recorded video and *dominates* its neighbours — it gives both the lowest sign-flip rate (2.01/s vs 2.25 at 0.30, 3.16 at 0.20) and more surviving frames than anything tighter. |
+| `conf` | `clip(n_centres / 4, 0, 1) × (0.5 + 0.5 × paired_fraction) × (0.6 + 0.4 × span_quality)`. The full-band count is 4, not 5: 5 was never reachable (measured p50 is 4 of 12). Band count says how *much* was sampled; span and pairing say how *well*. |
+| `span_frac`, `paired_bands` | New. `span_frac` is the band-centre vertical span ÷ frame height — the polyfit's lever arm. `paired_bands` is how many bands resolved both rails themselves, as opposed to inferring a centre from one rail plus remembered width. |
 
 ### 3.6 `BlueLineTracker` — frame-to-frame memory
 
@@ -707,6 +765,7 @@ but see §6.3.
 | `tests/test_blue_line_vision.py` (19) | presence/absence, offset and heading **signs**, each of the four §3.7 defects as its own case (corridor wholly in one half, hard bends, thin far ribbon survival, blue-sky exclusion), single-rail centre offset, tracker width memory and reset, heading rate limit, dict round-trip |
 | `tests/test_blue_line_pilot.py` (60+) — *not on `classical+blueline`* | wire-sign direction for every axis, corner braking and the rise cap, 25 km/h cap, the search ladder, gate-bias engage/skip cases, confidence fade, band-gated heading, `dcx` rate damping and its cap, `gz` damping sign, gate commit arm/hold/expire/disarm, vision staleness, and the whole race-gating state machine |
 | `tests/test_gp_pilot.py::TrackVirtualGateBluelineTests` (4) | corridor preferred over `detect_track`, fallback to `detect_track` when absent, and `_course_direction_cue` priority (blueline → gate → track) |
+| `tests/test_gate_watchdog.py` (15) | §1.4 self-reset on an injected clock: silent while not flying and while disabled, the 10 s vs 20 s budgets, a gate advance re-arming the clock, the doubled `31000` and its 0.5 s spacing, settle expiry and re-arm, course-complete and race-finish suppression, outcome labels, and `GPPilot.flying` tracking `Phase` |
 
 All are in `make test` on the branch that carries them. Note that **CI runs only
 ruff and doc checks** — unit tests are not gated, so a committed baseline can
@@ -729,6 +788,61 @@ false-positive rates with per-frame timing.
 | `BL_INNER_EDGE` | `1` | `blueline-2`: `0` / `shadow` / on |
 | `BL_PROBE_SECONDS`, `BL_PROBE_WAIT`, `BL_PROBE_SAVE_EVERY` | 20 / 600 / 30 | `blueline-2` probe |
 | `GP_TRACK_LOOKAHEAD`, `GP_TRACK_LATGAIN`, `GP_TRACK_ANGGAIN` | 4.0 / 3.5 / 0.8 | `ks_vision+blueline` virtual-gate geometry |
+
+#### `classical+blueline` gate-stall reset knobs (§1.4)
+
+`auto_gp.py` `setdefault`s the two timeouts before the import chain reaches
+`race_monitor`, which reads them once at import — set them in the environment to
+override, not in code.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `GP_STALL_RESET` | `1` | `0` disables the watchdog; the loop reverts to its old unsupervised behaviour |
+| `GATE_PROGRESS_TIMEOUT_S` | `10` | seconds without a gate advance, after gate 1, before reset |
+| `GATE1_TIMEOUT_S` | `20` | seconds from GO to gate 1 before reset |
+| `GATE1_HARD_TIMEOUT_S` | `60` | fires regardless, even when `pilot.gates_passed` claims a pass the sim never saw |
+| `GATE1_WATCH_INTERVAL_S` | `5` | seconds between `[RACE] *_watch` progress lines |
+| `SIM_RESET_WAIT_S` | `5` | settle window after the reset before the clock re-arms |
+
+#### `classical+blueline` signal-quality knobs (2026-07-30)
+
+Added with the gate-continuity and corridor-quality work. All are read at import
+and default to the new behaviour except where noted, so each can be A/B'd against
+baseline without editing code. Measure detector changes with
+`uv run scripts/bl_replay.py` (see its docstring for the before/after table).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `GP_SRC_RESET` | `1` | drop guidance derivative history when the gate SOURCE changes, not just when the gate identity does |
+| `GP_YOLO_PROPAGATE` | `1` | advance a stale YOLO packet by own motion instead of falling back to another estimator |
+| `GP_SRC_STICKY_FR` | `3` | camera frames the preferred source must hold before it may take over; `0` disables |
+| `GP_SRC_BLEND_S` | `0.3` | seconds to ramp the position step a source switch introduces; `0` restores the instant snap |
+| `GP_BL_HDG_GATE` | `1` | publish `heading_err` only when the band span and fit residual support it |
+| `GP_BL_CENTRE_FIT` | `1` | fit centreline + half-width so the rails cannot cross |
+| `GP_BL_CX_FILTER` | `1` | rate-limit + EMA `cx_norm` (it previously had no filter at all) |
+| `GP_BL_CONF_V2` | `1` | fold span and pairing into `conf` and rebase the full-band count to 4 |
+| `GP_BL_ADAPTIVE_BANDS` | `0` | **measured negative result** — see below |
+| `GP_TURN_FF_VG` | `1` | let the turn feed-forward run on the corridor virtual gate |
+| `GP_BL_CONF_BLEND` | `1` | corridor `conf` drives `reliable`, so `WEAK_BLEND_SCALE` fades thin locks |
+| `GP_BL_ELEV_FIX` | `1` | mark the virtual gate `elev_valid: False` so its fabricated `body_z` cannot drive thrust |
+| `GP_BL_ALT_CUE` | `0` | **off pending calibration** — see below |
+| `GP_BL_CY_NEUTRAL`, `GP_BL_ALT_GAIN` | 0.42 / 1.5 | altitude-cue calibration, unvalidated |
+
+Two of these are deliberately off:
+
+- **`GP_BL_ADAPTIVE_BANDS`** concentrates the 12 bands on the rows that hold
+  ribbon. It looks obviously right (the top four are empty ~90% of frames) and
+  does raise the band count 4 → 9, but it makes every quality metric worse:
+  span p50 unchanged at 0.24, heading valid 25.2% → 22.0%, heading sign flips
+  2.25 → 2.57/s, cx sign flips 2.33 → 2.64/s. The span is set by where the
+  ribbon is *visible*, not by how it is sliced, so subdividing adds noise
+  without information.
+- **`GP_BL_ALT_CUE`** would make `cy_norm` the inter-gate altitude reference.
+  It is not trustworthy yet: median `cy_norm` is +0.422 over all found frames
+  but +0.060 on the subset whose heading fit is valid, so the cue moves 0.36 on
+  a change in *detection quality* rather than height, and it steps 0.217 (p90)
+  per frame. `bl_cy` is now logged next to `agl` — correlate them over a few
+  runs, set `GP_BL_CY_NEUTRAL` from the fit, then enable.
 
 ### 6.3 Known gaps
 

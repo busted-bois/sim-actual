@@ -8,11 +8,15 @@ BRANCH="${BRANCH:-videos}"
 REMOTE="${REMOTE:-origin}"
 DRY_RUN=0
 SOURCE=""
+# An overnight run can leave hundreds of MB of CSV; publish a sane slice.
+MAX_TELEM_MB="${MAX_TELEM_MB:-25}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1 ;;
+        --max-telemetry-mb) MAX_TELEM_MB="$2"; shift ;;
         --source) SOURCE="$2"; shift ;;
+        --telemetry-dir) TELEM_DIR="$2"; shift ;;
         --branch) BRANCH="$2"; shift ;;
         --remote) REMOTE="$2"; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -23,6 +27,7 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 : "${SOURCE:=$ROOT/runs/videos}"
+: "${TELEM_DIR:=$ROOT/rl/data}"
 
 # git narrates checkouts on stderr; swallow it unless the command actually fails.
 quiet_git() {
@@ -112,21 +117,42 @@ else
 fi
 
 DEST="$WORK/videos"
-mkdir -p "$DEST"
+TELEM="$WORK/telemetry"
+mkdir -p "$DEST" "$TELEM"
 
-# The videos are LFS payload; the branch is useless without this rule.
+# Only the mp4s are LFS payload. The sidecars and CSVs deliberately fall through
+# to regular git objects: they are small, and that keeps them greppable with
+# `git grep` and readable with `git show` without spending LFS bandwidth.
 ATTR_LINE='videos/*.mp4 filter=lfs diff=lfs merge=lfs -text'
-if ! grep -qxF "$ATTR_LINE" "$WORK/.gitattributes" 2>/dev/null; then
-    printf '%s\n' "$ATTR_LINE" >> "$WORK/.gitattributes"
-fi
+# gp_pilot opens its CSV with newline="", so it writes CRLF on every platform.
+CSV_ATTR='telemetry/*.csv text eol=lf'
+for line in "$ATTR_LINE" "$CSV_ATTR"; do
+    if ! grep -qxF "$line" "$WORK/.gitattributes" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$WORK/.gitattributes"
+    fi
+done
 
 [ -f "$DEST/README.md" ] || cp "$ROOT/scripts/push-videos-README.md" "$DEST/README.md"
 
 # --- Copy in whatever is new -------------------------------------------------
+# Each artifact is judged on its own. Keying the whole run off the mp4 would
+# mean a video published before sidecars existed could never gain one.
 
-added=()
-added_bytes=0
+added=()          # mp4s -> LFS
+side=()           # sidecars + telemetry -> regular git
+lfs_bytes=0
+reg_bytes=0
+telem_bytes=0
 skipped=0
+capped=0
+max_telem_bytes=$((MAX_TELEM_MB * 1048576))
+
+copy_in() {  # src dst -> records it as a regular-git artifact
+    [ "$DRY_RUN" -eq 1 ] || cp "$1" "$2"
+    side+=("${2#"$WORK"/}")
+    reg_bytes=$((reg_bytes + $(file_size "$1")))
+}
+
 for v in "${videos[@]}"; do
     base="$(basename "$v" .mp4)"
     # Pre-timestamp recordings were all called vision.mp4; stamp those from
@@ -135,24 +161,58 @@ for v in "${videos[@]}"; do
         *_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
         *) base="${base}_$(file_stamp "$v")" ;;
     esac
-    target="$DEST/${member}_${base}.mp4"
-    if [ -e "$target" ]; then
+    stem="${member}_${base}"
+
+    if [ -e "$DEST/${stem}.mp4" ]; then
         skipped=$((skipped + 1))
-        continue
+    else
+        [ "$DRY_RUN" -eq 1 ] || cp "$v" "$DEST/${stem}.mp4"
+        added+=("${stem}.mp4")
+        lfs_bytes=$((lfs_bytes + $(file_size "$v")))
     fi
-    [ "$DRY_RUN" -eq 1 ] || cp "$v" "$target"
-    added+=("$(basename "$target")")
-    added_bytes=$((added_bytes + $(file_size "$v")))
+
+    # Sidecar: what the run actually did. Written next to the mp4 by run_meta.
+    src_json="$(dirname "$v")/${base}.json"
+    [ -f "$src_json" ] || src_json="$(dirname "$v")/$(basename "$v" .mp4).json"
+    if [ -f "$src_json" ] && [ ! -e "$DEST/${stem}.json" ]; then
+        copy_in "$src_json" "$DEST/${stem}.json"
+    fi
+
+    # Telemetry: the CSVs this run wrote. Same run id as the video, so the
+    # glob is exact rather than a nearest-timestamp guess.
+    runid="${base#vision_}"
+    for c in "$TELEM_DIR"/gp_log_"${runid}"_a*.csv; do
+        [ -f "$c" ] || continue
+        dst="$TELEM/${member}_$(basename "$c")"
+        [ ! -e "$dst" ] || continue
+        csz="$(file_size "$c")"
+        if [ $((telem_bytes + csz)) -gt "$max_telem_bytes" ]; then
+            capped=$((capped + 1))
+            continue
+        fi
+        telem_bytes=$((telem_bytes + csz))
+        copy_in "$c" "$dst"
+    done
 done
 
-if [ "${#added[@]}" -eq 0 ]; then
+if [ "${#added[@]}" -eq 0 ] && [ "${#side[@]}" -eq 0 ]; then
     echo "Already published: all ${#videos[@]} local recording(s) are on '$BRANCH'."
     exit 0
 fi
 
-mb="$(awk -v b="$added_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')"
-echo "Publishing ${#added[@]} recording(s) as '$member' (~${mb} MB; $skipped already on the branch):"
-printf '  %s\n' "${added[@]}"
+lfs_mb="$(awk -v b="$lfs_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')"
+reg_mb="$(awk -v b="$reg_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')"
+mb="$lfs_mb"
+echo "Publishing as '$member' ($skipped recording(s) already on the branch):"
+[ "${#added[@]}" -eq 0 ] || {
+    echo "  ${#added[@]} recording(s), ~${lfs_mb} MB -> Git LFS"
+    printf '    %s\n' "${added[@]}"
+}
+[ "${#side[@]}" -eq 0 ] || {
+    echo "  ${#side[@]} sidecar/telemetry file(s), ~${reg_mb} MB -> regular git (no LFS quota)"
+    printf '    %s\n' "${side[@]}"
+}
+[ "$capped" -eq 0 ] || echo "  ($capped CSV(s) skipped: over --max-telemetry-mb ${MAX_TELEM_MB})"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo
@@ -160,12 +220,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-git -C "$WORK" add -A -- videos .gitattributes
+git -C "$WORK" add -A -- videos telemetry .gitattributes
 if [ -z "$(git -C "$WORK" status --porcelain)" ]; then
     echo "Nothing to commit."
     exit 0
 fi
-git -C "$WORK" commit -qm "Add ${#added[@]} run recording(s) from $member"
+if [ "${#added[@]}" -eq 0 ]; then
+    msg="Add sidecars/telemetry for ${#side[@]} file(s) from $member"
+else
+    msg="Add ${#added[@]} run recording(s) from $member"
+fi
+git -C "$WORK" commit -qm "$msg"
 
 echo
 echo "Uploading to $REMOTE/$BRANCH (${mb} MB through LFS -- this takes a while)..."
@@ -178,4 +243,8 @@ if ! git -C "$WORK" push "$REMOTE" "HEAD:refs/heads/$BRANCH"; then
 fi
 
 echo
-echo "Done -- ${#added[@]} recording(s) now on '$BRANCH'."
+if [ "${#added[@]}" -eq 0 ]; then
+    echo "Done -- ${#side[@]} sidecar/telemetry file(s) now on '$BRANCH'."
+else
+    echo "Done -- ${#added[@]} recording(s) (+${#side[@]} sidecar/telemetry) now on '$BRANCH'."
+fi

@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from simulator import display
+from simulator import display, run_meta
 
 
 class _HeadlessRun:
@@ -50,17 +50,22 @@ class RecordingPathTests(unittest.TestCase):
         self.assertNotIn("..", display._RECORD_DIR)
 
     def test_filename_is_timestamped(self):
-        import time
-
-        name = time.strftime(display._RECORD_FMT)
+        name = display._record_name()
         self.assertTrue(name.startswith("vision_"))
         self.assertTrue(name.endswith(".mp4"))
-        # vision_YYYYmmdd_HHMMSS.mp4 -- same stamp format as gp_log_*.csv, so a
-        # video pairs with its telemetry by filename.
+        # vision_YYYYmmdd_HHMMSS.mp4 -- the push scripts' stamp regex and the
+        # .gitignore globs both still match this shape.
         stamp = name[len("vision_") : -len(".mp4")]
         self.assertEqual(len(stamp), 15, stamp)
         self.assertEqual(stamp[8], "_")
         self.assertTrue(stamp.replace("_", "").isdigit(), stamp)
+
+    def test_filename_carries_the_run_id_so_telemetry_pairs_exactly(self):
+        # The whole point of RUN_ID: the video and rl/data/gp_log_<id>_a<N>.csv
+        # share one key, instead of being matched by nearest timestamp.
+        from simulator.run_id import RUN_ID
+
+        self.assertEqual(display._record_name(), f"vision_{RUN_ID}.mp4")
 
 
 class RecordingLifecycleTests(unittest.TestCase):
@@ -70,10 +75,27 @@ class RecordingLifecycleTests(unittest.TestCase):
         self._tmp = os.path.join(
             os.path.dirname(__file__), f"_display_tmp_{os.getpid()}"
         )
-        self._dir_patch = patch.object(display, "_RECORD_DIR", self._tmp)
-        self._dir_patch.start()
-        self.addCleanup(self._dir_patch.stop)
+        # close() publishes a sidecar; keep it in the temp dir too, or the
+        # suite litters the real runs/videos/.
+        for target, attr, value in (
+            (display, "_RECORD_DIR", self._tmp),
+            (run_meta, "_DIR", self._tmp),
+            (run_meta, "_PATH", os.path.join(self._tmp, "vision_test.json")),
+            (run_meta, "_finalized", False),
+        ):
+            p = patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._reset_meta)
+        self._reset_meta()
         self.addCleanup(self._cleanup)
+
+    @staticmethod
+    def _reset_meta():
+        # run_meta's atexit hook fires at interpreter shutdown against the real
+        # runs/videos/; leaving recorded state behind makes it write there.
+        run_meta._state["attempts"] = []
+        run_meta._state["video"] = None
 
     def _cleanup(self):
         for p in glob.glob(os.path.join(self._tmp, "*")):

@@ -198,6 +198,10 @@ class ManualControl:
         odo = self.data.get("odometry")
         if odo is not None and "q" in odo:
             return _quat_to_euler(odo["q"])
+        # Skip ESKF-published attitude (state_source=="eskf") — same as
+        # manual_controls which had no estimator; fake att fights dead-reckoning.
+        if self.data.get("state_source") == "eskf":
+            return None
         att = self.data.get("attitude")
         if att is not None:
             return att["roll"], att["pitch"], att["yaw"]
@@ -208,6 +212,8 @@ class ManualControl:
         odo = self.data.get("odometry")
         if odo is not None and "q" in odo:
             return "odom"
+        if self.data.get("state_source") == "eskf":
+            return None
         if self.data.get("attitude") is not None:
             return "att"
         return None

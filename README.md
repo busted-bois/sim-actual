@@ -30,11 +30,22 @@ skills-lock.json        # Agent skills lockfile
 
 ## Run recordings
 
-Every run writes `runs/videos/vision_<YYYYmmdd_HHMMSS>.mp4`, local and gitignored.
-To add yours to the shared archive:
+Every run writes `runs/videos/vision_<RUN_ID>.mp4`, a `vision_<RUN_ID>.json`
+sidecar recording how it went (gates reached, outcome, git sha), and
+`rl/data/gp_log_<RUN_ID>_a<N>.csv` per attempt — all sharing one run id, all
+local and gitignored. To add yours to the shared archive:
 
 ```bash
 make push-videos
+```
+
+To read the team's archive without switching branches (`videos-index` and
+`videos-sync` spend no LFS bandwidth):
+
+```bash
+make videos-index                     # every run: target, gates, outcome, length
+make videos-get RUN=<run>             # one recording (~65 MB)
+make videos-frames RUN=<run> AT=12.5  # the frame at t=12.5s
 ```
 
 That publishes them to the **`videos`** branch through [Git LFS](https://git-lfs.com)

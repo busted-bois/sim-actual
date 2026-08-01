@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
+.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry videos-index videos-sync videos-get videos-frames probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_gate_watchdog tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display tests.test_run_id tests.test_run_meta -v
 
 sim:
 	uv run main.py
@@ -73,6 +73,27 @@ ifeq ($(OS),Windows_NT)
 else
 	bash scripts/push-videos.sh
 endif
+
+# Read the shared archive WITHOUT checking out the videos branch -- your tree
+# and branch stay put. index/sync cost no LFS bandwidth (they read sidecars and
+# telemetry, never video payload); only videos-get downloads an mp4.
+#   make videos-index                     what runs exist, gates reached, outcome
+#   make videos-sync                      pull sidecars + telemetry into runs/archive/
+#   make videos-get RUN=<run>             fetch one recording (~65 MB)
+#   make videos-frames RUN=<run> AT=12.5  write frames at a time, or EVERY=<s>
+videos-index:
+	uv run scripts/videos_archive.py index
+
+videos-sync:
+	uv run scripts/videos_archive.py sync
+
+videos-get:
+	uv run scripts/videos_archive.py get $(RUN)
+
+videos-frames:
+	uv run scripts/video_frames.py runs/archive/videos/$(RUN).mp4 \
+		$(if $(AT),--at $(AT),) $(if $(EVERY),--every $(EVERY),) \
+		--out runs/archive/frames/$(RUN)
 
 # Same, but only prints what would be uploaded.
 push-videos-dry:

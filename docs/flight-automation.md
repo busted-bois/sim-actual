@@ -85,6 +85,28 @@ On each course complete (`OUTCOME=success`), lap times are appended to:
 
 Stdout still prints `[RACE] OUTCOME=success attempt=N lap=Xs best=Ys`.
 
+Note both files record **successes only**. Every outcome — including
+`gate1_fail` and `gate_stall`, which otherwise exist only as those stdout lines
+— is also recorded per run in the sidecar below.
+
+## Per-run artifacts
+
+One run id (`%Y%m%d_%H%M%S`, minted at process start) ties together everything
+a run writes, so a recording and its telemetry pair exactly:
+
+| File | Contents |
+|------|----------|
+| `runs/videos/vision_<RUN_ID>.mp4` | The recording (annotated frames, burned-in `t=` overlay) |
+| `runs/videos/vision_<RUN_ID>.json` | Sidecar: target, pilot, git sha, per-attempt gates/outcome/end reason, measured frame rate |
+| `rl/data/gp_log_<RUN_ID>_a<N>.csv` | 40 Hz state + command trace, one file per attempt |
+
+All three are gitignored. `make push-videos` publishes them to the shared
+`videos` branch; `make videos-index` reads that archive without switching
+branches. See `scripts/push-videos-README.md`.
+
+Sidecar writes can never interrupt a flight — every entry point swallows its
+own errors, the same contract as the CSV writer.
+
 ## Fail / success logic
 
 - **Gate 1 fail:** `active_gate_index` stays `< 1` for `GATE1_TIMEOUT_S` (default 15s) with `pilot.gates_passed == 0`.
@@ -103,6 +125,28 @@ Stdout still prints `[RACE] OUTCOME=success attempt=N lap=Xs best=Ys`.
 | `GATE_PROGRESS_TIMEOUT_S` | `15` (`make auto` sets `25`) | Max seconds without gate advance after gate 1 |
 | `GATE1_WATCH_INTERVAL_S` | `5` | Seconds between progress watch logs |
 | `SIM_RESET_WAIT_S` | `5` | Pause after MAVLink sim reset |
+
+## The same watchdog on `make classical blue`
+
+`make auto` is not the only path with a stall watchdog. `auto_gp.py` — the
+single-shot control-flight entry (`make classical blue` / `make control-flight`)
+— ticks `GateStallWatchdog` (`simulator/gate_watchdog.py`) over the same
+`race_monitor` predicates, with tighter defaults: `GATE_PROGRESS_TIMEOUT_S=10`
+and `GATE1_TIMEOUT_S=20`, both `setdefault`, so the env still wins.
+`GP_STALL_RESET=0` turns it off.
+
+It shares the `GATE_ADVANCE`, `OUTCOME=`, `post_reset` and `*_watch` stdout
+markers below, so the two paths read the same in a log. Two differences worth
+knowing:
+
+- It resets the **pose only**. There is no preflight re-handshake, no
+  `wait_for_race_go`, and no attempt counter — `GPPilot`'s own `WAIT_FOR_START`
+  anchor picks up whatever countdown the sim restarts.
+- It never blocks. `run_auto_flight_loop` sleeps ~5.7 s inline during a reset;
+  the control-flight path owns the live vision window and the mp4 recorder, so
+  the reset runs as a state machine and the loop keeps ticking through it.
+
+Details and the full knob table: `docs/blueline-method.md` §1.4.
 
 ## Troubleshooting
 
