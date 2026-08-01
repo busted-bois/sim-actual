@@ -1,236 +1,396 @@
-"""MAVLink bus: connect, GCS heartbeat, 90 Hz send, arm/reset/disarm.
-
-MAVLINK20 MUST be set before the first pymavlink import (ODOMETRY is MAV2-only).
-"""
+"""MAVLink bus: connect, heartbeat, telemetry, actuation at 90 Hz."""
 
 from __future__ import annotations
 
 import os
-import threading
 import time
 
-# ODOMETRY (msg 331) requires MAVLink 2 — set before any pymavlink import.
 os.environ.setdefault("MAVLINK20", "1")
 
 from pymavlink import mavutil  # noqa: E402
 
-from simulator.controller import _send_attitude_rates  # noqa: E402
+from simulator.controller import (  # noqa: E402
+    CONTROL_HZ,
+    MAVLINK_CMD_SIM_RESET,
+    _send_attitude_rates,
+)
+from simulator.mavlink_client import (  # noqa: E402
+    GcsHeartbeat,
+    request_flight_streams,
+    send_gcs_heartbeat,
+)
+from simulator.mavlink_rx import MAVLinkRX  # noqa: E402
+from simulator.preflight import vision_ready  # noqa: E402
+from simulator.state_estimator import quat_from_rpy  # noqa: E402
+from simulator.transforms import quat_to_yaw  # noqa: E402
+from simulator.vision_rx import VisionRX  # noqa: E402
 
-from flightlab.state import State, StateTracker  # noqa: E402
+from flightlab.state import Cmd, State  # noqa: E402
 
-CONTROL_HZ = 90.0
-HOVER_THRUST = 0.27
-THRUST_MIN = 0.12
-THRUST_MAX = 0.60
-MAVLINK_CMD_SIM_RESET = 31000
-DEFAULT_CONN = "udpin:0.0.0.0:14550"
-# Estimator needs ~100 IMU samples (~1 s at 100+ Hz); allow boot margin.
-POSE_WAIT_S = 20.0
+CONTROL_DT = 1.0 / CONTROL_HZ
+LISTEN_ADDR = "127.0.0.1"
+LISTEN_PORT = 14550
+
+# Sim-ground-truth pose for attitude tests (not EKF).
+POSE_SOURCES_OK = frozenset({"odometry", "attitude"})
+VQ2_FALLBACK_S = float(os.environ.get("VQ2_FALLBACK_S", "2.0"))
+
+
+def _local_ned_from_data(
+    data: dict,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """LOCAL_POSITION_NED dict or legacy pos_ned/vel_ned from mavlink_rx."""
+    lpos = data.get("local_position_ned")
+    if lpos is not None:
+        return (
+            (float(lpos["x"]), float(lpos["y"]), float(lpos["z"])),
+            (
+                float(lpos.get("vx", 0.0)),
+                float(lpos.get("vy", 0.0)),
+                float(lpos.get("vz", 0.0)),
+            ),
+        )
+    if data.get("has_position") and data.get("pos_ned") is not None:
+        pos = data["pos_ned"]
+        vel = data.get("vel_ned") or (0.0, 0.0, 0.0)
+        return (
+            (float(pos[0]), float(pos[1]), float(pos[2])),
+            (float(vel[0]), float(vel[1]), float(vel[2])),
+        )
+    return None
+
+
+def _rpy_from_quat(q: tuple[float, float, float, float]) -> tuple[float, float, float]:
+    import math
+
+    w, x, y, z = q
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x))))
+    yaw = quat_to_yaw(w, x, y, z)
+    return roll, pitch, yaw
+
+
+def _rpy_from_imu(imu: dict, accel_sign: float = 1.0) -> tuple[float, float]:
+    """Gravity tilt from accelerometer — matches StateEstimator boot init."""
+    import math
+
+    ax = accel_sign * imu["ax"]
+    ay = accel_sign * imu["ay"]
+    az = accel_sign * imu["az"]
+    roll = math.atan2(-ay, -az)
+    pitch = math.atan2(ax, math.hypot(ay, az))
+    return roll, pitch
 
 
 class Bus:
-    """Thin MAVLink client for the vertical harness."""
-
-    def __init__(self, conn_str: str = DEFAULT_CONN) -> None:
+    def __init__(self) -> None:
+        self.data: dict = {}
         self.system_boot_ms = int(time.time() * 1000)
-        self.tracker = StateTracker()
-        self._hb_stop = threading.Event()
-        self._hb_thread: threading.Thread | None = None
-        self._last_arm_t = 0.0
-        self._want_armed = False
+        self._pose_mono: float | None = None
+        self._last_stamp: object = None
+        self._gcs_hb: GcsHeartbeat | None = None
+        self._seen: dict[str, bool] = {
+            "imu": False,
+            "attitude": False,
+            "odometry": False,
+            "local_position": False,
+            "estimator": False,
+        }
+        self.vq2_mode = False
+        self.pose_mode = ""
 
-        print(f"[bus] connecting {conn_str} ...", flush=True)
-        self.conn = mavutil.mavlink_connection(conn_str)
-        self._send_gcs_heartbeat()
-        hb = self.conn.wait_heartbeat(timeout=15)
-        if hb is None or self.conn.target_system == 0:
-            raise TimeoutError(
-                "no vehicle heartbeat within 15 s - is the sim running "
-                "and a TRAINING session started?"
-            )
+        os.environ.setdefault("FLIGHTLAB_QUIET_VISION", "1")
+
         print(
-            f"[bus] heartbeat from system {self.conn.target_system}",
+            f"[bus] connecting udpin:{LISTEN_ADDR}:{LISTEN_PORT} ...",
             flush=True,
         )
-        self._start_gcs_heartbeat()
-
-    def _send_gcs_heartbeat(self) -> None:
-        self.conn.mav.heartbeat_send(
-            mavutil.mavlink.MAV_TYPE_GCS,
-            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-            0,
-            0,
-            0,
-        )
-
-    def _start_gcs_heartbeat(self) -> None:
-        def loop() -> None:
-            while not self._hb_stop.wait(1.0):
-                try:
-                    self._send_gcs_heartbeat()
-                except Exception:
-                    break
-
-        self._hb_thread = threading.Thread(target=loop, daemon=True)
-        self._hb_thread.start()
-
-    def drain(self) -> State:
-        """Drain UDP buffer; return freshest State."""
-        while True:
-            try:
-                msg = self.conn.recv_match(blocking=False)
-            except ConnectionResetError:
-                break
-            if msg is None:
-                break
-            if msg.get_type() == "BAD_DATA":
-                continue
-            self.tracker.ingest(msg)
-        # Re-arm every ~1 s while we want armed and aren't yet.
-        if self._want_armed and not self.tracker.armed:
-            now = time.monotonic()
-            if now - self._last_arm_t >= 1.0:
-                self._send_arm(True)
-                self._last_arm_t = now
-        return self.tracker.snapshot()
-
-    def wait_for_pose(self, timeout_s: float = POSE_WAIT_S) -> bool:
-        """Wait for ODOMETRY/ATTITUDE or ESKF boot on HIGHRES_IMU (VQ2)."""
-        t0 = time.monotonic()
-        imu_n = 0
-        while time.monotonic() - t0 < timeout_s:
-            # Blocking read so we don't miss the IMU boot window.
-            try:
-                msg = self.conn.recv_match(blocking=True, timeout=0.2)
-            except ConnectionResetError:
-                msg = None
-            if msg is not None and msg.get_type() != "BAD_DATA":
-                if msg.get_type() == "HIGHRES_IMU":
-                    imu_n += 1
-                self.tracker.ingest(msg)
-            # Also drain any backlog.
-            s = self.drain()
-            if s.has_pose:
-                print(
-                    f"[bus] pose source: {s.pose_source} (imu_seen={imu_n} "
-                    f"baro_ok={s.baro_ok})",
-                    flush=True,
-                )
-                return True
+        self.conn = mavutil.mavlink_connection(f"udpin:{LISTEN_ADDR}:{LISTEN_PORT}")
+        self.conn.wait_heartbeat()
+        send_gcs_heartbeat(self.conn)
+        print(f"[bus] heartbeat from system {self.conn.target_system}", flush=True)
         print(
-            f"[bus] pose timeout: imu_seen={imu_n} "
-            f"est_ready={self.tracker.estimator.ready} "
-            f"odom={self.tracker._seen_odometry}",
+            "[bus] no ODOMETRY/ATTITUDE yet — will use EKF pose if blocked (VQ2 profile)",
             flush=True,
         )
+
+        # Feed IMU into estimator for pose fallback when ODOMETRY is blocked.
+        from simulator.state_estimator import StateEstimator
+
+        self.estimator = StateEstimator()
+        self.mavlink_rx = MAVLinkRX.create_mavlink_rx(
+            self.conn, self.data, estimator=self.estimator
+        )
+        self.vision_rx = VisionRX(self.data)
+        self._request_streams()
+        self._gcs_hb = GcsHeartbeat(self.conn)
+        self._gcs_hb.start()
+
+    def _request_streams(self) -> None:
+        request_flight_streams(self.conn)
+
+    def _mark_seen(self) -> None:
+        self._seen["imu"] = self.data.get("imu") is not None
+        self._seen["attitude"] = self.data.get("attitude") is not None
+        self._seen["odometry"] = self.data.get("odometry") is not None
+        self._seen["local_position"] = self.data.get(
+            "local_position_ned"
+        ) is not None or bool(self.data.get("has_position"))
+        self._seen["estimator"] = self.estimator.ready
+
+    def has_pose(self) -> bool:
+        self._mark_seen()
+        if self.data.get("odometry") is not None:
+            return True
+        if self.data.get("attitude") is not None:
+            return True
+        if self.estimator.ready:
+            return True
         return False
 
-    def wait_for_race_go(
-        self, timeout_s: float = 45.0, is_restart: bool = True
-    ) -> bool:
-        """Drain MAVLink until on-screen countdown hits 0 (sim GO!)."""
-        from simulator.preflight import RaceGoLatch, poll_race_go
-
-        print("[bus] waiting for race GO (countdown -> 0)...", flush=True)
-        latch = RaceGoLatch()
-        race = self.tracker.data.get("race_status") or {}
-        armed_boot = race.get("sim_boot_time_ms")
-        latch.reset_for_arm(armed_boot, is_restart=is_restart)
-        t0 = time.monotonic()
-        last_log = 0.0
-        while time.monotonic() - t0 < timeout_s:
-            self.drain()
-            allowed, go_boot_ms = poll_race_go(self.tracker.data, latch)
-            if allowed:
-                race = self.tracker.data.get("race_status") or {}
-                print(
-                    "[bus] Race go! "
-                    f"sim_boot={race.get('sim_boot_time_ms')}ms "
-                    f"race_start={race.get('race_start_boot_time_ms')}ms "
-                    f"go_boot={go_boot_ms}ms branch={latch.branch}",
-                    flush=True,
-                )
-                return True
-            now = time.monotonic()
-            if now - last_log >= 1.0:
-                race = self.tracker.data.get("race_status") or {}
-                print(
-                    "[bus] countdown... "
-                    f"sim_boot={race.get('sim_boot_time_ms', -1)} "
-                    f"race_start={race.get('race_start_boot_time_ms', -1)} "
-                    f"latch={latch.go_boot_ms}",
-                    flush=True,
-                )
-                last_log = now
-            time.sleep(0.02)
-        print("[bus] race GO timeout", flush=True)
+    def has_flight_pose(self) -> bool:
+        self._mark_seen()
+        if self.data.get("odometry") is not None:
+            return True
+        if self.data.get("attitude") is not None:
+            return True
         return False
 
-    def wait_for_fresh_race_start(self, timeout_s: float = 30.0) -> bool:
-        """After sim reset, wait for a new race_start before arming."""
-        print("[bus] waiting for fresh race_start after reset...", flush=True)
-        before = None
-        race0 = self.tracker.data.get("race_status")
-        if race0:
-            before = race0.get("race_start_boot_time_ms", -1)
-            self.tracker.data["_preflight_race_start_baseline"] = before
+    @staticmethod
+    def pose_ok(s: State | None) -> bool:
+        return s is not None and s.pose_source in POSE_SOURCES_OK
+
+    def pose_usable(self, s: State | None) -> bool:
+        if s is None:
+            return False
+        if s.pose_source in POSE_SOURCES_OK:
+            return True
+        return self.vq2_mode and s.pose_source in ("ekf", "imu_tilt")
+
+    def _race_started(self) -> bool:
+        race = self.data.get("race_status") or {}
+        return race.get("race_start_boot_time_ms", -1) >= 0
+
+    def _try_vq2_fallback(self) -> bool:
+        self._mark_seen()
+        if not self._seen["estimator"]:
+            return False
+        if not vision_ready(self.data):
+            return False
+        if not self._race_started():
+            return False
+        self.vq2_mode = True
+        self.pose_mode = "vq2"
+        print(
+            "[bus] VQ2 telemetry block — using EKF pose "
+            "(IMU+vision; no ODOMETRY/ATTITUDE)",
+            flush=True,
+        )
+        return True
+
+    def wait_for_odometry(self, timeout_s: float = 90.0) -> bool:
+        mode = self.wait_for_flight_ready(timeout_s=timeout_s)
+        return mode is not None
+
+    def wait_for_flight_ready(self, timeout_s: float = 90.0) -> str | None:
+        """Wait for ODOMETRY/ATTITUDE, or fall back to EKF in VQ2 sessions."""
+        if not self.wait_for_link():
+            print("[bus] no HIGHRES_IMU — is FlightSim running?", flush=True)
+            return None
+
+        print(
+            "[bus] MAVLink link OK (IMU). Enter TRAINING/SUBMISSION session, click Race.",
+            flush=True,
+        )
         t0 = time.monotonic()
         last_log = 0.0
+        last_arm = 0.0
+        last_req = 0.0
+
         while time.monotonic() - t0 < timeout_s:
-            self.drain()
-            race = self.tracker.data.get("race_status") or {}
-            race_start = race.get("race_start_boot_time_ms", -1)
-            sim_boot = race.get("sim_boot_time_ms", 0)
-            if race_start >= 0:
-                # Fresh if differs from baseline, or scheduled in the future,
-                # or sim_boot reset small after teleport.
-                baseline = self.tracker.data.get("_preflight_race_start_baseline")
-                scheduled = race_start - sim_boot > 1500
-                changed = baseline is None or race_start != baseline
-                rebooted = sim_boot < 10000
-                if scheduled or changed or rebooted:
-                    print(
-                        f"[bus] fresh race_start={race_start} sim_boot={sim_boot}",
-                        flush=True,
-                    )
-                    return True
+            self._mark_seen()
+            if self.data.get("odometry") is not None:
+                self.pose_mode = "odometry"
+                print("[bus] pose source: ODOMETRY", flush=True)
+                return "odometry"
+            if self.data.get("attitude") is not None:
+                self.pose_mode = "attitude"
+                print("[bus] pose source: ATTITUDE", flush=True)
+                return "attitude"
+
             now = time.monotonic()
+            if now - t0 >= VQ2_FALLBACK_S and self._try_vq2_fallback():
+                return "vq2"
+
+            if now - last_arm >= 1.0:
+                self.arm()
+                last_arm = now
+            if now - last_req >= 5.0:
+                self._request_streams()
+                last_req = now
+
             if now - last_log >= 2.0:
+                race = self.data.get("race_status") or {}
+                vision = vision_ready(self.data)
+                hint = ""
+                if not vision:
+                    hint = " → enter TRAINING/SUBMISSION flight session"
+                elif not self._race_started():
+                    hint = " → click Race"
+                elif now - t0 >= VQ2_FALLBACK_S:
+                    hint = " → switching to EKF pose"
                 print(
-                    f"[bus] waiting race_start... start={race_start} boot={sim_boot}",
+                    "[bus] waiting for pose... "
+                    f"vision={vision} odo={self._seen['odometry']} "
+                    f"att={self._seen['attitude']} ekf={self._seen['estimator']} "
+                    f"race_start={race.get('race_start_boot_time_ms', -1)}"
+                    f"{hint}",
                     flush=True,
                 )
                 last_log = now
             time.sleep(0.05)
-        print(
-            "[bus] race_start timeout — click Restart Race if countdown never starts",
-            flush=True,
-        )
+
+        if self._try_vq2_fallback():
+            return "vq2"
+        return None
+
+    def wait_for_link(self, timeout_s: float = 15.0) -> bool:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout_s:
+            self._mark_seen()
+            if self._seen["imu"]:
+                return True
+            time.sleep(0.05)
         return False
 
-    def send(
-        self, roll_rate: float, pitch_rate: float, yaw_rate: float, thrust: float
-    ) -> None:
-        thrust = float(max(THRUST_MIN, min(THRUST_MAX, thrust)))
-        # Estimator predicts velocity from commanded thrust (accel is garbage
-        # under power in this sim).
-        self.tracker.estimator.thrust_cmd = thrust
+    def pose_diagnostic(self) -> str:
+        self._mark_seen()
+        race = self.data.get("race_status") or {}
+        lines = [
+            f"  vision:      {'yes' if vision_ready(self.data) else 'NO'}",
+            f"  HIGHRES_IMU: {'yes' if self._seen['imu'] else 'NO'}",
+            f"  ATTITUDE:    {'yes' if self._seen['attitude'] else 'NO'}",
+            f"  ODOMETRY:    {'yes' if self._seen['odometry'] else 'NO'}",
+            f"  LOCAL_POS:   {'yes' if self._seen['local_position'] else 'NO'}",
+            f"  race_start:  {race.get('race_start_boot_time_ms', 'n/a')}",
+            f"  EKF ready:   {'yes' if self._seen['estimator'] else 'NO'}",
+            f"  vq2_mode:    {self.vq2_mode}",
+        ]
+        return "\n".join(lines)
+
+    def _read_state(self) -> State | None:
+        odo = self.data.get("odometry")
+        att = self.data.get("attitude")
+        imu = self.data.get("imu")
+
+        roll = pitch = yaw = 0.0
+        quat = (1.0, 0.0, 0.0, 0.0)
+        pos = (0.0, 0.0, 0.0)
+        vel = (0.0, 0.0, 0.0)
+        ang = (0.0, 0.0, 0.0)
+        pose_source = "unknown"
+        alt_trusted = False
+
+        if odo is not None:
+            pose_source = "odometry"
+            alt_trusted = True
+            quat = (odo["qw"], odo["qx"], odo["qy"], odo["qz"])
+            roll, pitch, yaw = _rpy_from_quat(quat)
+            pos = (odo["x"], odo["y"], odo["z"])
+            vel = (odo["vx"], odo["vy"], odo["vz"])
+            ang = (
+                odo.get("roll_speed", 0.0),
+                odo.get("pitch_speed", 0.0),
+                odo.get("yaw_speed", 0.0),
+            )
+        elif att is not None:
+            pose_source = "attitude"
+            roll = att["roll"]
+            pitch = att["pitch"]
+            yaw = att["yaw"]
+            q = quat_from_rpy(roll, pitch, yaw)
+            quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+            ang = (att["roll_speed"], att["pitch_speed"], att["yaw_speed"])
+            local = _local_ned_from_data(self.data)
+            if local is not None:
+                pos, vel = local
+                alt_trusted = True
+        elif self.estimator.ready:
+            pose_source = "ekf"
+            p_e, v_e, q_e = self.estimator.pose()
+            quat = tuple(float(x) for x in q_e)  # type: ignore[assignment]
+            roll, pitch, yaw = _rpy_from_quat(quat)
+            pos = tuple(float(x) for x in p_e)  # type: ignore[assignment]
+            vel = tuple(float(x) for x in v_e)  # type: ignore[assignment]
+            if imu is not None:
+                ang = (imu["gx"], imu["gy"], imu["gz"])
+            alt_trusted = self.vq2_mode
+        else:
+            return None
+
+        if imu is not None:
+            gyro = (imu["gx"], imu["gy"], imu["gz"])
+            g_body = None
+            ax, ay, az = imu["ax"], imu["ay"], imu["az"]
+            gn = (ax * ax + ay * ay + az * az) ** 0.5
+            if gn > 1e-3:
+                g_body = (ax / gn, ay / gn, az / gn)
+        else:
+            gyro = ang
+            g_body = None
+
+        now = time.monotonic()
+        if odo is not None:
+            stamp: object = ("odo", id(odo))
+        elif att is not None:
+            stamp = ("att", self.data.get("att_time_ms"))
+        else:
+            stamp = ("ekf", round(now, 2))
+        if stamp != self._last_stamp:
+            self._last_stamp = stamp
+            self._pose_mono = now
+        pose_age = now - self._pose_mono if self._pose_mono is not None else 999.0
+
+        return State(
+            t_mono=now,
+            armed=bool(self.data.get("armed", False)),
+            roll=roll,
+            pitch=pitch,
+            yaw=yaw,
+            roll_rate=ang[0],
+            pitch_rate=ang[1],
+            yaw_rate=ang[2],
+            pos_ned=pos,
+            vel_ned=vel,
+            gyro=gyro,
+            quat=quat,
+            pose_age_s=pose_age,
+            gravity_body=g_body,
+            pose_source=pose_source,
+            alt_trusted=alt_trusted,
+        )
+
+    def snapshot(self) -> State | None:
+        return self._read_state()
+
+    def send_cmd(self, cmd: Cmd) -> None:
+        self.estimator.thrust_cmd = float(cmd.thrust)
         _send_attitude_rates(
             self.conn,
             self.system_boot_ms,
-            roll_rate=float(roll_rate),
-            pitch_rate=float(pitch_rate),
-            yaw_rate=float(yaw_rate),
-            thrust=thrust,
+            roll_rate=cmd.roll_rate,
+            pitch_rate=cmd.pitch_rate,
+            yaw_rate=cmd.yaw_rate,
+            thrust=cmd.thrust,
         )
 
-    def _send_arm(self, arm: bool) -> None:
+    def arm(self) -> None:
         self.conn.mav.command_long_send(
             self.conn.target_system,
             self.conn.target_component,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
             0,
-            1.0 if arm else 0.0,
+            1,
             0,
             0,
             0,
@@ -239,30 +399,25 @@ class Bus:
             0,
         )
 
-    def arm(self, timeout_s: float = 15.0) -> bool:
-        self._want_armed = True
-        t0 = time.monotonic()
-        self._send_arm(True)
-        self._last_arm_t = time.monotonic()
-        while time.monotonic() - t0 < timeout_s:
-            s = self.drain()
-            if s.armed:
-                print("[bus] armed", flush=True)
-                return True
-            time.sleep(0.05)
-        print("[bus] arm timeout", flush=True)
-        return False
-
     def disarm(self) -> None:
-        self._want_armed = False
-        self._send_arm(False)
-        for _ in range(5):
-            self.drain()
-            self._send_arm(False)
-            time.sleep(0.05)
+        self.conn.mav.command_long_send(
+            self.conn.target_system,
+            self.conn.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
-    def reset(self) -> None:
-        self._want_armed = False
+    def reset_sim(self) -> None:
+        self.estimator.reset()
+        self._pose_mono = None
+        self._last_stamp = None
         self.conn.mav.command_long_send(
             self.conn.target_system,
             self.conn.target_component,
@@ -276,10 +431,23 @@ class Bus:
             0,
             0,
         )
-        self.tracker.reset_estimator()
-        print("[bus] sim reset (31000)", flush=True)
+
+    def ensure_armed(self, timeout_s: float = 30.0) -> bool:
+        t0 = time.monotonic()
+        last_arm = 0.0
+        while time.monotonic() - t0 < timeout_s:
+            if self.data.get("armed"):
+                return True
+            if time.monotonic() - last_arm >= 1.0:
+                self.arm()
+                last_arm = time.monotonic()
+            time.sleep(0.05)
+        return False
 
     def close(self) -> None:
-        self._hb_stop.set()
-        if self._hb_thread is not None:
-            self._hb_thread.join(timeout=2.0)
+        if self._gcs_hb is not None:
+            self._gcs_hb.stop()
+        for rx in (self.mavlink_rx, self.vision_rx):
+            thread = rx.get_thread_for_join()
+            if thread is not None:
+                thread.join(timeout=2.0)

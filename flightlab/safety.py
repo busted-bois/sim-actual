@@ -1,4 +1,4 @@
-"""Blow-up monitor + kill sequence."""
+"""Blow-up detector and recovery actions."""
 
 from __future__ import annotations
 
@@ -6,115 +6,114 @@ import math
 import time
 from dataclasses import dataclass, field
 
-from flightlab.bus import HOVER_THRUST, Bus
-from flightlab.state import State
+from flightlab.state import Cmd, State
 
-ATT_LIMIT_RAD = math.radians(60.0)
-ATT_HOLD_S = 0.2
-ALT_MAX_M = 60.0
-ALT_MIN_M = 0.2  # only after airborne (spawn starts ~0)
-AIRBORNE_ALT_M = 1.0
-NE_LIMIT_M = 100.0
-GYRO_LIMIT = 8.0  # rad/s
-GYRO_HOLD_S = 0.5
+DEG60 = math.radians(60.0)
+GYRO_LIMIT = 8.0
 POSE_GAP_S = 0.5
-KILL_HOLD_S = 2.0
+ALT_HIGH_M = 60.0
+ALT_LOW_M = 0.2
+TAKEOFF_LATCH_M = 0.5  # low-alt trip arms only after first climbing past this
+HORIZ_LIMIT_M = 100.0
+TILT_TRIP_S = 0.2
+GYRO_TRIP_S = 0.5
+ALT_UNTRUSTED_TRIP_S = 0.5
+HOVER_THRUST = 0.27
 
 
 @dataclass
 class SafetyResult:
     tripped: bool = False
     reason: str = ""
+    recovery_cmd: Cmd = field(default_factory=lambda: Cmd(0.0, 0.0, 0.0, HOVER_THRUST))
 
 
-@dataclass
 class SafetyMonitor:
-    """Active in every test. Call check() each tick; handle_trip() on trip."""
-
-    expect_near_ground: bool = False
-    armed_expected: bool = True
-    _att_bad_since: float | None = None
-    _gyro_bad_since: float | None = None
-    _ever_had_pose: bool = False
-    _was_airborne: bool = False
-    trips: list[str] = field(default_factory=list)
+    def __init__(self) -> None:
+        self._tilt_t0: float | None = None
+        self._gyro_t0: float | None = None
+        self._alt_untrusted_t0: float | None = None
+        self._was_armed = False
+        self._arm_mono: float | None = None
+        self._airborne = False  # latched once alt first exceeds TAKEOFF_LATCH_M
 
     def reset(self) -> None:
-        self._att_bad_since = None
-        self._gyro_bad_since = None
-        self._ever_had_pose = False
-        self._was_airborne = False
-        self.expect_near_ground = False
-        self.armed_expected = True
+        """Re-anchor the grace window. Call immediately before flight phases
+        (after race GO + arm) — calling it right after reset_sim lets the
+        up-to-45 s race-GO wait silently burn the whole grace window."""
+        self._tilt_t0 = None
+        self._gyro_t0 = None
+        self._alt_untrusted_t0 = None
+        self._was_armed = False
+        self._arm_mono = time.monotonic()
+        self._airborne = False
 
     def check(self, s: State) -> SafetyResult:
-        now = s.t
-        if s.has_pose:
-            self._ever_had_pose = True
-
-        # Pose gap
-        if self._ever_had_pose and s.pose_age > POSE_GAP_S:
-            return self._trip(f"pose_gap={s.pose_age:.2f}s")
-
-        # Unexpected disarm
-        if self.armed_expected and self._ever_had_pose and not s.armed:
-            return self._trip("unexpected_disarm")
-
-        if not s.has_pose:
-            return SafetyResult()
-
-        n, e, z = s.pos
-        alt = -z  # NED → altitude above spawn/ground approx
-        if alt >= AIRBORNE_ALT_M:
-            self._was_airborne = True
-
-        # Attitude
-        if abs(s.roll) > ATT_LIMIT_RAD or abs(s.pitch) > ATT_LIMIT_RAD:
-            if self._att_bad_since is None:
-                self._att_bad_since = now
-            elif now - self._att_bad_since >= ATT_HOLD_S:
-                return self._trip(
-                    f"attitude |r|={math.degrees(abs(s.roll)):.0f} "
-                    f"|p|={math.degrees(abs(s.pitch)):.0f} deg"
-                )
+        now = s.t_mono
+        arm_grace = self._arm_mono is not None and (now - self._arm_mono) < 3.0
+        tilt = max(abs(s.roll), abs(s.pitch))
+        if tilt > DEG60:
+            if self._tilt_t0 is None:
+                self._tilt_t0 = now
+            elif now - self._tilt_t0 >= TILT_TRIP_S:
+                return SafetyResult(True, "tilt>60deg", _level_hover())
         else:
-            self._att_bad_since = None
+            self._tilt_t0 = None
 
-        # Altitude — max always; min only after we were airborne (not spawn)
-        if alt > ALT_MAX_M:
-            return self._trip(f"alt={alt:.1f}m > {ALT_MAX_M}")
-        if self._was_airborne and not self.expect_near_ground and alt < ALT_MIN_M:
-            return self._trip(f"alt={alt:.2f}m unplanned low")
-
-        # Lateral drift
-        if abs(n) > NE_LIMIT_M or abs(e) > NE_LIMIT_M:
-            return self._trip(f"ne=({n:.1f},{e:.1f})")
-
-        # Gyro
-        gx, gy, gz = s.gyro
-        if max(abs(gx), abs(gy), abs(gz)) > GYRO_LIMIT:
-            if self._gyro_bad_since is None:
-                self._gyro_bad_since = now
-            elif now - self._gyro_bad_since >= GYRO_HOLD_S:
-                return self._trip(f"gyro={max(abs(gx), abs(gy), abs(gz)):.1f}")
+        alt = -s.pos_ned[2]
+        # No trusted altitude and no EKF fallback -> the thrust law silently
+        # freezes at hover (controllers._thrust) and the drone sinks/climbs
+        # unchecked. Trip loudly instead of flying ballistic (0.5 s debounce).
+        if (
+            not arm_grace
+            and not s.alt_trusted
+            and s.pose_source
+            not in (
+                "ekf",
+                "imu_tilt",
+            )
+        ):
+            if self._alt_untrusted_t0 is None:
+                self._alt_untrusted_t0 = now
+            elif now - self._alt_untrusted_t0 >= ALT_UNTRUSTED_TRIP_S:
+                return SafetyResult(True, "alt_untrusted", _level_hover())
         else:
-            self._gyro_bad_since = None
+            self._alt_untrusted_t0 = None
+
+        # EKF z drifts under thrust (baro off) — do not trip on its altitude.
+        alt_safe = s.alt_trusted and s.pose_source != "ekf"
+        if alt_safe:
+            if alt > TAKEOFF_LATCH_M:
+                self._airborne = True
+            if not arm_grace:
+                if alt > ALT_HIGH_M:
+                    return SafetyResult(True, "alt>60m", _level_hover())
+                # The drone spawns on the ground (alt ~0): the low-alt floor
+                # only arms after the first real climb, else it trips at tick 1.
+                if self._airborne and alt < ALT_LOW_M:
+                    return SafetyResult(True, "alt<0.2m", _level_hover())
+
+        if abs(s.pos_ned[0]) > HORIZ_LIMIT_M or abs(s.pos_ned[1]) > HORIZ_LIMIT_M:
+            return SafetyResult(True, "horiz>100m", _level_hover())
+
+        gyro_mag = math.hypot(*s.gyro)
+        if gyro_mag > GYRO_LIMIT:
+            if self._gyro_t0 is None:
+                self._gyro_t0 = now
+            elif now - self._gyro_t0 >= GYRO_TRIP_S:
+                return SafetyResult(True, "gyro>8rad/s", _level_hover())
+        else:
+            self._gyro_t0 = None
+
+        if s.pose_age_s > POSE_GAP_S:
+            return SafetyResult(True, "pose_gap>0.5s", _level_hover())
+
+        if self._was_armed and not s.armed:
+            return SafetyResult(True, "unexpected_disarm", _level_hover())
+        self._was_armed = s.armed
 
         return SafetyResult()
 
-    def _trip(self, reason: str) -> SafetyResult:
-        self.trips.append(reason)
-        return SafetyResult(tripped=True, reason=reason)
 
-    def handle_trip(self, bus: Bus, reason: str) -> None:
-        """Level + hover 2 s → disarm → reset."""
-        print(f"[safety] BLOWUP: {reason} — kill sequence", flush=True)
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < KILL_HOLD_S:
-            bus.drain()
-            bus.send(0.0, 0.0, 0.0, HOVER_THRUST)
-            time.sleep(1.0 / 90.0)
-        bus.disarm()
-        time.sleep(0.3)
-        bus.reset()
-        time.sleep(2.0)
+def _level_hover() -> Cmd:
+    return Cmd(0.0, 0.0, 0.0, HOVER_THRUST)

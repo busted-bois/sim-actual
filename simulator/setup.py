@@ -125,7 +125,9 @@ def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
     _request_message_interval(
         sim_conn, mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU, IMU_MESSAGE_INTERVAL_US
     )
-    _request_data_streams(sim_conn)
+    # NOTE: no GCS heartbeat here on purpose. The flight path (auto/auto-gp/
+    # sim) historically flies without one, and adding it changes the wire
+    # traffic mid-flight; flightlab/bus.py manages its own for the harness.
 
     # -------------------------------
     # Setup Mavlink msg receiver

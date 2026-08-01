@@ -3,6 +3,8 @@ import struct
 import time
 import threading
 
+from pymavlink import mavutil
+
 from simulator.config import TrackGate
 from simulator.transforms import quat_to_yaw
 
@@ -38,6 +40,7 @@ class MAVLinkRX:
         self.expected_num_track_chunks = {}
         self._debug_last_race_log = 0.0
         self._debug_logged_track = False
+        self._last_recv_warn = 0.0
 
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data, estimator=None):
@@ -58,11 +61,21 @@ class MAVLinkRX:
         while self.is_running:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
-            except ConnectionResetError:
-                print(
-                    "WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port."
-                )
-                return
+            except OSError:
+                # Windows raises ConnectionResetError on UDP recv after an
+                # ICMP port-unreachable (sim closing/restarting); the link
+                # comes back when the sim does. Keep listening — a dead RX
+                # thread silently starves every consumer of telemetry.
+                now = time.monotonic()
+                if now - self._last_recv_warn >= 5.0:
+                    print(
+                        "WARNING: MAVLink recv error (sim restarting?); "
+                        "still listening...",
+                        flush=True,
+                    )
+                    self._last_recv_warn = now
+                time.sleep(0.05)
+                continue
 
             if msg is None:
                 time.sleep(0.001)
@@ -136,6 +149,8 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
+        if msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+            return
         self.data["armed"] = bool(msg.base_mode & 0b10000000)
 
     def on_timesync(self, msg):
@@ -157,9 +172,6 @@ class MAVLinkRX:
     def on_local_position_ned(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
         self.data["vel_ned"] = (msg.vx, msg.vy, msg.vz)
-        self.data["pos_time_ms"] = msg.time_boot_ms
-        self.data["has_position"] = True
-        # manual-flight fallback source (simulator/manual_control.py)
         self.data["local_position_ned"] = {
             "x": msg.x,
             "y": msg.y,
@@ -168,6 +180,8 @@ class MAVLinkRX:
             "vy": msg.vy,
             "vz": msg.vz,
         }
+        self.data["pos_time_ms"] = msg.time_boot_ms
+        self.data["has_position"] = True
 
     def on_odometry(self, msg):
         self.data["pos_ned"] = (msg.x, msg.y, msg.z)
@@ -188,8 +202,6 @@ class MAVLinkRX:
             "qy": qy,
             "qz": qz,
             "qw": qw,
-            # (w, x, y, z) tuple for manual flight's _quat_to_euler
-            "q": (qw, qx, qy, qz),
             "roll_speed": msg.rollspeed,
             "pitch_speed": msg.pitchspeed,
             "yaw_speed": msg.yawspeed,
@@ -216,9 +228,6 @@ class MAVLinkRX:
             "time_us": msg.time_usec,
         }
         self.data["imu"] = imu
-        # Arrival marker for manual flight: event/qualification sessions stream
-        # IMU while blocking pose telemetry — lets it tell "blocked" from "silent".
-        self.data["highres_imu_mono"] = time.monotonic()
         if self.estimator is not None:
             self.estimator.on_imu(imu)
 
