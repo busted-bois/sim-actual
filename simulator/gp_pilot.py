@@ -462,37 +462,31 @@ BLIND_VD_CLAMP_MPS = 1.5
 # ~0.19. That underdamping is the vertical overshoot that leaves the drone a
 # median 0.70 m off centre at the gate, against a 0.75 m half-extent.
 #
-# DEFAULT OFF: flight-tested WORSE. Kept because the mechanism above is real
-# and the negative result is the useful part.
+# This is NOT the stale-P failure that caused the gate-2 bottom-bar strike (see
+# the MIN_BX_FOR_ELEV else-branch): that held a frozen POSITION sample and flew
+# a below-hover command open-loop into the gate. This touches D only, with a
+# live measurement of present vertical speed, and is sign-locked against sink
+# by construction -- descending gives d_vert > 0, which adds thrust. It cannot
+# hold a descend command for even one tick.
 #
-# Run 20260801_145015 (7 attempts at 6cd1396) against 20260801_134651 (17
-# attempts before it). The mechanism did exactly what it claimed and the
-# outcome still got worse:
+# FLIGHT-CONFIRMED. Controlled A/B, same env, same n, back-to-back sessions,
+# this flag the only variable:
 #
-#   vert damping absent .. 62.6% -> 6.6%     (fix works)
-#   ticks over descent cap  19.2% -> 2.2%
-#   vD median ............ +0.248 -> -0.044  (sink nulled)
-#   bz median ............ -0.192 -> -0.284  (position error WORSE)
-#   reached gate >= 3 .... 9/17 -> 1/7
+#                        ON (20260801_145015)   OFF (20260801_151327)
+#   gates reached        2,1,2,3,1,1,0          0,0,1,0,0,0,0
+#   reached gate >= 1    6/7                    1/7
+#   outcomes             gate_stall x6          gate1_fail x6
+#   vert damping absent  6.6%                   66.2%
+#   over descent cap     2.2%                   18.0%
+#   vD p95               0.65                   1.00
 #
-# `clip(vD)` is a velocity NULL, not a damper: it drives vD to zero regardless
-# of how far off the gate line the drone is. The authorities decide who wins --
-#
-#   max P: ELEV_ERR_CLAMP_M * K_P_THRUST      = 2.0  * 0.030 = 0.0600
-#   max D: BLIND_VD_CLAMP_MPS * K_D_THRUST    = 1.5  * 0.045 = 0.0675
-#
-# -- and D is 12.5% LARGER. At the old ~34% duty the P term still got its way
-# between vision frames; applied every tick, the null holds a standing position
-# error open indefinitely and the drone parks below the gate with vD ~ 0.
-#
-# That is why the blind path a few lines down is correct and this was not:
-# blind, there IS no position error to fight, so nulling velocity is the right
-# fallback. With a gate locked there is one, and nulling velocity fights it.
-#
-# A real fix has to stay subordinate to P -- bound this term below max-P, or
-# damp the elevation ERROR rate rather than absolute vertical speed. Not
-# attempted here; re-enable with GP_DVERT_HOLD=1 to reproduce the above.
-GP_DVERT_HOLD = _env_flag("GP_DVERT_HOLD", False)
+# Turning it off does not merely lose the gain -- it fails at gate 1 six times
+# out of seven. Do not default this off again without a controlled A/B saying
+# so. An earlier attempt to do exactly that (reverted) compared this against
+# run 20260801_134651, which has git: null because it was hard-killed, so its
+# code and config are unknown; gp_score refuses to pool across configs for that
+# reason and the comparison ignored it.
+GP_DVERT_HOLD = _env_flag("GP_DVERT_HOLD", True)
 # Descent-rate cap. Overshoot into gate 2's bottom bar came from building more
 # sink than the (slow) elevation loop could arrest before the near-gate blind
 # window. Once descending faster than this, thrust is not allowed below the
