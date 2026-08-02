@@ -68,13 +68,13 @@ class VQ2PoseTests(unittest.TestCase):
             },
             "active_gate_index": 0,
         }
-        odo0 = est.tick(data, [{"pos": [10.0, 0.0, -5.0]}])
+        odo0 = est.tick(data, [{"pos": [10.0, 0.0, -5.0]}], thrust_cmd=0.27)
         self.assertIsNotNone(odo0)
         data["imu"]["time_us"] = 10000
-        data["imu"]["ax"] = 1.0
-        odo1 = est.tick(data, [{"pos": [10.0, 0.0, -5.0]}])
+        data["imu"]["gx"] = 0.01
+        odo1 = est.tick(data, [{"pos": [10.0, 0.0, -5.0]}], thrust_cmd=0.27)
         self.assertIsNotNone(odo1)
-        self.assertNotEqual(odo0["vx"], odo1["vx"])
+        self.assertNotEqual(odo0["qx"], odo1["qx"])
 
     def test_vision_fusion_moves_ekf_position(self):
         ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3))
