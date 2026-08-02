@@ -7,8 +7,8 @@ seeds:
 eval_episodes: 50
 policy_path: rl/data/policy.pt
 env:
-  curriculum_stage: 2
-  max_steps: 1000
+  curriculum_stage: 3
+  max_steps: 3500
   gate_size: 2.72
 ppo:
   n_steps: 1024
