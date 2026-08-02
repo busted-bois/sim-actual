@@ -6,8 +6,8 @@ import math
 
 import numpy as np
 
-from rl.ekf import ESKF
-from rl.vision_fusion import (
+from rl.estimation.ekf import ESKF
+from rl.perception.vision_fusion import (
     fuse_gate_bearing_yaw,
     fuse_gate_target_position,
     fuse_pnp_gate,

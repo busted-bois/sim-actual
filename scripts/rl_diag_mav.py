@@ -5,8 +5,8 @@ Logs first occurrence of every message type in full, every ENCAPSULATED_DATA /
 DATA_TRANSMISSION_HANDSHAKE chunk, anything gate/mission/track-ish, and a final
 histogram of message-type counts.
 
-    uv run -m rl.diag_mav            # 25s on the live race
-    uv run -m rl.diag_mav 40         # custom duration
+    uv run scripts/rl_diag_mav.py            # 25s on the live race
+    uv run scripts/rl_diag_mav.py 40         # custom duration
 """
 
 import collections

@@ -7,7 +7,7 @@ to spawn, then apply known attitude-rate + thrust steps and log the attitude
   * What is hover thrust (zero vertical accel)?
   * Sign + scale of pitch-rate -> pitch-angle.
 
-    uv run -m rl.dynamics_id
+    uv run scripts/rl_diag_dynamics.py
 """
 
 import os
@@ -15,7 +15,7 @@ import sys
 import time
 
 
-from rl.sim_interface import SimInterface
+from rl.environment.sim_interface import SimInterface
 from simulator.transforms import quat_to_yaw
 
 HZ = 100.0

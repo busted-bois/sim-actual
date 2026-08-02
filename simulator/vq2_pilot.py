@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import time as _time
 
-# Measured VQ2 dynamics (rl/fly2.py / rl.dynamics_id)
+# Measured VQ2 dynamics (rl/experts/fly2.py / scripts/rl_diag_dynamics.py)
 HOVER_T = 0.27
 CRUISE_T = 0.30
 KP_Z, KD_Z = 0.025, 0.030

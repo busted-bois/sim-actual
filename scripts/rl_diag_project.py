@@ -6,7 +6,7 @@ center. If the green quad lands on the visible orange gate, our intrinsics +
 frame conventions + gate orientation are correct. Saves an overlay PNG to
 inspect.
 
-    uv run -m rl.diag_project
+    uv run scripts/rl_diag_project.py
 """
 
 import json
@@ -16,11 +16,11 @@ import sys
 import cv2
 import numpy as np
 
-from rl import spec
-from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from rl.core import spec
+from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 
-OUT = os.path.join(os.path.dirname(__file__), "data", "proj_check.png")
-RAW = os.path.join(os.path.dirname(__file__), "data", "proj_raw.png")
+OUT = os.path.join(os.path.dirname(__file__), "..", "rl", "data", "proj_check.png")
+RAW = os.path.join(os.path.dirname(__file__), "..", "rl", "data", "proj_raw.png")
 
 
 def corners_world(gate):

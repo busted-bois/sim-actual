@@ -25,12 +25,12 @@ import time
 import numpy as np
 import torch
 
-from rl import spec
-from rl.ekf import ESKF
-from rl.env import GateRacingEnv
-from rl.fly2_course import HOVER_T as LIVE_HOVER_THRUST
-from rl.observation import RATE_SCALE, build_observation
-from rl.train_ppo import POLICY_PT, StandalonePolicy
+from rl.core import spec
+from rl.estimation.ekf import ESKF
+from rl.environment.env import GateRacingEnv
+from rl.experts.fly2_course import HOVER_T as LIVE_HOVER_THRUST
+from rl.core.observation import RATE_SCALE, build_observation
+from rl.training.train_ppo import POLICY_PT, StandalonePolicy
 
 # The live FlightSim plant hovers at ~0.27 and becomes unstable well below the
 # training rate caps (fly2 clips at 0.30). Checkpoints carry the plant they
@@ -51,7 +51,7 @@ def load_policy(path: str = POLICY_PT, device: str = "cpu"):
     if not os.path.exists(path):
         raise SystemExit(
             f"[deploy] no policy at {path} — run `make train-ppo` "
-            "(or `uv run -m rl.train_ppo --quick` for a smoke checkpoint)"
+            "(or `uv run -m rl.training.train_ppo --quick` for a smoke checkpoint)"
         )
     dev = torch.device(device)
     ckpt = torch.load(path, map_location=dev)
@@ -172,8 +172,8 @@ class PolicyRunner:
         )
 
     def run(self):
-        from rl.fly2_course import resolve_gate_map
-        from rl.sim_interface import GATE_MAP_PATH, SimInterface
+        from rl.experts.fly2_course import resolve_gate_map
+        from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 
         sim = SimInterface()
         # Stop per-frame vision spam so Race/arm logs stay visible.
@@ -317,7 +317,7 @@ class PolicyRunner:
 
 def _selftest():
     if not os.path.exists(POLICY_PT):
-        print("[selftest] no policy.pt — run `uv run -m rl.train_ppo --quick` first")
+        print("[selftest] no policy.pt — run `uv run -m rl.training.train_ppo --quick` first")
         return
     act, meta = load_policy(POLICY_PT)
     # Remap invariants: the checkpoint's OWN hover action must land on the live

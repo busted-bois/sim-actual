@@ -12,7 +12,7 @@ reports specific force f = R^T (a_world - g). Prediction inverts it as
 a_world = R f + g. If the live sim uses the opposite gravity sign, flip
 GRAVITY_SIGN — a one-line change.
 
-    uv run -m rl.ekf --selftest
+    uv run -m rl.estimation.ekf --selftest
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import argparse
 
 import numpy as np
 
-from rl.spec import quat_to_R
+from rl.core.spec import quat_to_R
 
 GRAVITY = 9.81
 GRAVITY_SIGN = 1.0  # +1: g points +Z (down) in NED

@@ -12,8 +12,8 @@ proven control structure from simulator/pilot.py:
 but driven by ground-truth odometry + the captured gate map, with gate
 progression from the sim's active_gate_index.
 
-    uv run -m rl.fly_odom --seconds 15            # supervised test
-    uv run -m rl.fly_odom --seconds 120 --cruise -0.22
+    uv run -m rl.experts.fly_odom --seconds 15            # supervised test
+    uv run -m rl.experts.fly_odom --seconds 120 --cruise -0.22
 """
 
 import argparse
@@ -25,8 +25,8 @@ import time
 
 import numpy as np
 
-from rl import spec
-from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from rl.core import spec
+from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator.transforms import quat_to_yaw
 
 # Proven gains from simulator/pilot.py.

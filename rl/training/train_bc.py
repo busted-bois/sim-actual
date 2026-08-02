@@ -5,8 +5,8 @@ onto rl/data/gp_demos.npz (rl.log_demos), saving rl/data/policy_bc.pt in the
 same dict schema as policy.pt so rl.train_ppo can warm-start from it and
 rl.deploy could fly it directly.
 
-    uv run -m rl.train_bc               # full pretrain
-    uv run -m rl.train_bc --selftest    # tiny synthetic run, asserts loss drop
+    uv run -m rl.training.train_bc               # full pretrain
+    uv run -m rl.training.train_bc --selftest    # tiny synthetic run, asserts loss drop
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from rl import spec
-from rl.train_ppo import NET_ARCH, StandalonePolicy
+from rl.core import spec
+from rl.training.train_ppo import NET_ARCH, StandalonePolicy
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 DEMOS_PATH = os.path.join(DATA_DIR, "gp_demos.npz")
 POLICY_BC_PT = os.path.join(DATA_DIR, "policy_bc.pt")
 

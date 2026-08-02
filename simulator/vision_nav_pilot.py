@@ -15,8 +15,8 @@ import time
 
 import numpy as np
 
-from rl import spec
-from rl.fly2_course import (
+from rl.core import spec
+from rl.experts.fly2_course import (
     HOVER_T,
     detect_climb_course,
     rates_from_attitude_targets,

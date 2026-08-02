@@ -7,8 +7,8 @@ the burst) and the same chunk-reassembly + struct layout as
 simulator.mavlink_rx, then writes rl/data/gate_map.json.
 
 Usage: start this FIRST, then (re)start the race.
-    uv run -m rl.capture_gates           # 150s window
-    uv run -m rl.capture_gates 90
+    uv run scripts/capture_gates.py           # 150s window
+    uv run scripts/capture_gates.py 90
 """
 
 import json
@@ -19,7 +19,7 @@ import time
 
 from pymavlink import mavutil
 
-from rl.sim_interface import GATE_MAP_PATH
+from rl.environment.sim_interface import GATE_MAP_PATH
 
 TRACK_INFO_DATA_TYPE = 2
 

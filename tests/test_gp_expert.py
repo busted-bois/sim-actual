@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from rl import spec
-from rl.gp_expert import GPExpert
+from rl.core import spec
+from rl.experts.gp_expert import GPExpert
 
 
 class UnscaleActionTests(unittest.TestCase):
@@ -70,7 +70,7 @@ class GPExpertTests(unittest.TestCase):
         self.assertAlmostEqual(a[2], 0.0, places=6)
 
     def test_passes_stage0_gate(self):
-        from rl.env import GateRacingEnv
+        from rl.environment.env import GateRacingEnv
 
         env = GateRacingEnv(stage=0, seed=200)
         env.reset()

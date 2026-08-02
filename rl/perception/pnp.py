@@ -10,7 +10,7 @@ vision-based pose estimate:
     world pose + the drone's current orientation) — this is what the EKF
     (Module 5) consumes as its vision update.
 
-    uv run -m rl.pnp --selftest
+    uv run -m rl.perception.pnp --selftest
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import argparse
 import cv2
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 
 # Planar square object points for IPPE_SQUARE: x-right, y-up, z-out of gate.
 # Order matches the canonical image order TL, TR, BR, BL.
@@ -139,7 +139,7 @@ def pose_from_mask(
 
 
 def _selftest():
-    from rl.dataset import project_gate_mask
+    from rl.perception.dataset import project_gate_mask
 
     rng = np.random.default_rng(1)
     errs, dpx = [], []

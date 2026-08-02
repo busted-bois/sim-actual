@@ -1,4 +1,4 @@
-"""rl.calibration + consumer defaults (env/spec) — no sim required."""
+"""rl.core.calibration + consumer defaults (env/spec) — no sim required."""
 
 import importlib
 import json
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import rl.calibration as calibration
+import rl.core.calibration as calibration
 
 
 class LoadCalibrationTests(unittest.TestCase):
@@ -41,12 +41,12 @@ class LoadCalibrationTests(unittest.TestCase):
 
 
 class ConsumerDefaultTests(unittest.TestCase):
-    """rl.env / rl.spec constants: measured when the file exists, exact
+    """rl.environment.env / rl.core.spec constants: measured when the file exists, exact
     internal-model guesses when it does not."""
 
     def _reload_env_spec(self, cal: dict | None):
-        import rl.env as env
-        import rl.spec as spec
+        import rl.environment.env as env
+        import rl.core.spec as spec
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from rl import spec
-from rl.env import THRUST_ACCEL
+from rl.core import spec
+from rl.environment.env import THRUST_ACCEL
 
 G_WORLD = np.array([0.0, 0.0, spec.GRAVITY])
 

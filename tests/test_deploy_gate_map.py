@@ -11,7 +11,7 @@ from unittest import mock
 
 import numpy as np
 
-from rl.sim_interface import SimInterface
+from rl.environment.sim_interface import SimInterface
 from simulator.vision_rx import VisionRX
 
 
@@ -158,7 +158,7 @@ class LiveRemapTests(unittest.TestCase):
         import torch
 
         from rl.deploy import LEGACY_ACTION_SCALE, LEGACY_TRAIN_HOVER, load_policy
-        from rl.train_ppo import NET_ARCH, StandalonePolicy
+        from rl.training.train_ppo import NET_ARCH, StandalonePolicy
 
         std = StandalonePolicy()
         with tempfile.TemporaryDirectory() as d:

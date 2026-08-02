@@ -1,7 +1,7 @@
 """AndurilGP guidance pilot — bearing bank + elev thrust + GyroAHRS est.
 
 Opt-in via AUTO_PILOT=gp (make control-flight). Same rate+thrust action
-interface as IBVS. Action space matches rl/spec.py for later expert / RL merge.
+interface as IBVS. Action space matches rl/core/spec.py for later expert / RL merge.
 
 Smooth-flight additions on top of the original AndurilGP port:
   * closed-loop forward speed (~8 km/h cruise) via speed-PD -> pitch lean,

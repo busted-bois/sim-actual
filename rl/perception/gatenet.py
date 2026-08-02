@@ -4,8 +4,8 @@ Trains a small U-Net on the (image, mask) pairs from Module 2 and writes
 ``gatenet.pt``. cv2/numpy augmentation (flip, brightness, gamma, noise).
 Pure torch so it runs on CPU.
 
-    uv run -m rl.gatenet --data rl/data/gatenet_ds --epochs 30
-    uv run -m rl.gatenet --selftest        # synthetic end-to-end smoke
+    uv run -m rl.perception.gatenet --data rl/data/gatenet_ds --epochs 30
+    uv run -m rl.perception.gatenet --selftest        # synthetic end-to-end smoke
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 TRAIN_W, TRAIN_H = 320, 192  # divisible by 16 for 4 pool levels
-WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "data", "gatenet.pt")
+WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "gatenet.pt")
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -218,8 +218,8 @@ class GateNetInfer:
 def _make_synthetic_ds(root: str, n: int = 24):
     import numpy as np
 
-    from rl import spec
-    from rl.dataset import project_gate_mask
+    from rl.core import spec
+    from rl.perception.dataset import project_gate_mask
 
     os.makedirs(os.path.join(root, "images"), exist_ok=True)
     os.makedirs(os.path.join(root, "masks"), exist_ok=True)
@@ -269,7 +269,7 @@ def _selftest():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--data", default=os.path.join(os.path.dirname(__file__), "data", "gatenet_ds")
+        "--data", default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "gatenet_ds")
     )
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--bs", type=int, default=8)

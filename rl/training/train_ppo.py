@@ -5,8 +5,8 @@ stages (single gate -> two gates -> full 6-gate course), reusing weights
 between stages. Exports a dependency-light ``policy.pt`` (pure-torch
 deterministic actor) for deployment, plus the full SB3 zip for resuming.
 
-    uv run -m rl.train_ppo                 # full curriculum
-    uv run -m rl.train_ppo --quick         # tiny smoke run (verifies pipeline)
+    uv run -m rl.training.train_ppo                 # full curriculum
+    uv run -m rl.training.train_ppo --quick         # tiny smoke run (verifies pipeline)
 """
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from rl import spec
-from rl.env import CURRICULUM, GateRacingEnv
+from rl.core import spec
+from rl.environment.env import CURRICULUM, GateRacingEnv
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 ZIP_PATH = os.path.join(DATA_DIR, "policy_ppo.zip")
 POLICY_PT = os.path.join(DATA_DIR, "policy.pt")
 POLICY_BC_PT = os.path.join(DATA_DIR, "policy_bc.pt")

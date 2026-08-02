@@ -9,11 +9,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 from simulator.transforms import quat_to_yaw
 from simulator.vq2_pose import VQ2PoseEstimator, spawn_position_ned
 
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 GATE_MAP_PATH = os.path.join(_DATA_DIR, "gate_map.json")
 
 HOVER_T = 0.27

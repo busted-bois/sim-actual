@@ -1,6 +1,6 @@
-"""RL drone-racing pipeline (Modules 1-8).
+"""RL drone-racing pipeline.
 
-Shared foundation lives in ``rl.spec``. Live-sim I/O reuses the working
-``simulator`` package (pymavlink + UDP camera). Action space is
-attitude-rate + thrust (the only channel this simulator actuates on).
+The hierarchy separates shared contracts, perception, estimation, training,
+environment integration, expert controllers, and algorithm adapters. Live
+deployment remains the public ``rl.deploy`` entry point.
 """

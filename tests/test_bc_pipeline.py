@@ -7,12 +7,12 @@ import unittest
 import numpy as np
 import torch
 
-from rl import spec
-from rl.env import GateRacingEnv
-from rl.gp_expert import GPExpert
-from rl.log_demos import _episode, save
-from rl.train_bc import save_policy, train_bc
-from rl.train_ppo import NET_ARCH, StandalonePolicy
+from rl.core import spec
+from rl.environment.env import GateRacingEnv
+from rl.experts.gp_expert import GPExpert
+from rl.training.log_demos import _episode, save
+from rl.training.train_bc import save_policy, train_bc
+from rl.training.train_ppo import NET_ARCH, StandalonePolicy
 
 
 class DemoLoggingTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class DemoLoggingTests(unittest.TestCase):
                 np.testing.assert_allclose(loaded["hover_thrust"], spec.HOVER_THRUST)
 
     def test_load_demos_roundtrips_current_stamp(self):
-        from rl.train_bc import load_demos
+        from rl.training.train_bc import load_demos
 
         demos = {
             "obs": np.zeros((5, spec.OBS_DIM), np.float32),
@@ -59,7 +59,7 @@ class DemoLoggingTests(unittest.TestCase):
         self.assertEqual(act.shape, (5, spec.ACTION_DIM))
 
     def test_load_demos_refuses_stale_or_unstamped(self):
-        from rl.train_bc import load_demos
+        from rl.training.train_bc import load_demos
 
         with tempfile.TemporaryDirectory() as d:
             # Unstamped (pre-caps-change) demo file.
@@ -86,7 +86,7 @@ class DemoLoggingTests(unittest.TestCase):
                 load_demos(path2)
 
     def test_load_demos_missing_file_points_at_make_target(self):
-        from rl.train_bc import load_demos
+        from rl.training.train_bc import load_demos
 
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(SystemExit) as ctx:
@@ -129,7 +129,7 @@ class PPOWarmStartTests(unittest.TestCase):
         import torch.nn as nn
         from stable_baselines3 import PPO
 
-        from rl.train_ppo import _vec_env, load_bc_init
+        from rl.training.train_ppo import _vec_env, load_bc_init
 
         policy = StandalonePolicy()
         with tempfile.TemporaryDirectory() as d:
@@ -161,7 +161,7 @@ class PPOWarmStartTests(unittest.TestCase):
         self.assertLess(err, 1e-5)
 
         # PPO export carries the same training-plant metadata as BC.
-        from rl.train_ppo import export_policy
+        from rl.training.train_ppo import export_policy
 
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "policy.pt")

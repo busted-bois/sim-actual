@@ -42,7 +42,7 @@ MAX_LEAN = 0.15  # rad, cap on the lean the velocity loop may command
 YAW_RATE = 0.5  # rad/s while Q/E held (fly2_course's YAW_CLIP)
 
 # Altitude hold — PD on NED z toward a latched target. Constants are the
-# flight-proven values from rl/fly2_course.py (Flight-Automation branch); hover
+# flight-proven values from rl/experts/fly2_course.py (Flight-Automation branch); hover
 # thrust for this sim was measured there at 0.27 (thrust-accel ~36 m/s^2).
 HOVER_T = 0.27  # thrust that holds hover at zero error (and no-telemetry fallback)
 KP_Z = 0.025  # thrust per metre of altitude error

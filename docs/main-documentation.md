@@ -71,10 +71,10 @@ For which command to run and what to do when something fails, see [§2.5](#25-ch
 | Goal | Command | Live sim? | Vision? | Gate map? | Notes |
 |------|---------|-----------|---------|-----------|-------|
 | **Default competition pilot** | `make sim` | Yes | Yes | From sim at race start | Vision-first gate racer; telemetry fallback. What `main.py` runs. |
-| Hover / controller sanity check | `make hover` | Yes | No | Optional | `rl.fly2 --mode hover`; good before debugging course logic. |
-| Full course, measured dynamics | `make fly` | Yes | No | `rl/data/gate_map.json` | `rl.fly2 --mode course`. Start the race first; uses odom + saved map. |
-| Full course, geometric controller | `uv run -m rl.fly_geometric` | Yes | No | `gate_map.json` | Cascaded geometric controller + odom. |
-| Full course, pilot-style + odom | `uv run -m rl.fly_odom` | Yes | No | `gate_map.json` | Same control style as `pilot.py`, driven by telemetry only. |
+| Hover / controller sanity check | `make hover` | Yes | No | Optional | `rl.experts.fly2 --mode hover`; good before debugging course logic. |
+| Full course, measured dynamics | `make fly` | Yes | No | `rl/data/gate_map.json` | `rl.experts.fly2 --mode course`. Start the race first; uses odom + saved map. |
+| Full course, geometric controller | `uv run -m rl.experts.fly_geometric` | Yes | No | `gate_map.json` | Cascaded geometric controller + odom. |
+| Full course, pilot-style + odom | `uv run -m rl.experts.fly_odom` | Yes | No | `gate_map.json` | Same control style as `pilot.py`, driven by telemetry only. |
 | Capture gate map for offline tools | `make capture-gates` | Yes | No | **Writes** `gate_map.json` | Run **before** (re)starting the race; see [§2.6](#26-troubleshooting). |
 | Telemetry snapshot | `make capture` | Yes | Optional | From sim | Module 1 smoke — dumps live state once. |
 | Plant characterization | `make dynamics` | Yes | No | No | Open-loop thrust/rate ID for `fly2`. |
@@ -358,7 +358,7 @@ A self-contained alternative pilot design: `GateEstimator` (self-calibrating foc
 
 ## 7. Module reference — `rl/`
 
-The `rl/` package is an offline-trainable pipeline. `rl/spec.py` is the single source of truth for camera intrinsics, frame conventions, gate geometry, and the action/observation layouts shared across modules. Action space is **attitude-rate + thrust** (the only channel this sim actuates on). Each module has a `--selftest` or smoke entry point; `make rl-test` runs them without a live sim.
+The `rl/` package is an offline-trainable pipeline. `rl/core/spec.py` is the single source of truth for camera intrinsics, frame conventions, gate geometry, and the action/observation layouts shared across modules. Action space is **attitude-rate + thrust** (the only channel this sim actuates on). Each module has a `--selftest` or smoke entry point; `make rl-test` runs them without a live sim.
 
 | Module | File | Role |
 |--------|------|------|
@@ -416,14 +416,14 @@ Broadcast by the sim as a short burst at race start (DATA_TRANSMISSION_HANDSHAKE
 | `make` / `make i` / `make install` | `uv sync` | Install dependencies |
 | `make check` | `ruff check --fix` + `ruff format` | Lint and format |
 | `make sim` | `uv run main.py` | Run the live pilot against the sim |
-| `make capture-gates` | `uv run -m rl.capture_gates` | Capture the race-start gate-map burst |
-| `make fly` | `uv run -m rl.fly2 --mode course` | Fly the full 6-gate course (measured-dynamics controller) |
-| `make hover` | `uv run -m rl.fly2 --mode hover --seconds 8` | Stable hover sanity check |
-| `make dynamics` | `uv run -m rl.dynamics_id` | Open-loop dynamics characterization |
-| `make capture` | `uv run -m rl.sim_interface` | Module 1 — telemetry + gate-map snapshot |
-| `make dataset` | `uv run -m rl.dataset` | Module 2 — collect frames + auto-labeled masks |
-| `make train-gatenet` | `uv run -m rl.gatenet` | Module 3 — train GateNet |
-| `make train-ppo` | `uv run -m rl.train_ppo` | Module 8 — train the PPO policy |
+| `make capture-gates` | `uv run scripts/capture_gates.py` | Capture the race-start gate-map burst |
+| `make fly` | `uv run -m rl.experts.fly2 --mode course` | Fly the full 6-gate course (measured-dynamics controller) |
+| `make hover` | `uv run -m rl.experts.fly2 --mode hover --seconds 8` | Stable hover sanity check |
+| `make dynamics` | `uv run scripts/rl_diag_dynamics.py` | Open-loop dynamics characterization |
+| `make capture` | `uv run -m rl.environment.sim_interface` | Module 1 — telemetry + gate-map snapshot |
+| `make dataset` | `uv run -m rl.perception.dataset` | Module 2 — collect frames + auto-labeled masks |
+| `make train-gatenet` | `uv run -m rl.perception.gatenet` | Module 3 — train GateNet |
+| `make train-ppo` | `uv run -m rl.training.train_ppo` | Module 8 — train the PPO policy |
 | `make fly-policy` | `uv run -m rl.deploy` | Module 8 — fly the trained policy |
 | `make rl-test` | `uv run -m rl.<mod> --selftest` (×7) | Offline self-tests for the RL modules |
 
