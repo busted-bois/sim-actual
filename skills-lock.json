@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "cursor-team-kit/skills/deslop/SKILL.md",
       "computedHash": "8883a7d459c07a0b2ee06972e79baa634009aa3bab969a6650acbefac394ad41"
+    },
+    "zero-tech-debt": {
+      "source": "jnsahaj/skills",
+      "sourceType": "github",
+      "skillPath": "skills/zero-tech-debt/SKILL.md",
+      "computedHash": "3fac9b5b64800120a54c65f6c9e0cb00f965c58739441a0fbf153ecc19bc623a"
     }
   }
 }
