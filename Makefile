@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-train rl-eval rl-baseline rl-test attitude-harness log-demos train-bc
+.PHONY: train-vq2 vq2-observe vq2-fly i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-train rl-eval rl-baseline rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_vq2_observation tests.test_vq2_env -v
 
 sim:
 	uv run main.py
@@ -161,3 +161,19 @@ rl-test:
 	uv run -m rl.core.observation --selftest
 	uv run -m rl.environment.env --selftest
 	uv run -m rl.deploy --selftest
+
+# --- VQ2 vision-only RL (17-gate course, no gate map, no odometry) -----------
+# Train the recurrent policy in the camera-rendered surrogate. ~1-3 h on this
+# box; --quick for a smoke run. Offline: no simulator needed.
+train-vq2:
+	uv run -m rl.training.train_vq2
+
+# READ-ONLY live check. Runs perception -> VQ2 observation against the live sim
+# and logs every field. Never arms, never commands. Run this BEFORE vq2-fly.
+vq2-observe:
+	uv run -m rl.deploy_vq2 --observe --seconds 30
+
+# Fly the trained policy on the live simulator, vision + IMU only.
+# Signs/gain are UNCALIBRATED defaults -- override with RL_SIGN_* / RL_RATE_GAIN.
+vq2-fly:
+	uv run -m rl.deploy_vq2 --fly
