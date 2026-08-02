@@ -1,0 +1,41 @@
+{
+ "schema": 1,
+ "run_id": "20260730_195238",
+ "target": "control-flight",
+ "entry": "auto_gp.py",
+ "pilot": "gp",
+ "git": {
+  "sha": "c19a5ae",
+  "branch": "classical+blueline",
+  "dirty": true
+ },
+ "started_utc": "2026-07-31T02:52:41Z",
+ "ended_utc": "2026-07-31T02:56:53Z",
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 24.01,
+  "frames": 5850,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785466369.815,
+  "first_frame_overlay_s": 0.019542694091796875,
+  "bytes": 123035437
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260730_195238_a1.csv",
+   "t_start_unix": 1785466372.073,
+   "t_end_unix": 1785466613.934,
+   "gates_passed": 2,
+   "outcome": null,
+   "lap_s": null,
+   "end_reason": "shutdown"
+  }
+ ],
+ "totals": {
+  "attempts": 1,
+  "best_gates": 2,
+  "best_lap_s": null
+ }
+}

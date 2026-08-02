@@ -1,0 +1,37 @@
+{
+ "schema": 1,
+ "run_id": "20260730_175405",
+ "target": null,
+ "entry": null,
+ "pilot": null,
+ "git": null,
+ "started_utc": "2026-07-31T00:54:05Z",
+ "ended_utc": null,
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 23.937,
+  "frames": 3298,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785459253.055,
+  "first_frame_overlay_s": 0.021831035614013672,
+  "bytes": 80270222
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260730_175405_a1.csv",
+   "t_start_unix": 1785459258.755,
+   "t_end_unix": null,
+   "gates_passed": null,
+   "outcome": null,
+   "lap_s": null,
+   "end_reason": null
+  }
+ ],
+ "totals": {
+  "attempts": 1,
+  "best_gates": null,
+  "best_lap_s": null
+ }
+}

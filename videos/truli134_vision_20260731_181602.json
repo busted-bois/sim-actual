@@ -1,0 +1,71 @@
+{
+ "schema": 1,
+ "run_id": "20260731_181602",
+ "target": "control-flight",
+ "entry": "auto_gp.py",
+ "pilot": "gp",
+ "git": {
+  "sha": "c19a5ae",
+  "branch": "classical+blueline",
+  "dirty": true
+ },
+ "started_utc": "2026-08-01T01:16:02Z",
+ "ended_utc": "2026-08-01T01:17:48Z",
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 24.043,
+  "frames": 2274,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785546974.116,
+  "first_frame_overlay_s": 0.019863605499267578,
+  "bytes": 55098107
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260731_181602_a1.csv",
+   "t_start_unix": 1785546976.684,
+   "t_end_unix": 1785546993.443,
+   "gates_passed": 0,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 2,
+   "telemetry": "gp_log_20260731_181602_a2.csv",
+   "t_start_unix": 1785546997.493,
+   "t_end_unix": 1785547026.531,
+   "gates_passed": 0,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 3,
+   "telemetry": "gp_log_20260731_181602_a3.csv",
+   "t_start_unix": 1785547030.586,
+   "t_end_unix": 1785547052.107,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 4,
+   "telemetry": "gp_log_20260731_181602_a4.csv",
+   "t_start_unix": 1785547056.159,
+   "t_end_unix": 1785547069.206,
+   "gates_passed": 0,
+   "outcome": null,
+   "lap_s": null,
+   "end_reason": "shutdown"
+  }
+ ],
+ "totals": {
+  "attempts": 4,
+  "best_gates": 0,
+  "best_lap_s": null
+ }
+}

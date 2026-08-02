@@ -1,0 +1,456 @@
+{
+ "schema": 2,
+ "run_id": "20260801_234217",
+ "target": "control-flight",
+ "entry": "auto_gp.py",
+ "pilot": "gp",
+ "git": {
+  "sha": "1f29858",
+  "branch": "classical+blueline",
+  "dirty": true,
+  "diff_sha": "384de97c1de7",
+  "untracked": [
+   "flightlab/fitness.py",
+   "flightlab/flight_runner.py",
+   "flightlab/tuner.py",
+   "scripts/gp_tune.py",
+   "tests/fake_flight.py",
+   "tests/test_fitness.py",
+   "tests/test_gp_tune.py"
+  ],
+  "submodule": "a7bd580a14dc"
+ },
+ "config": {
+  "env": {
+   "AUTO_PILOT": "gp",
+   "GATE1_TIMEOUT_S": "20",
+   "GATE_PROGRESS_TIMEOUT_S": "10"
+  },
+  "argv": [
+   "auto_gp.py"
+  ]
+ },
+ "track": null,
+ "log_columns": [
+  "t",
+  "roll",
+  "pitch",
+  "yaw",
+  "up",
+  "upset",
+  "cmd_roll_deg",
+  "cmd_pitch_deg",
+  "cmd_yaw_deg",
+  "thrust",
+  "bx",
+  "by",
+  "bz",
+  "blend",
+  "bearing_deg",
+  "desired_roll",
+  "d_lat",
+  "d_vert",
+  "vY_imu",
+  "vY_fused",
+  "vD",
+  "vX",
+  "v_target",
+  "pitch_des",
+  "elev_i",
+  "elev_err",
+  "agl",
+  "turn_ff",
+  "reliable",
+  "vision_valid",
+  "elev_fresh",
+  "is_new_d",
+  "bl_found",
+  "bl_hdg",
+  "bl_conf",
+  "bl_hdg_valid",
+  "bl_span",
+  "bl_paired",
+  "bl_cy",
+  "bl_gap",
+  "src_switch",
+  "source",
+  "infer_ms",
+  "mode",
+  "gate",
+  "gate_id",
+  "peek_side",
+  "peek_strength",
+  "peek_active",
+  "occ_gap",
+  "collision"
+ ],
+ "started_utc": "2026-08-02T06:42:17Z",
+ "ended_utc": "2026-08-02T06:57:40Z",
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 21.339,
+  "frames": 19547,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785652944.758,
+  "first_frame_overlay_s": 0.02138543128967285,
+  "bytes": 487772001
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260801_234217_a1.csv",
+   "t_start_unix": 1785652965.987,
+   "t_end_unix": 1785652986.007,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 2,
+   "telemetry": "gp_log_20260801_234217_a2.csv",
+   "t_start_unix": 1785652990.533,
+   "t_end_unix": 1785653014.296,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 3,
+   "telemetry": "gp_log_20260801_234217_a3.csv",
+   "t_start_unix": 1785653018.356,
+   "t_end_unix": 1785653039.847,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 4,
+   "telemetry": "gp_log_20260801_234217_a4.csv",
+   "t_start_unix": 1785653043.691,
+   "t_end_unix": 1785653065.424,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 5,
+   "telemetry": "gp_log_20260801_234217_a5.csv",
+   "t_start_unix": 1785653070.002,
+   "t_end_unix": 1785653090.98,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 6,
+   "telemetry": "gp_log_20260801_234217_a6.csv",
+   "t_start_unix": 1785653095.594,
+   "t_end_unix": 1785653112.612,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 7,
+   "telemetry": "gp_log_20260801_234217_a7.csv",
+   "t_start_unix": 1785653117.133,
+   "t_end_unix": 1785653134.155,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 8,
+   "telemetry": "gp_log_20260801_234217_a8.csv",
+   "t_start_unix": 1785653138.699,
+   "t_end_unix": 1785653159.733,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 9,
+   "telemetry": "gp_log_20260801_234217_a9.csv",
+   "t_start_unix": 1785653163.759,
+   "t_end_unix": 1785653185.287,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 10,
+   "telemetry": "gp_log_20260801_234217_a10.csv",
+   "t_start_unix": 1785653189.806,
+   "t_end_unix": 1785653210.857,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 11,
+   "telemetry": "gp_log_20260801_234217_a11.csv",
+   "t_start_unix": 1785653214.885,
+   "t_end_unix": 1785653231.405,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 12,
+   "telemetry": "gp_log_20260801_234217_a12.csv",
+   "t_start_unix": 1785653235.427,
+   "t_end_unix": 1785653256.986,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 13,
+   "telemetry": "gp_log_20260801_234217_a13.csv",
+   "t_start_unix": 1785653261.514,
+   "t_end_unix": 1785653282.531,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 14,
+   "telemetry": "gp_log_20260801_234217_a14.csv",
+   "t_start_unix": 1785653287.067,
+   "t_end_unix": 1785653304.07,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 15,
+   "telemetry": "gp_log_20260801_234217_a15.csv",
+   "t_start_unix": 1785653308.637,
+   "t_end_unix": 1785653325.396,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 16,
+   "telemetry": "gp_log_20260801_234217_a16.csv",
+   "t_start_unix": 1785653329.936,
+   "t_end_unix": 1785653350.972,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 17,
+   "telemetry": "gp_log_20260801_234217_a17.csv",
+   "t_start_unix": 1785653355.515,
+   "t_end_unix": 1785653373.496,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 18,
+   "telemetry": "gp_log_20260801_234217_a18.csv",
+   "t_start_unix": 1785653378.081,
+   "t_end_unix": 1785653404.857,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 19,
+   "telemetry": "gp_log_20260801_234217_a19.csv",
+   "t_start_unix": 1785653409.397,
+   "t_end_unix": 1785653436.217,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 20,
+   "telemetry": "gp_log_20260801_234217_a20.csv",
+   "t_start_unix": 1785653440.227,
+   "t_end_unix": 1785653461.811,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 21,
+   "telemetry": "gp_log_20260801_234217_a21.csv",
+   "t_start_unix": 1785653465.807,
+   "t_end_unix": 1785653494.357,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 22,
+   "telemetry": "gp_log_20260801_234217_a22.csv",
+   "t_start_unix": 1785653498.889,
+   "t_end_unix": 1785653519.946,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 23,
+   "telemetry": "gp_log_20260801_234217_a23.csv",
+   "t_start_unix": 1785653523.962,
+   "t_end_unix": 1785653541.71,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 24,
+   "telemetry": "gp_log_20260801_234217_a24.csv",
+   "t_start_unix": 1785653546.268,
+   "t_end_unix": 1785653567.322,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 25,
+   "telemetry": "gp_log_20260801_234217_a25.csv",
+   "t_start_unix": 1785653571.338,
+   "t_end_unix": 1785653592.915,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 26,
+   "telemetry": "gp_log_20260801_234217_a26.csv",
+   "t_start_unix": 1785653596.903,
+   "t_end_unix": 1785653614.448,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 27,
+   "telemetry": "gp_log_20260801_234217_a27.csv",
+   "t_start_unix": 1785653618.957,
+   "t_end_unix": 1785653650.503,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 28,
+   "telemetry": "gp_log_20260801_234217_a28.csv",
+   "t_start_unix": 1785653655.054,
+   "t_end_unix": 1785653676.088,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 29,
+   "telemetry": "gp_log_20260801_234217_a29.csv",
+   "t_start_unix": 1785653680.095,
+   "t_end_unix": 1785653701.67,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 30,
+   "telemetry": "gp_log_20260801_234217_a30.csv",
+   "t_start_unix": 1785653705.673,
+   "t_end_unix": 1785653725.207,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 31,
+   "telemetry": "gp_log_20260801_234217_a31.csv",
+   "t_start_unix": 1785653729.233,
+   "t_end_unix": 1785653746.244,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 32,
+   "telemetry": "gp_log_20260801_234217_a32.csv",
+   "t_start_unix": 1785653750.808,
+   "t_end_unix": 1785653771.8,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 33,
+   "telemetry": "gp_log_20260801_234217_a33.csv",
+   "t_start_unix": 1785653776.375,
+   "t_end_unix": 1785653797.401,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 34,
+   "telemetry": "gp_log_20260801_234217_a34.csv",
+   "t_start_unix": 1785653801.915,
+   "t_end_unix": 1785653822.997,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 35,
+   "telemetry": "gp_log_20260801_234217_a35.csv",
+   "t_start_unix": 1785653827.514,
+   "t_end_unix": 1785653860.804,
+   "gates_passed": 0,
+   "outcome": null,
+   "lap_s": null,
+   "end_reason": "shutdown"
+  }
+ ],
+ "totals": {
+  "attempts": 35,
+  "best_gates": 3,
+  "best_lap_s": null
+ }
+}

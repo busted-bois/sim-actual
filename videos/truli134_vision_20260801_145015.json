@@ -1,0 +1,168 @@
+{
+ "schema": 2,
+ "run_id": "20260801_145015",
+ "target": "control-flight",
+ "entry": "auto_gp.py",
+ "pilot": "gp",
+ "git": {
+  "sha": "6cd1396",
+  "branch": "classical+blueline",
+  "dirty": true,
+  "diff_sha": "2c4588c2e2c2",
+  "untracked": null,
+  "submodule": "a7bd580a14dc"
+ },
+ "config": {
+  "env": {
+   "AUTO_PILOT": "gp",
+   "GATE1_TIMEOUT_S": "20",
+   "GATE_PROGRESS_TIMEOUT_S": "10"
+  },
+  "argv": [
+   "auto_gp.py"
+  ]
+ },
+ "track": null,
+ "log_columns": [
+  "t",
+  "roll",
+  "pitch",
+  "yaw",
+  "up",
+  "upset",
+  "cmd_roll_deg",
+  "cmd_pitch_deg",
+  "cmd_yaw_deg",
+  "thrust",
+  "bx",
+  "by",
+  "bz",
+  "blend",
+  "bearing_deg",
+  "desired_roll",
+  "d_lat",
+  "d_vert",
+  "vY_imu",
+  "vY_fused",
+  "vD",
+  "vX",
+  "v_target",
+  "pitch_des",
+  "elev_i",
+  "elev_err",
+  "agl",
+  "turn_ff",
+  "reliable",
+  "vision_valid",
+  "elev_fresh",
+  "is_new_d",
+  "bl_found",
+  "bl_hdg",
+  "bl_conf",
+  "bl_hdg_valid",
+  "bl_span",
+  "bl_paired",
+  "bl_cy",
+  "bl_gap",
+  "src_switch",
+  "source",
+  "infer_ms",
+  "mode",
+  "gate",
+  "gate_id",
+  "peek_side",
+  "peek_strength",
+  "peek_active",
+  "occ_gap",
+  "collision"
+ ],
+ "started_utc": "2026-08-01T21:50:15Z",
+ "ended_utc": "2026-08-01T21:53:55Z",
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 23.564,
+  "frames": 5030,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785621022.494,
+  "first_frame_overlay_s": 0.0186002254486084,
+  "bytes": 118600556
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260801_145015_a1.csv",
+   "t_start_unix": 1785621042.135,
+   "t_end_unix": 1785621068.392,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 2,
+   "telemetry": "gp_log_20260801_145015_a2.csv",
+   "t_start_unix": 1785621072.456,
+   "t_end_unix": 1785621088.972,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 3,
+   "telemetry": "gp_log_20260801_145015_a3.csv",
+   "t_start_unix": 1785621093.494,
+   "t_end_unix": 1785621117.543,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 4,
+   "telemetry": "gp_log_20260801_145015_a4.csv",
+   "t_start_unix": 1785621122.071,
+   "t_end_unix": 1785621148.595,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 5,
+   "telemetry": "gp_log_20260801_145015_a5.csv",
+   "t_start_unix": 1785621153.163,
+   "t_end_unix": 1785621185.966,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 6,
+   "telemetry": "gp_log_20260801_145015_a6.csv",
+   "t_start_unix": 1785621190.008,
+   "t_end_unix": 1785621206.488,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 7,
+   "telemetry": "gp_log_20260801_145015_a7.csv",
+   "t_start_unix": 1785621210.558,
+   "t_end_unix": 1785621232.025,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  }
+ ],
+ "totals": {
+  "attempts": 7,
+  "best_gates": 3,
+  "best_lap_s": null
+ }
+}
