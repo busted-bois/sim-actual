@@ -2,7 +2,7 @@ import math
 import unittest
 from unittest.mock import MagicMock
 
-from rl.fly2_course import HOVER_T
+from rl.experts.fly2_course import HOVER_T
 from simulator.vision_nav import Cmd
 from simulator.vision_nav_pilot import VisionNavPilot
 

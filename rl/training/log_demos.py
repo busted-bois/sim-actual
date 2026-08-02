@@ -6,8 +6,8 @@ rl/data/gp_demos.npz for BC pretraining (rl.train_bc). Episodes that never
 pass a gate are dropped, and each kept episode is truncated at its final
 gate pass so crash tails don't poison the dataset.
 
-    uv run -m rl.log_demos              # full demo set
-    uv run -m rl.log_demos --selftest   # tiny run, asserts file + shapes
+    uv run -m rl.training.log_demos              # full demo set
+    uv run -m rl.training.log_demos --selftest   # tiny run, asserts file + shapes
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ import os
 
 import numpy as np
 
-from rl import spec
-from rl.env import CURRICULUM, GateRacingEnv
-from rl.gp_expert import GPExpert
+from rl.core import spec
+from rl.environment.env import CURRICULUM, GateRacingEnv
+from rl.experts.gp_expert import GPExpert
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 DEMOS_PATH = os.path.join(DATA_DIR, "gp_demos.npz")
 
 EPISODES_PER_STAGE = 40

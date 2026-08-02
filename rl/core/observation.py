@@ -8,7 +8,7 @@ All quantities are expressed in the BODY frame and normalized to ~O(1) so the
 3x64 MLP sees well-scaled inputs. Deploy and training build observations the
 same way, so the sim-trained policy transfers.
 
-    uv run -m rl.observation --selftest
+    uv run -m rl.core.observation --selftest
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import argparse
 
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 
 DIST_SCALE = 10.0  # meters -> ~O(1)
 V_SCALE = 10.0  # m/s

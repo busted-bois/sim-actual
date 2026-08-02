@@ -39,7 +39,7 @@ import unittest
 
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_pilot import _fresh_hold_state, compute_guidance
 from simulator.gyro_ahrs import GyroAHRS

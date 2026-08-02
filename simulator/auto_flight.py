@@ -34,7 +34,7 @@ def auto_flight_enabled() -> bool:
 
 
 def _pilot_hover_thrust(pilot) -> float:
-    from rl.fly2_course import HOVER_T
+    from rl.experts.fly2_course import HOVER_T
 
     return HOVER_T
 

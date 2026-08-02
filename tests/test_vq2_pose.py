@@ -3,12 +3,12 @@ import unittest
 
 import numpy as np
 
-from rl.vision_fusion import (
+from rl.perception.vision_fusion import (
     fuse_gate_bearing_yaw,
     fuse_gate_target_position,
     fuse_pnp_gate,
 )
-from rl.ekf import ESKF
+from rl.estimation.ekf import ESKF
 from simulator.transforms import quat_to_yaw
 from simulator.vq2_pose import (
     VQ2PoseEstimator,

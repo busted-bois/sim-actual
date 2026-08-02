@@ -16,7 +16,7 @@ as the only state sources. This module reconstructs pos/vel/attitude:
               (innovation-gated; SLAM-lite — bounds drift vs the map, which
               is all VisionGuidance needs).
 
-ESKF core ported from rl/ekf.py (copied, not imported — simulator/ stays free
+ESKF core ported from rl/estimation/ekf.py (copied, not imported — simulator/ stays free
 of rl/, same pattern as gate_pnp's local intrinsics). Boot init on the ground:
 accel -> roll/pitch, mag -> yaw=0 reference, baro -> z=0, p=v=0. Accel gravity
 sign is auto-detected from the ground samples (flag logged).

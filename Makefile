@@ -67,33 +67,33 @@ est-selftest:
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
 # is missing, run `make capture-gates` and start the race WHILE it listens.
 capture-gates:
-	uv run -m rl.capture_gates
+	uv run scripts/capture_gates.py
 
 # Fly the full 6-gate course (resets, arms, flies). Start the race first.
 fly:
-	uv run -m rl.fly2 --mode course
+	uv run -m rl.experts.fly2 --mode course
 
 # Fly the course from VISION ONLY -- YOLO gate detection + PnP, no gate map,
 # no hardcoded coordinates. Start the race first. Under the VQ2 block the
 # IMU+vision estimator takes over automatically (odometry absent).
 fly-vision:
-	uv run -m rl.fly2 --mode vision
+	uv run -m rl.experts.fly2 --mode vision
 
 # VQ2 dress rehearsal in Training mode: fly on the estimator even though
 # odometry exists; odometry only feeds the shadow error CSV (rl/data/shadow_*).
 fly-vision-est:
-	uv run -m rl.fly2 --mode vision --est
+	uv run -m rl.experts.fly2 --mode vision --est
 
 # Hold a stable hover (sanity check the controller).
 hover:
-	uv run -m rl.fly2 --mode hover --seconds 8
+	uv run -m rl.experts.fly2 --mode hover --seconds 8
 
 # Measure the sim's attitude/thrust response (open-loop characterization).
 dynamics:
-	uv run -m rl.dynamics_id
+	uv run scripts/rl_diag_dynamics.py
 
 # Attitude inner-loop harness (Spec B). Writes flightlab/calibration.json +
-# signs.json consumed by rl/spec, rl/env, and the GP expert. Sim must be in
+# signs.json consumed by rl/core/spec, rl/environment/env, and the GP expert. Sim must be in
 # a TRAINING session.
 attitude-harness:
 	uv run python -m flightlab.run_attitude
@@ -101,29 +101,29 @@ attitude-harness:
 # --- RL pipeline (Modules 1-8) ------------------------------------------------
 # Module 1: connect to live sim, dump telemetry snapshot + gate map.
 capture:
-	uv run -m rl.sim_interface
+	uv run -m rl.environment.sim_interface
 
 # Module 2: collect frames + auto-labeled masks from the live sim.
 dataset:
-	uv run -m rl.dataset
+	uv run -m rl.perception.dataset
 
 # Module 3: train GateNet U-Net -> rl/data/gatenet.pt
 train-gatenet:
-	uv run -m rl.gatenet
+	uv run -m rl.perception.gatenet
 
 # GP expert demos: AndurilGP guidance rollouts in the internal env
 # -> rl/data/gp_demos.npz (offline, no live sim).
 log-demos:
-	uv run -m rl.log_demos
+	uv run -m rl.training.log_demos
 
 # BC pretrain on GP demos -> rl/data/policy_bc.pt (train-ppo warm-starts
 # from it automatically when present).
 train-bc:
-	uv run -m rl.train_bc
+	uv run -m rl.training.train_bc
 
 # Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
 train-ppo:
-	uv run -m rl.train_ppo
+	uv run -m rl.training.train_ppo
 
 # Module 8: fly the trained policy on the live sim.
 fly-policy:
@@ -132,10 +132,10 @@ fly-policy:
 # Offline self-tests for every module (no live sim needed).
 rl-test:
 	uv run -m simulator.state_estimator --selftest
-	uv run -m rl.dataset --selftest
-	uv run -m rl.gatenet --selftest
-	uv run -m rl.pnp --selftest
-	uv run -m rl.ekf --selftest
-	uv run -m rl.observation --selftest
-	uv run -m rl.env --selftest
+	uv run -m rl.perception.dataset --selftest
+	uv run -m rl.perception.gatenet --selftest
+	uv run -m rl.perception.pnp --selftest
+	uv run -m rl.estimation.ekf --selftest
+	uv run -m rl.core.observation --selftest
+	uv run -m rl.environment.env --selftest
 	uv run -m rl.deploy --selftest

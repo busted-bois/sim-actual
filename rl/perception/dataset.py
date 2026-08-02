@@ -9,8 +9,8 @@ Data collection flies the existing vision pilot (velocity setpoints don't
 actuate this sim, so we reuse the proven attitude-rate pilot to produce
 diverse gate approaches) and records frames + masks at camera rate.
 
-    uv run -m rl.dataset            # collect from live sim
-    uv run -m rl.dataset --frames 1500
+    uv run -m rl.perception.dataset            # collect from live sim
+    uv run -m rl.perception.dataset --frames 1500
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ import time
 import cv2
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "data", "gatenet_ds")
+OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "gatenet_ds")
 
 
 # ----------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def project_gate_mask(
 def collect(n_frames: int = 1200, out_dir: str = OUT_DIR):
     from simulator.controller import Controller
 
-    from rl.sim_interface import SimInterface
+    from rl.environment.sim_interface import SimInterface
 
     img_dir = os.path.join(out_dir, "images")
     mask_dir = os.path.join(out_dir, "masks")

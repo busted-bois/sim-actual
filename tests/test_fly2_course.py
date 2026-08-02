@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from rl.fly2_course import (
+from rl.experts.fly2_course import (
     Fly2Config,
     Fly2CoursePilot,
     compute_course_rates,

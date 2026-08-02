@@ -32,7 +32,7 @@ import time
 
 import numpy as np
 
-from rl.fly2_course import (
+from rl.experts.fly2_course import (
     HOVER_T,
     K_ATT,
     K_YAW,

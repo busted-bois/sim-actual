@@ -10,8 +10,8 @@ Modes:
   hover  - level attitude + hold spawn altitude (validates the basics).
   course - fly the gate map, gates advanced by sim active_gate_index.
 
-    uv run -m rl.fly2 --mode hover  --seconds 6
-    uv run -m rl.fly2 --mode course --seconds 60 --speed 3
+    uv run -m rl.experts.fly2 --mode hover  --seconds 6
+    uv run -m rl.experts.fly2 --mode course --seconds 60 --speed 3
 """
 
 import argparse
@@ -24,8 +24,8 @@ import time
 
 import numpy as np
 
-from rl import spec
-from rl.fly2_course import (
+from rl.core import spec
+from rl.experts.fly2_course import (
     EST_SIGNS,
     HOVER_T,
     Fly2Config,
@@ -34,7 +34,7 @@ from rl.fly2_course import (
     rpy,
     wrap,
 )
-from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator import display
 from simulator.vision_nav import VisionGuidance, VisualServo
 

@@ -9,7 +9,7 @@ This is the live-sim boundary. Only Modules 1, 2 and final evaluation talk
 to it; RL training (Modules 7-8) runs against the internal physics model.
 
 Run a smoke test / dump the gate map:
-    uv run -m rl.sim_interface
+    uv run -m rl.environment.sim_interface
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from simulator.timesync import TimeSync
 from simulator.transforms import quat_to_yaw
 from simulator.vision_rx import VisionRX
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 GATE_MAP_PATH = os.path.join(DATA_DIR, "gate_map.json")
 
 DEFAULT_IP = "127.0.0.1"

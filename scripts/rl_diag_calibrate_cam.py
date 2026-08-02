@@ -5,7 +5,7 @@ position + drone pose, backs out the focal length (from apparent size) and the
 camera tilt (from vertical position). Reports recommended rl.spec values and
 saves a corrected-projection overlay to verify.
 
-    uv run -m rl.calibrate_cam
+    uv run scripts/rl_diag_calibrate_cam.py
 """
 
 import json
@@ -15,8 +15,8 @@ import sys
 import cv2
 import numpy as np
 
-from rl import spec
-from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from rl.core import spec
+from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 from simulator.gate_detector import detect_gate
 
 
@@ -113,7 +113,7 @@ def main():
                 (0, 255, 0),
                 2,
             )
-    out = os.path.join(os.path.dirname(__file__), "data", "calib_check.png")
+    out = os.path.join(os.path.dirname(__file__), "..", "rl", "data", "calib_check.png")
     cv2.imwrite(out, over)
     print(
         f"saved corrected overlay (green=calibrated proj, magenta=detected) -> {out}",

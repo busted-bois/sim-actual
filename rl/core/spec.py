@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from rl.calibration import load_calibration
+from rl.core.calibration import load_calibration
 
 # ----------------------------------------------------------------------------
 # Camera intrinsics (fixed, given). fx=fy=320, cx=320, cy=180 => 640x360 frame.

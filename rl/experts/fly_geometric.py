@@ -7,8 +7,8 @@ No vision, no learned policy — fastest reliable path.
 
 Safety: aborts on flip / ground / out-of-bounds, and after --seconds.
 
-    uv run -m rl.fly_geometric --seconds 15 --speed 3      # short supervised test
-    uv run -m rl.fly_geometric --seconds 90 --speed 6      # full course attempt
+    uv run -m rl.experts.fly_geometric --seconds 15 --speed 3      # short supervised test
+    uv run -m rl.experts.fly_geometric --seconds 90 --speed 6      # full course attempt
 """
 
 import argparse
@@ -19,9 +19,9 @@ import time
 
 import numpy as np
 
-from rl import spec
-from rl.control import geometric_action
-from rl.sim_interface import GATE_MAP_PATH, SimInterface
+from rl.core import spec
+from rl.experts.control import geometric_action
+from rl.environment.sim_interface import GATE_MAP_PATH, SimInterface
 
 
 def main():

@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 
-from rl import spec
+from rl.core import spec
 
 YAW_SIGMA_RAD = 0.35  # base yaw-measurement uncertainty at confidence=1.0
 

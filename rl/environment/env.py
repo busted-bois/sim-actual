@@ -11,7 +11,7 @@ sim-to-sim gap.
   * Reward      : dense progress + gate-pass bonus - crash/time/effort
   * Curriculum  : stage 0 single close gate -> 1 two gates -> 2 full 6-gate course
 
-    uv run -m rl.env --selftest
+    uv run -m rl.environment.env --selftest
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from rl import spec
-from rl.calibration import load_calibration
-from rl.observation import build_observation
+from rl.core import spec
+from rl.core.calibration import load_calibration
+from rl.core.observation import build_observation
 
 # Reduced quadrotor parameters — measured overrides when calibration exists.
 _CAL = load_calibration()
@@ -272,7 +272,7 @@ def _selftest():
     print(f"[selftest] random rollout {steps} steps reward={total:.1f} info={info}")
 
     # Geometric expert controller should fly the full course on every stage.
-    from rl.control import geometric_action
+    from rl.experts.control import geometric_action
 
     for stage in range(len(CURRICULUM)):
         passes = total_gates = 0
@@ -294,7 +294,7 @@ def _selftest():
         assert passes >= trials, f"expert should clear stage {stage} gates"
 
     # GP (AndurilGP guidance) expert should clear stage 0 like the geometric one.
-    from rl.gp_expert import GPExpert
+    from rl.experts.gp_expert import GPExpert
 
     gp = GPExpert()
     gp_passes = 0

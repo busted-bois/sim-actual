@@ -15,8 +15,8 @@ import math
 
 import numpy as np
 
-from rl import spec
-from rl.env import DECISION_HZ
+from rl.core import spec
+from rl.environment.env import DECISION_HZ
 from simulator.gp_pilot import _fresh_hold_state, compute_guidance
 from simulator.gp_vision import VisionVelocityTracker
 
@@ -141,7 +141,7 @@ class GPExpert:
 
 
 def _selftest():
-    from rl.env import GateRacingEnv
+    from rl.environment.env import GateRacingEnv
 
     expert = GPExpert()
     passes = trials = 0
