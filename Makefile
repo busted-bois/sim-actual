@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-train rl-eval rl-baseline rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -99,6 +99,13 @@ attitude-harness:
 	uv run python -m flightlab.run_attitude
 
 # --- RL pipeline (Modules 1-8) ------------------------------------------------
+# Overridable RL handoff settings (see docs/rl-live-handoff.md). POLICY has no
+# default because the checked-in zero-gate anchor is unsafe for live flight.
+CONFIG ?= configs/default.yaml
+POLICY ?=
+RUN ?= ppo
+STEPS ?= 300000
+
 # Module 1: connect to live sim, dump telemetry snapshot + gate map.
 capture:
 	uv run -m rl.environment.sim_interface
@@ -125,9 +132,24 @@ train-bc:
 train-ppo:
 	uv run -m rl.training.train_ppo
 
-# Module 8: fly the trained policy on the live sim.
+# Module 8: fly the trained policy on the live sim (see docs/rl-live-handoff.md).
+# Pass --config and --policy so candidate selection is explicit.
 fly-policy:
-	uv run -m rl.deploy
+	@test -n "$(POLICY)" || (echo "POLICY is required; use rl/data/best/<run>/policy.pt" >&2; exit 2)
+	uv run -m rl.deploy --config $(CONFIG) --policy $(POLICY)
+
+# Parameterized PPO training -> rl/data/best/$(RUN)/policy.pt
+rl-train:
+	uv run python -m rl.training.train_ppo --config $(CONFIG) --run-name $(RUN) --steps $(STEPS)
+
+# Deterministic multi-seed eval against the frozen T0 protocol.
+rl-eval:
+	@test -n "$(POLICY)" || (echo "POLICY is required; pass the candidate or explicit anchor path" >&2; exit 2)
+	uv run python -m rl.training.evaluate --policy $(POLICY)
+
+# Regenerate the frozen rl/data/baseline.json contract (anchor + expert).
+rl-baseline:
+	uv run python scripts/capture_baseline.py
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:
