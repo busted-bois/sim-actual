@@ -9,7 +9,7 @@ sim-to-sim gap.
   * Action      : 4-D normalized [-1,1] -> (roll,pitch,yaw rate, thrust)  [spec.scale_action]
   * Observation : 24-D gate-relative vector                              [Module 6]
   * Reward      : dense progress + gate-pass bonus - crash/time/effort
-  * Curriculum  : stage 0 single close gate -> 1 two gates -> 2 full 6-gate course
+  * Curriculum  : 1 gate -> 2 gates -> 6 gates -> full 17-gate course
 
     uv run -m rl.environment.env --selftest
 """
@@ -38,11 +38,12 @@ SUBSTEPS = int((1 / DECISION_HZ) / SIM_DT)
 
 G_WORLD = np.array([0.0, 0.0, spec.GRAVITY])
 
-# Curriculum stages: (num_gates, first-gate distance, layout jitter).
+# Curriculum stages: gate count, first-gate distance, layout jitter, time budget.
 CURRICULUM = [
-    {"num_gates": 1, "spawn_dist": 5.0, "jitter": 0.5},
-    {"num_gates": 2, "spawn_dist": 6.0, "jitter": 1.0},
-    {"num_gates": 6, "spawn_dist": 7.0, "jitter": 2.0},
+    {"num_gates": 1, "spawn_dist": 5.0, "jitter": 0.5, "max_seconds": 20.0},
+    {"num_gates": 2, "spawn_dist": 6.0, "jitter": 1.0, "max_seconds": 20.0},
+    {"num_gates": 6, "spawn_dist": 7.0, "jitter": 2.0, "max_seconds": 30.0},
+    {"num_gates": 17, "spawn_dist": 7.0, "jitter": 2.0, "max_seconds": 70.0},
 ]
 
 
@@ -71,14 +72,17 @@ class GateRacingEnv(gym.Env):
         self,
         stage: int = 0,
         gate_map: list | None = None,
-        max_seconds: float = 20.0,
+        max_seconds: float | None = None,
         seed: int | None = None,
     ):
         super().__init__()
         self.stage = int(np.clip(stage, 0, len(CURRICULUM) - 1))
         self.cfg = CURRICULUM[self.stage]
         self.user_gate_map = gate_map
-        self.max_steps = int(max_seconds * DECISION_HZ)
+        episode_seconds = (
+            self.cfg["max_seconds"] if max_seconds is None else max_seconds
+        )
+        self.max_steps = int(episode_seconds * DECISION_HZ)
         self.action_space = spaces.Box(-1.0, 1.0, (spec.ACTION_DIM,), np.float32)
         self.observation_space = spaces.Box(-10.0, 10.0, (spec.OBS_DIM,), np.float32)
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -339,7 +343,7 @@ def _selftest():
                 break
     print(f"[selftest] GP expert passed {gp_passes}/{trials} stage-0 gates")
     assert gp_passes >= trials - 1, "GP expert should clear nearly all stage-0 gates"
-    print("[selftest] OK — env steps, rewards, gate-pass + 3-stage curriculum wired")
+    print("[selftest] OK — env steps, rewards, gate-pass + 4-stage curriculum wired")
 
 
 if __name__ == "__main__":

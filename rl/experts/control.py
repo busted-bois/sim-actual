@@ -31,7 +31,7 @@ def geometric_action(
     """Return normalized action [-1,1]^4 driving the drone toward `target`."""
     # max_speed 2.5: with rate caps at 0.6 rad/s the attitude loop is
     # slew-limited, and a 6 m/s approach demands tilt changes it can't deliver
-    # (gain-swept at the 0.6 caps: 2.5 clears all 3 curriculum stages).
+    # (gain-swept at the 0.6 caps: 2.5 clears the curriculum stages).
     p = np.asarray(p, float)
     v = np.asarray(v, float)
     R = spec.quat_to_R(np.asarray(q, float))  # body->world

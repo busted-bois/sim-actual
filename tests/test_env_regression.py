@@ -45,17 +45,48 @@ class EnvironmentRegressionTests(unittest.TestCase):
         self.assertEqual(
             CURRICULUM,
             [
-                {"num_gates": 1, "spawn_dist": 5.0, "jitter": 0.5},
-                {"num_gates": 2, "spawn_dist": 6.0, "jitter": 1.0},
-                {"num_gates": 6, "spawn_dist": 7.0, "jitter": 2.0},
+                {
+                    "num_gates": 1,
+                    "spawn_dist": 5.0,
+                    "jitter": 0.5,
+                    "max_seconds": 20.0,
+                },
+                {
+                    "num_gates": 2,
+                    "spawn_dist": 6.0,
+                    "jitter": 1.0,
+                    "max_seconds": 20.0,
+                },
+                {
+                    "num_gates": 6,
+                    "spawn_dist": 7.0,
+                    "jitter": 2.0,
+                    "max_seconds": 30.0,
+                },
+                {
+                    "num_gates": 17,
+                    "spawn_dist": 7.0,
+                    "jitter": 2.0,
+                    "max_seconds": 70.0,
+                },
             ],
         )
-        for stage, gate_count in enumerate((1, 2, 6)):
+        for stage, gate_count in enumerate((1, 2, 6, 17)):
             env = GateRacingEnv(stage=stage, seed=0)
             self.assertEqual(env.stage, stage)
             self.assertEqual(len(env.gate_map), gate_count)
+            self.assertEqual(env.max_steps, int(CURRICULUM[stage]["max_seconds"] * 50))
         self.assertEqual(GateRacingEnv(stage=-1).stage, 0)
-        self.assertEqual(GateRacingEnv(stage=99).stage, 2)
+        self.assertEqual(GateRacingEnv(stage=99).stage, 3)
+
+    def test_full_stage_uses_all_17_supplied_gates(self) -> None:
+        gate_map = [
+            {"pos": [float(index + 1), 0.0, -3.0], "quat": [1.0, 0.0, 0.0, 0.0]}
+            for index in range(17)
+        ]
+        env = GateRacingEnv(stage=3, gate_map=gate_map, seed=0)
+        self.assertEqual(len(env.gate_map), 17)
+        self.assertEqual(env.gate_map[-1]["pos"], [17.0, 0.0, -3.0])
 
     def test_physics_gravity_contract(self) -> None:
         np.testing.assert_array_equal(G_WORLD, np.array([0.0, 0.0, spec.GRAVITY]))
