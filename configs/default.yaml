@@ -1,0 +1,36 @@
+config_version: 1
+seed: 0
+seeds:
+  - 0
+  - 1
+  - 2
+eval_episodes: 50
+policy_path: rl/data/policy.pt
+env:
+  curriculum_stage: 2
+  max_steps: 1000
+  gate_size: 2.72
+ppo:
+  n_steps: 1024
+  batch_size: 256
+  gamma: 0.99
+  lr: 0.0003
+  n_epochs: 10
+  net_arch:
+    - 64
+    - 64
+    - 64
+bc:
+  epochs: 40
+  lr: 0.001
+domain_rand:
+  mass_pct: 0.10
+  inertia_pct: 0.10
+  hover_offset: 0.05
+  wind: 0.0
+checkpoint:
+  dir: rl/data/best
+  atomic: true
+  resume: true
+  schema_min_version: 1
+device: auto
