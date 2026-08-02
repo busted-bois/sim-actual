@@ -29,11 +29,18 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from rl.core.config import RLConfig, load_config, resolve_device
 from rl.core import spec
 from rl.environment.env import CURRICULUM, DECISION_HZ, GateRacingEnv
+from rl.training.checkpoint import (
+    CheckpointNotFoundError,
+    save_atomic,
+    save_sb3_atomic,
+    resume_latest,
+)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 ZIP_PATH = os.path.join(DATA_DIR, "policy_ppo.zip")
 POLICY_PT = os.path.join(DATA_DIR, "policy.pt")
 POLICY_BC_PT = os.path.join(DATA_DIR, "policy_bc.pt")
+LEGACY_RUN_DIR = os.path.join(DATA_DIR, "best", "legacy")
 
 NET_ARCH = [64, 64, 64]
 
@@ -91,6 +98,57 @@ class _ProgressCallback(BaseCallback):
                         self._header_written = True
                     writer.writerow([ep_rew, gates, global_steps])
         return True
+
+
+class _CheckpointCallback(BaseCallback):
+    """Periodic atomic checkpoint saver.
+
+    Saves at rollout boundaries (``_on_rollout_end``) using true
+    ``model.num_timesteps`` so it is immune to the n_env-frequency bugs that
+    affect SB3's ``CheckpointCallback``.  The final save is guaranteed via
+    :meth:`save_now` from the runner.
+    """
+
+    def __init__(self, cfg: RLConfig, ckpt_dir: str, initial_step: int = 0):
+        super().__init__()
+        self._cfg = cfg
+        self._ckpt_dir = ckpt_dir
+        self._save_every = cfg.checkpoint.save_every_steps
+        self._last_save = initial_step
+        self._stage = 0
+        self._stage_start = 0
+
+    def set_stage(self, stage: int, stage_start_ts: int) -> None:
+        self._stage = stage
+        self._stage_start = stage_start_ts
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        ts = int(self.model.num_timesteps)
+        if ts - self._last_save >= self._save_every:
+            self._write(ts)
+            self._last_save = ts
+
+    def save_now(self) -> None:
+        ts = int(self.model.num_timesteps)
+        if ts == self._last_save:
+            return
+        self._write(ts)
+        self._last_save = ts
+
+    def _write(self, ts: int) -> None:
+        stage_step = ts - self._stage_start
+        path = os.path.join(self._ckpt_dir, f"checkpoint_{ts:08d}.ckpt")
+        save_atomic(
+            self.model,
+            path,
+            self._cfg,
+            training_step=ts,
+            stage=self._stage,
+            stage_step=stage_step,
+        )
 
 
 def _make_env(stage: int, seed: int = 0, max_steps: int | None = None):
@@ -235,9 +293,12 @@ def train(total_per_stage=300_000, n_envs=8, quick=False, seed=0, bc_init=None):
         rew = evaluate(model, stage=stage, episodes=5)
         print(f"[ppo] stage {stage} mean eval reward={rew:.1f}", flush=True)
 
-    model.save(ZIP_PATH)
-    print(f"[ppo] saved SB3 model -> {ZIP_PATH}", flush=True)
-    std = export_policy(model)
+    os.makedirs(LEGACY_RUN_DIR, exist_ok=True)
+    legacy_zip_path = os.path.join(LEGACY_RUN_DIR, "policy_ppo.zip")
+    legacy_policy_path = os.path.join(LEGACY_RUN_DIR, "policy.pt")
+    save_sb3_atomic(model, legacy_zip_path)
+    print(f"[ppo] saved SB3 model -> {legacy_zip_path}", flush=True)
+    std = export_policy(model, out=legacy_policy_path)
     err = _verify_export(model, std)
     assert err < 1e-4, (
         f"export parity failed (max_abs_action_diff={err:.5f}); policy.pt would "
@@ -308,7 +369,6 @@ def run(
     if tb_root is None:
         tb_root = str(Path(DATA_DIR) / "tb")
     tb_log_dir = os.path.join(tb_root, run_name)
-    csv_path = os.path.join(ckpt_dir, "progress.csv")
 
     n_steps_cfg = cfg.ppo.n_steps
     batch_cfg = cfg.ppo.batch_size
@@ -328,7 +388,6 @@ def run(
         rollout_size = _select_rollout_size(total_timesteps, n_steps_cfg, n_envs)
         batch_size = _largest_safe_divisor(rollout_size, batch_cfg)
         n_steps = rollout_size // n_envs
-        stages = range(1)
     else:
         total_timesteps = cfg.ppo.total_timesteps_per_stage
         n_envs = cfg.ppo.n_envs
@@ -336,40 +395,82 @@ def run(
         n_epochs = n_epochs_cfg
         n_steps = n_steps_cfg
         rollout_size = n_steps_cfg * n_envs
-        stages = range(cfg.env.curriculum_stage + 1)
 
     os.makedirs(ckpt_dir, exist_ok=True)
     policy_kwargs = dict(net_arch=dict(pi=net_arch, vf=net_arch), activation_fn=nn.Tanh)
     max_s = cfg.env.max_steps
-    env0 = DummyVecEnv([_make_env(0, cfg.seed, max_steps=max_s) for _ in range(n_envs)])
-    model = PPO(
-        "MlpPolicy",
-        env0,
-        policy_kwargs=policy_kwargs,
-        verbose=0,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        gae_lambda=0.95,
-        gamma=gamma,
-        ent_coef=0.005,
-        learning_rate=lr,
-        clip_range=0.2,
-        n_epochs=n_epochs,
-        seed=cfg.seed,
-        device=device,
-        tensorboard_log=tb_log_dir,
-    )
 
-    bc_init_path = bc_init_arg
-    if bc_init_path is None and not is_smoke and os.path.exists(POLICY_BC_PT):
-        bc_init_path = POLICY_BC_PT
-    if bc_init_path:
-        load_bc_init(model, bc_init_path)
+    if is_smoke:
+        end_stage = 1
+    else:
+        end_stage = cfg.env.curriculum_stage + 1
 
-    callbacks = [_ProgressCallback(csv_path)]
+    model: PPO | None = None
+    start_stage = 0
+    stage_start_ts = 0
+    resumed_ts = 0
+    did_train = False
+
+    if cfg.checkpoint.resume:
+        try:
+            model, meta = resume_latest(ckpt_dir, cfg, env=None, device=str(device))
+            resumed_ts = int(meta["training_step"])
+            rstage = int(meta["stage"])
+            rstage_step = int(meta["stage_step"])
+            stage_start_ts = resumed_ts - rstage_step
+            if rstage_step >= total_timesteps:
+                start_stage = rstage + 1
+                stage_start_ts = resumed_ts
+            else:
+                start_stage = rstage
+            model.tensorboard_log = tb_log_dir
+            print(
+                f"[ppo] resumed from checkpoint: training_step={resumed_ts}, "
+                f"stage={rstage}, stage_step={rstage_step} -> start_stage={start_stage}",
+                flush=True,
+            )
+        except CheckpointNotFoundError:
+            model = None
+
+    if model is None:
+        env0 = DummyVecEnv(
+            [_make_env(0, cfg.seed, max_steps=max_s) for _ in range(n_envs)]
+        )
+        model = PPO(
+            "MlpPolicy",
+            env0,
+            policy_kwargs=policy_kwargs,
+            verbose=0,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            gae_lambda=0.95,
+            gamma=gamma,
+            ent_coef=0.005,
+            learning_rate=lr,
+            clip_range=0.2,
+            n_epochs=n_epochs,
+            seed=cfg.seed,
+            device=device,
+            tensorboard_log=tb_log_dir,
+        )
+
+        bc_init_path = bc_init_arg
+        if bc_init_path is None and not is_smoke and os.path.exists(POLICY_BC_PT):
+            bc_init_path = POLICY_BC_PT
+        if bc_init_path:
+            load_bc_init(model, bc_init_path)
+
+    csv_path = os.path.join(ckpt_dir, "progress.csv")
+    callbacks: list[BaseCallback] = [_ProgressCallback(csv_path)]
+    ckpt_cb = _CheckpointCallback(cfg, ckpt_dir, initial_step=resumed_ts)
+    ckpt_cb.model = model
+    callbacks.append(ckpt_cb)
 
     seeds = list(cfg.seeds)
-    for stage in stages:
+    for stage in range(start_stage, end_stage):
+        if stage != start_stage:
+            stage_start_ts = int(model.num_timesteps)
+
         stage_seed = seeds[stage % len(seeds)]
         model.set_env(
             DummyVecEnv(
@@ -383,26 +484,40 @@ def run(
                 ]
             )
         )
+        ckpt_cb.set_stage(stage, stage_start_ts)
+
+        current_stage_step = int(model.num_timesteps) - stage_start_ts
+        remaining = total_timesteps - current_stage_step
         print(
             f"[ppo] === stage {stage} ({CURRICULUM[stage]['num_gates']} gates) "
-            f"x {total_timesteps} steps ===",
+            f"| remaining={remaining}/{total_timesteps} steps ===",
             flush=True,
         )
-        model.learn(
-            total_timesteps=total_timesteps,
-            reset_num_timesteps=False,
-            progress_bar=False,
-            tb_log_name="ppo",
-            callback=callbacks,
-        )
+
+        if remaining > 0:
+            model.learn(
+                total_timesteps=remaining,
+                reset_num_timesteps=False,
+                progress_bar=False,
+                tb_log_name="ppo",
+                callback=callbacks,
+            )
+            did_train = True
+
+        ckpt_cb.model = model
+        ckpt_cb.save_now()
 
     zip_path = os.path.join(ckpt_dir, "policy_ppo.zip")
-    model.save(zip_path)
+    save_sb3_atomic(model, zip_path)
     print(f"[ppo] saved SB3 model -> {zip_path}", flush=True)
 
     std = export_policy(model, out=os.path.join(ckpt_dir, "policy.pt"))
     err = _verify_export(model, std)
     assert err < 1e-4, f"export parity failed (max_abs_action_diff={err:.5f})"
+
+    if did_train:
+        ckpt_cb.model = model
+        ckpt_cb.save_now()
 
     return model
 
