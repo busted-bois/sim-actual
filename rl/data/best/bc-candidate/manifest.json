@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "algorithm": "behavior_cloning",
+  "config": "configs/default.yaml",
+  "seed": 0,
+  "epochs": 40,
+  "reproduction": [
+    "uv run -m rl.training.log_demos",
+    "train with rl.training.train_bc using configs/default.yaml and save_policy to this policy path",
+    "uv run python -m rl.training.evaluate --policy rl/data/best/bc-candidate/policy.pt --episodes 50 --seeds 0 1 2 --out-csv rl/data/best/bc-candidate/eval.csv"
+  ],
+  "demonstrations": {
+    "path": "rl/data/gp_demos.npz",
+    "transitions": 61065,
+    "sha256": "11e34aae7424c147a3e0fd7f0412e881a77eed24350dd9bff38eda44e5ae636d"
+  },
+  "policy": {
+    "path": "rl/data/best/bc-candidate/policy.pt",
+    "sha256": "21a2f7c1b6cdcdbc37021806d5da0d34e4cb1689d19e43e27f1997913961c8af",
+    "architecture": [64, 64, 64],
+    "observation_dim": 24,
+    "action_dim": 4,
+    "train_hover_thrust": 0.27,
+    "action_scale": [0.6, 0.6, 0.6]
+  },
+  "evaluation": {
+    "stage": 2,
+    "seeds": [0, 1, 2],
+    "episodes_per_seed": 50,
+    "gates_cleared_mean": 2.1866666666666665,
+    "gates_cleared_std": 0.9047037575299933,
+    "return_mean": 58.15755141413436,
+    "return_std": 57.214016252726104,
+    "success_rate": 0.0,
+    "csv": "rl/data/best/bc-candidate/eval.csv"
+  },
+  "references": {
+    "legacy_anchor_gates_mean": 0.0,
+    "expert_gates_mean": 2.8066666666666666,
+    "expert_gates_std": 1.1177159249509192
+  },
+  "claim": "Competent BC warm-start candidate; not a converged PPO policy."
+}
