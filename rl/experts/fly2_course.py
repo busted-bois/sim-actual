@@ -242,7 +242,9 @@ class Fly2CoursePilot:
             return odo
         if not self.gate_map:
             return None
-        return self._pose.tick(self.data, self.gate_map)
+        return self._pose.tick(
+            self.data, self.gate_map, thrust_cmd=self.controller.last_thrust
+        )
 
     def tick(self) -> None:
         odo = self._current_odometry()

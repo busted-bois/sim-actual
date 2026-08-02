@@ -224,6 +224,10 @@ class Controller:
         self._vz = vz
         self._yaw_rate = yaw_rate
 
+    @property
+    def last_thrust(self) -> float:
+        return self._thrust
+
     def update(self):
         self.pilot.tick()
 

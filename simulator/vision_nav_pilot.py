@@ -59,15 +59,11 @@ class VisionNavPilot:
 
     def on_attempt_start(self) -> None:
         self.guide = VisionGuidance()
-        # Gate map is used only to seed/fuse the EKF fallback pose — the
-        # navigator itself flies purely from detections.
         self.gate_map = resolve_gate_map(self.data)
         track = self.data.get("track_gates") or self.data.get("gates") or []
         from_track = self.data.get("track_positions_valid") is not False and bool(
             track_gates_to_gate_map(track)
         )
-        # Live track burst is already NED; the climb heuristic only applies to
-        # the up-positive captured gate_map.json convention.
         flipz = False if from_track else detect_climb_course(self.gate_map)
         self._pose.reset(self.gate_map, flipz=flipz)
         self.hold_z = None
@@ -137,9 +133,6 @@ class VisionNavPilot:
     def _current_odometry(self) -> dict | None:
         odo = self.data.get("odometry")
         if odo is not None:
-            # Under the VQ2 block the sim may still emit ODOMETRY frames
-            # filled with NaN (spec 9.3 lists it as blocked) -- feeding those
-            # to guidance produced 100% SCAN attempts. Treat as absent.
             if self._odo_finite(odo):
                 self._log_pose_source("odometry")
                 return odo
@@ -148,10 +141,9 @@ class VisionNavPilot:
                 print(
                     "[vnav] odometry non-finite (VQ2 block?) -- using EKF", flush=True
                 )
-        est = self._pose.tick(self.data, self.gate_map)
-        if est is not None:
-            self._log_pose_source("EKF")
-        return est
+        return self._pose.tick(
+            self.data, self.gate_map, thrust_cmd=self.controller.last_thrust
+        )
 
     def tick(self) -> None:
         odo = self._current_odometry()
@@ -205,9 +197,6 @@ class VisionNavPilot:
                 ]
             )
 
-        # Odometry sign convention regardless of pose source: applying
-        # EST_SIGNS to the EKF attitude flew the drone INVERTED (live
-        # 2026-07-02) -- that hypothesis is falsified.
         roll_cmd, pitch_cmd, yaw_cmd, thrust = rates_from_attitude_targets(
             roll, pitch, z, vz, cmd.tgt_roll, cmd.tgt_pitch, cmd.yaw_err, cmd.tgt_z
         )
