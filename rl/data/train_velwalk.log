@@ -1,0 +1,17 @@
+[ppo] training on device=cuda
+C:\Users\kunal\Desktop\sim-actual\.venv\Lib\site-packages\stable_baselines3\common\on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[ppo] warm-started actor from BC weights C:\Users\kunal\Desktop\sim-actual\rl\data\policy_bc.pt
+[ppo] === stage 0 (1 gates) x 150000 steps ===
+C:\Users\kunal\Desktop\sim-actual\.venv\Lib\site-packages\stable_baselines3\common\evaluation.py:71: UserWarning: Evaluation environment is not wrapped with a ``Monitor`` wrapper. This may result in reporting modified episode lengths and rewards, if other wrappers happen to modify these. Consider wrapping environment first with ``Monitor`` wrapper.
+  warnings.warn(
+[ppo] stage 0 mean eval reward=31.5
+[ppo] === stage 1 (2 gates) x 150000 steps ===
+[ppo] stage 1 mean eval reward=-9.6
+[ppo] === stage 2 (6 gates) x 400000 steps ===
+[ppo] stage 2 mean eval reward=30.8
+[ppo] === stage 3 (17 gates) x 600000 steps ===
+[ppo] stage 3 mean eval reward=20.9
+[ppo] saved SB3 model -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy_ppo.zip
+[ppo] exported standalone policy -> C:\Users\kunal\Desktop\sim-actual\rl\data\policy.pt
+[ppo] export parity max_abs_action_diff=0.00000
