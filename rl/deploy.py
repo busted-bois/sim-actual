@@ -164,6 +164,19 @@ def _safe_extract_vec(d: dict, keys: list[str], shape: int) -> np.ndarray | None
     return None
 
 
+def _fallback_gate_index(data: dict, fallback: int) -> int:
+    raw = data.get("active_gate_index")
+    if raw is None or isinstance(raw, bool):
+        return fallback
+    try:
+        active = int(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if isinstance(raw, float) and not raw.is_integer():
+        return fallback
+    return active
+
+
 class DeployBrain:
     """Socket-free deploy decision logic: ESKF, fallback, gate progression."""
 
@@ -364,6 +377,21 @@ class DeployBrain:
                 self._accepted_pnp_frames = 0
                 self._last_gate_progress_t = now
             else:
+                # Pass active gate quaternion to fallback for doffset/CTE.
+                active = _fallback_gate_index(data, self.gate_idx)
+                if gate_map and 0 <= active < len(gate_map):
+                    g = gate_map[active]
+                    if isinstance(g, dict) and "quat" in g:
+                        try:
+                            self._fallback.set_gate_context(
+                                np.asarray(g["quat"], dtype=float)
+                            )
+                        except (TypeError, ValueError):
+                            self._fallback.set_gate_context(None)
+                    else:
+                        self._fallback.set_gate_context(None)
+                else:
+                    self._fallback.set_gate_context(None)
                 cmd = self._fallback.update(data, st["q"], 1.0 / 100.0)
                 self._last_applied_thrust = cmd[3]
                 return np.array(cmd, dtype=np.float64)
