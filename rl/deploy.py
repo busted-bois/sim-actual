@@ -120,7 +120,9 @@ def live_scale_action(a: np.ndarray, meta: dict) -> np.ndarray:
     pitch = float(np.clip(a[1] * scale[1], -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
     yaw = float(np.clip(a[2] * scale[2], -LIVE_RATE_CLIP, LIVE_RATE_CLIP))
     thrust_train = (float(a[3]) + 1.0) * 0.5
-    train_hover = meta["train_hover"]
+    train_hover = float(meta["train_hover"])
+    if not np.isfinite(train_hover) or train_hover <= 0.0:
+        raise ValueError("checkpoint train_hover must be finite and positive")
     thrust = LIVE_HOVER_THRUST + (thrust_train - train_hover) * (
         LIVE_HOVER_THRUST / train_hover
     )

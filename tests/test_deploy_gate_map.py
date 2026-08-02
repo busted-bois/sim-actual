@@ -154,6 +154,16 @@ class LiveRemapTests(unittest.TestCase):
             self.assertLessEqual(cmd[3], LIVE_THRUST_MAX + 1e-9)
             self.assertLess(cmd[3], 0.9)  # never train-env "1.0" thrust live
 
+    def test_invalid_training_hover_is_rejected(self):
+        from rl.deploy import live_scale_action
+
+        action = np.zeros(4)
+        for train_hover in (0.0, -0.1, float("nan"), float("inf")):
+            with self.subTest(train_hover=train_hover):
+                metadata = {"train_hover": train_hover, "action_scale": (0.6,) * 3}
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    live_scale_action(action, metadata)
+
     def test_legacy_checkpoint_loads_with_fallback_meta(self):
         import torch
 
