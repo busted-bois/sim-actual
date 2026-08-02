@@ -79,6 +79,7 @@ class FallbackBrain:
         self.hold = _fresh_hold_state()
         self._vision: dict | None = None
         self._vision_vel: dict | None = None
+        self._gate_quat: np.ndarray | None = None
 
     def reset(self) -> None:
         self.smoother.reset()
@@ -86,6 +87,11 @@ class FallbackBrain:
         self.hold = _fresh_hold_state()
         self._vision = None
         self._vision_vel = None
+        self._gate_quat = None
+
+    def set_gate_context(self, gate_quat: np.ndarray | None) -> None:
+        """Set the active gate quaternion for doffset/CTE (from deploy gate_map)."""
+        self._gate_quat = gate_quat
 
     def update(
         self,
@@ -121,5 +127,6 @@ class FallbackBrain:
             hover_thrust=LIVE_HOVER_THRUST,
             vX=float("nan"),  # no forward speed estimate
             dt=dt,
+            gate_quat=self._gate_quat,
         )
         return guidance_to_rate_cmds(roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust)

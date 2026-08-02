@@ -109,9 +109,14 @@ class GPExpert:
         vD = float(v[2])  # NED down
 
         gate_idx = int(np.clip(gate_idx, 0, len(gate_map) - 1))
-        vision = self._synthetic_vision(
-            np.asarray(p, dtype=np.float64), R, gate_map[gate_idx]
-        )
+        gate = gate_map[gate_idx]
+        gate_quat = None
+        if isinstance(gate, dict) and "quat" in gate:
+            try:
+                gate_quat = np.asarray(gate["quat"], dtype=np.float64)
+            except (TypeError, ValueError):
+                gate_quat = None
+        vision = self._synthetic_vision(np.asarray(p, dtype=np.float64), R, gate)
         vision_vel = self.tracker.update(vision)
 
         roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, _dbg = compute_guidance(
@@ -124,6 +129,7 @@ class GPExpert:
             vision_vel=vision_vel,
             state=self.hold,
             hover_thrust=spec.HOVER_THRUST,  # env plant hovers at spec value
+            gate_quat=gate_quat,
         )
         # The live pilot ships these degree commands on the attitude-quat
         # wire; the internal env is a rate plant, so interpret deg -> rad/s
