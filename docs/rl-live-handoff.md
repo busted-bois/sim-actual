@@ -252,6 +252,26 @@ not call a candidate converged just because it beats zero. The expert itself
 only finishes the full course in well under one percent of episodes, so
 matching it is hard and exceeding it is the actual target.
 
+### Verified CPU behavior-cloning candidate
+
+The repository includes `rl/data/best/bc-candidate/policy.pt`, trained from
+61,065 freshly generated GP-expert transitions. Under the same 150-episode
+protocol it clears `2.1866666666666665` gates on average with population std
+`0.9047037575299933`. Its metadata uses hover thrust `0.27` and action scales
+`[0.6, 0.6, 0.6]`. The adjacent `manifest.json` and `eval.csv` record its
+provenance and per-episode results.
+
+This candidate beats the zero-gate anchor and exceeds the expert-minus-one-std
+threshold, but remains below the expert mean and completes no full courses.
+Treat it as a validated BC warm start and live-flight candidate behind the
+camera-native safety fallback, not as converged PPO. A fresh GPU PPO run should
+start from this behavior-cloning path and undergo the same evaluation gate:
+
+```bash
+uv run python -m rl.training.train_ppo --config configs/default.yaml \
+  --run-name gpu-ppo --bc-init rl/data/best/bc-candidate/policy.pt
+```
+
 ## Live deploy
 
 Once a candidate clears the evaluation bar, hand it to the live loop. This
