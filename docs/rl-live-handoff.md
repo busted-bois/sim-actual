@@ -167,8 +167,8 @@ steps on CPU, stage 0 only, and proves the pipeline end to end:
 uv run python -m rl.training.train_ppo --smoke 2000 --run-name smoke
 ```
 
-The runner trains across the curriculum, three stages from one gate to the
-full six-gate course. It exports two artifacts at the end.
+The runner trains across four stages: 1, 2, 6, then all 17 gates. The final
+stage has a 70-second episode budget. It exports two artifacts at the end.
 
 - `rl/data/best/<run>/policy.pt` is the dependency-light standalone actor
   for deploy.
@@ -351,7 +351,8 @@ The full pipeline is done when all of these hold.
 
 1. `make rl-test` passes.
 2. `flightlab/calibration.json` exists from `make attitude-harness`.
-3. `rl/data/gate_map.json` exists from `make capture-gates`.
+3. `rl/data/gate_map.json` exists from `make capture-gates`, and capture reports
+   all 17 gates. The checked-in six-gate file is stale for the current course.
 4. Native PnP reaches deploy. `rl/data/gatenet.pt` is optional supplemental
    perception and may be produced with `make train-gatenet`.
 5. A trained candidate at `rl/data/best/<run>/policy.pt` exists from
