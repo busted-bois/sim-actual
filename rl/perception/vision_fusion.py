@@ -3,12 +3,47 @@
 from __future__ import annotations
 
 import math
+import os
+import warnings
 
 import numpy as np
 
 from rl.core import spec
 
 YAW_SIGMA_RAD = 0.35  # base yaw-measurement uncertainty at confidence=1.0
+
+
+def gate_pose_from_image(
+    img_bgr,
+    weights: str | None = None,
+    device: str | None = None,
+    drone_quat: np.ndarray | None = None,
+    gate_world_pos: np.ndarray | None = None,
+):
+    """GateNet -> mask -> PnP pose for one BGR frame, or ``None`` if untrained.
+
+    Lazy image-to-pose entry: only imports/constructs ``GateNetInfer`` when a
+    weights file is actually present. Repo weights are absent by default (the
+    user trains them), so in that state it warns once and returns ``None``
+    rather than raising — letting the EKF coast on dead-reckoning. Does not
+    touch the ``fuse_*`` APIs.
+    """
+    from rl.perception.gatenet import WEIGHTS_PATH
+    from rl.perception.pnp import pose_from_mask
+
+    path = WEIGHTS_PATH if weights is None else weights
+    if not os.path.isfile(path):
+        warnings.warn(
+            f"GateNet weights not found at {path}; skipping image pose recovery",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    from rl.perception.gatenet import GateNetInfer
+
+    mask = GateNetInfer(path, device=device).mask(img_bgr)
+    return pose_from_mask(mask, drone_quat=drone_quat, gate_world_pos=gate_world_pos)
 
 
 def fuse_gate_target_position(
