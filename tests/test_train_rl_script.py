@@ -37,6 +37,7 @@ class TrainRlScriptTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("rl/data/best/ppo/policy.pt", result.stdout)
         self.assertIn("--bc-init rl/data/policy_bc.pt", result.stdout)
+        self.assertIn("course_gates=17", result.stdout)
         self.assertNotIn("[demos]", result.stdout)
 
     def test_overrides_reach_commands(self):
