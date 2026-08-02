@@ -158,15 +158,18 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(ROOT))
 
     from rl.core.config import load_config
+    from rl.environment.env import CURRICULUM
 
     config = load_config(args.config)
     checkpoint_dir = Path(config.checkpoint.dir)
+    course_gates = CURRICULUM[config.env.curriculum_stage]["num_gates"]
     commands, candidate, candidate_csv, expert_csv = _pipeline(args, checkpoint_dir)
 
     if args.dry_run:
         print("train-rl [DRY RUN]")
         print(
-            f"config={args.config} run={args.run_name} checkpoint.dir={checkpoint_dir}"
+            f"config={args.config} run={args.run_name} checkpoint.dir={checkpoint_dir} "
+            f"course_gates={course_gates}"
         )
         for label, command in commands[:3]:
             print(f"\n=== {label} ===\n{_display(command)}")

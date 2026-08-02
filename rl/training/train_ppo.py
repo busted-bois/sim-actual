@@ -1,8 +1,8 @@
 """Module 8 (training) — PPO with a 3x64 MLP policy + curriculum.
 
-Trains an SB3 PPO agent over the 24-D observation across the 3 curriculum
-stages (single gate -> two gates -> full 6-gate course), reusing weights
-between stages. Exports a dependency-light ``policy.pt`` (pure-torch
+Trains an SB3 PPO agent over the 24-D observation across four curriculum
+stages (1, 2, 6, then all 17 gates), reusing weights between stages. Exports
+a dependency-light ``policy.pt`` (pure-torch
 deterministic actor) for deployment, plus the full SB3 zip for resuming.
 
     uv run -m rl.training.train_ppo --config configs/default.yaml --smoke 2000 --run-name my-run
@@ -152,10 +152,7 @@ class _CheckpointCallback(BaseCallback):
 
 
 def _make_env(stage: int, seed: int = 0, max_steps: int | None = None):
-    if max_steps is None:
-        max_seconds = 20.0
-    else:
-        max_seconds = max_steps / DECISION_HZ
+    max_seconds = None if max_steps is None else max_steps / DECISION_HZ
 
     def _thunk():
         return Monitor(
@@ -167,9 +164,7 @@ def _make_env(stage: int, seed: int = 0, max_steps: int | None = None):
 
 
 def _vec_env(stage, n_envs=8, seed=0, *, max_steps: int | None = None):
-    if max_steps is None:
-        max_steps = int(20.0 * DECISION_HZ)
-    max_seconds = max_steps / DECISION_HZ
+    max_seconds = None if max_steps is None else max_steps / DECISION_HZ
     return DummyVecEnv(
         [
             lambda i=i, s=stage, ms=max_seconds, sd=seed: Monitor(

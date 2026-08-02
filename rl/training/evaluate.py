@@ -5,7 +5,8 @@ be compared against the checked-in anchor without ambiguity:
 
   * raw ``GateRacingEnv`` (no Monitor / VecEnv) — auto-reset ambiguity would
     drift the captured gates/return away from the baseline.
-  * stage 2 / default config, base seeds ``[0, 1, 2]``, 50 episodes each.
+  * final 17-gate stage / default config, base seeds ``[0, 1, 2]``, 50 episodes
+    each.
   * per-episode reset seed ``= base_seed * 10000 + episode_index`` (the formula
     recorded in ``rl/data/baseline.json``).
   * deterministic actions, terminate on ``terminated or truncated``.
@@ -40,8 +41,8 @@ from rl.environment.env import CURRICULUM, DECISION_HZ, GateRacingEnv
 SUPPORTED_EXPERTS = frozenset({"gp_expert"})
 DEFAULT_SEEDS = (0, 1, 2)
 DEFAULT_EPISODES = 50
-DEFAULT_STAGE = 2
-DEFAULT_MAX_STEPS = 1000
+DEFAULT_STAGE = 3
+DEFAULT_MAX_STEPS = 3500
 
 # Exact CSV schema (order matters — checked-in baseline + tests assert it).
 CSV_COLUMNS = ["seed", "episode", "gates_cleared", "return", "success", "steps"]
@@ -151,8 +152,8 @@ def evaluate(
     :data:`SUPPORTED_EXPERTS`) must be provided.
 
     Parameters mirror the frozen T0 baseline: ``seeds`` default to
-    ``[0, 1, 2]``, ``episodes`` to 50, stage to 2 (or whatever ``env_cfg``
-    carries). Each episode resets the env with seed
+    ``[0, 1, 2]``, ``episodes`` to 50, and stage to the 17-gate final course
+    (or whatever ``env_cfg`` carries). Each episode resets the env with seed
     ``base_seed * 10000 + episode_index``; the expert is reset every episode.
 
     Returns a summary dict with population mean/std (``ddof=0``) of gates
