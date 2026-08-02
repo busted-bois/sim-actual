@@ -55,6 +55,7 @@ class CheckpointConfig:
     atomic: bool = True
     resume: bool = True
     schema_min_version: int = 1
+    save_every_steps: int = 10_000
 
 
 @dataclass
@@ -123,6 +124,8 @@ def _validate(cfg: RLConfig) -> None:
         raise ConfigError("ppo.net_arch widths must be positive")
     if cfg.bc.epochs < 1:
         raise ConfigError("bc.epochs must be positive")
+    if cfg.checkpoint.save_every_steps < 1:
+        raise ConfigError("checkpoint.save_every_steps must be positive")
     resolve_device(cfg.device)
 
 

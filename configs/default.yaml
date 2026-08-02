@@ -35,4 +35,5 @@ checkpoint:
   atomic: true
   resume: true
   schema_min_version: 1
+  save_every_steps: 10000
 device: auto
