@@ -44,13 +44,12 @@ PERP_BLEND_DIST = 6.0
 # by grew to -1.5 m while blend cut P/D). Keep enough bank to finish centering.
 NEAR_LAT_BLEND_FLOOR = 0.75
 BEARING_NEED_BANK_DEG = 3.0  # |bearing| above this → apply the floor
-# Aim between current and next gate: p_la = p_cur + λ (p_next - p_cur).
-# Δ is expressed in the *current gate* frame (map quat), not AHRS — GyroAHRS
-# yaw is unreferenced and was rotating NED Δ into random body axes (CSV:
-# bx collapsed by ~λ|Δx| → wild bank). Vision-aligned: gate frame ≈ body.
-# Small default: start curving toward next gate before reaching current.
+# Legacy segment lookahead (kept for tests / API); aim uses gate-normal doffset.
 LOOKAHEAD_LAMBDA = 0.2
 LOOKAHEAD_OFFSET_MAX_M = 2.0  # clamp λ·thru / λ·lateral / λ·vert
+# Pre-gate aim on through-axis: papproach = pgate - doffset * ngatehat
+# (map +x = travel). Perpendicular approach vs next-gate λ yank.
+DOFFSET_M = 1.5
 # Cross-track: bank bias from e_signed = (p_rel × dhat)_z (vision/gate-frame).
 # Negated into roll so +by (gate right) adds +bank toward the path/gate.
 K_CROSS = 0.3  # deg per meter CTE
@@ -126,10 +125,10 @@ MAX_GATE_BX_M = 22.0
 MAX_ABS_BZ_M = 10.0
 ANTI_SINK_VD_MPS = 1.0  # NED-down speed → force ≥ hover
 E_SIGNED_CLIP_M = 2.0  # map CTE was ~11 with by≈0 — clip bank bias
-# G1 refine: fade λ near throat; don't sideways-yank a centered hole.
-LOOKAHEAD_FADE_NEAR_M = 5.0  # λ→0 by this range (pass current gate first)
-LOOKAHEAD_FADE_FAR_M = 12.0  # full λ beyond this
-CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat lookahead)
+# Fade doffset (and legacy λ) near throat so aim returns to the hole.
+LOOKAHEAD_FADE_NEAR_M = 5.0  # offset→0 by this range (pass current gate first)
+LOOKAHEAD_FADE_FAR_M = 12.0  # full offset beyond this
+CENTERED_BY_M = 0.25  # |by_raw| below → keep raw by (no lat aim bias)
 
 
 class Phase(Enum):
@@ -156,6 +155,39 @@ def gate_segment_delta_ned(
         p0[2] = -p0[2]
         p1[2] = -p1[2]
     return p1 - p0
+
+
+def gate_through_ned(gate_quat: np.ndarray | None) -> np.ndarray | None:
+    """ngatehat = R_wg @ [1,0,0] — map gate through / travel axis in NED."""
+    if gate_quat is None:
+        return None
+    from rl.spec import quat_to_R
+
+    R_wg = quat_to_R(np.asarray(gate_quat, dtype=float))
+    n = R_wg @ np.array([1.0, 0.0, 0.0], dtype=float)
+    nn = float(np.linalg.norm(n))
+    if nn < 1e-9:
+        return None
+    return n / nn
+
+
+def through_dhat_body(
+    gate_quat: np.ndarray | None,
+    normal_body: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Unit through-axis in gate/body frame for CTE (vision-aligned ≈ body).
+
+    Map: gate-local +x. PnP: travel = −normal_body (normal points at cam).
+    """
+    if gate_quat is not None:
+        return np.array([1.0, 0.0, 0.0], dtype=float)
+    if normal_body is None:
+        return None
+    n = np.asarray(normal_body, dtype=float).reshape(3)
+    nn = float(np.linalg.norm(n))
+    if nn < 1e-9:
+        return None
+    return (-n / nn).astype(float)
 
 
 def path_dhat_body(
@@ -196,6 +228,48 @@ def cross_track_error(
     return ecross, e_signed
 
 
+def apply_normal_approach_body(
+    bx: float,
+    by: float,
+    bz: float,
+    gate_quat: np.ndarray | None,
+    doffset: float,
+    normal_body: np.ndarray | None = None,
+) -> tuple[float, float, float, float]:
+    """Bias aim to papproach on the gate through-axis (approach side).
+
+    Map (preferred): ngatehat = R@[1,0,0], papproach = pgate - d*ngatehat.
+    Vision-aligned gate frame ≈ body → (bx - d, by, bz).
+
+    PnP fallback: normal_body points at cam; papproach = pgate + d*n_hat.
+    """
+    if doffset <= 0.0:
+        return bx, by, bz, 0.0
+    if gate_quat is not None:
+        # Confirm quat yields a through axis; offset is gate-local −e_x.
+        if gate_through_ned(gate_quat) is None:
+            return bx, by, bz, 0.0
+        ax = bx - float(doffset)
+        ay = by
+        az = bz
+        if ax <= 0.1:
+            return bx, by, bz, 0.0
+        return ax, ay, az, float(doffset)
+    if normal_body is not None:
+        n = np.asarray(normal_body, dtype=float).reshape(3)
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9:
+            return bx, by, bz, 0.0
+        n = n / nn
+        ax = bx + float(doffset) * float(n[0])
+        ay = by + float(doffset) * float(n[1])
+        az = bz + float(doffset) * float(n[2])
+        if ax <= 0.1:
+            return bx, by, bz, 0.0
+        return ax, ay, az, float(doffset)
+    return bx, by, bz, 0.0
+
+
 def apply_lookahead_body(
     bx: float,
     by: float,
@@ -205,6 +279,8 @@ def apply_lookahead_body(
     lam: float,
 ) -> tuple[float, float, float, float]:
     """Bias aim to p_lookahead = p_cur + λ (p_next − p_cur) in gate frame.
+
+    Legacy helper (unit tests). Live guidance uses apply_normal_approach_body.
 
     Map quats often put the long along-track Δ on gate-"right" (live log:
     delta_gate≈[-2.1, +23.6, -5.1]). Adding that to body-y yanked ~8 m
@@ -258,6 +334,7 @@ def compute_guidance(
     delta_ned: np.ndarray | None = None,
     lookahead_lambda: float = LOOKAHEAD_LAMBDA,
     gate_quat: np.ndarray | None = None,
+    doffset_m: float = DOFFSET_M,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -272,15 +349,17 @@ def compute_guidance(
     original fixed DESIRED_PITCH_DEG behavior.
 
     `flying_t` is seconds since GO (lean ramp / untrusted-vX guards).
-    `delta_ned` / `gate_quat` / `lookahead_lambda` bias aim toward next gate
-    in the current-gate frame (vision-aligned ≈ body).
+    `gate_quat` / `doffset_m` aim at papproach on the gate through-axis
+    (perpendicular approach). `lookahead_lambda` / `delta_ned` unused for aim
+    (legacy API / tests still call apply_lookahead_body directly).
     """
+    _ = (lookahead_lambda, delta_ned)  # legacy kwargs; aim uses doffset
     vision_valid = False
     reliable = False
     bx = by = bz = float("nan")
     bx_raw = by_raw = bz_raw = float("nan")
     vis_frame_id = None
-    lam_used = 0.0
+    doffset_used = 0.0
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
@@ -291,10 +370,9 @@ def compute_guidance(
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
-            # Fade λ near throat (plan stays; G1 needs hole first).
-            # post-fix: by_raw≈0.04 → by_la≈−0.38 wrong-way bank → by→0.8.
-            lam_eff = float(lookahead_lambda)
-            if lam_eff > 0.0 and not math.isnan(bx_raw):
+            # Fade doffset near throat so aim returns to the hole.
+            d_eff = float(doffset_m)
+            if d_eff > 0.0 and not math.isnan(bx_raw):
                 fade = float(
                     np.clip(
                         (bx_raw - LOOKAHEAD_FADE_NEAR_M)
@@ -303,20 +381,21 @@ def compute_guidance(
                         1.0,
                     )
                 )
-                lam_eff *= fade
-            bx, by, bz, lam_used = apply_lookahead_body(
-                bx, by, bz, gate_quat, delta_ned, lam_eff
+                d_eff *= fade
+            nb_aim = vision.get("normal_body")
+            bx, by, bz, doffset_used = apply_normal_approach_body(
+                bx, by, bz, gate_quat, d_eff, normal_body=nb_aim
             )
-            # Centered on hole: keep raw by — only thru/vert may curve.
+            # Centered on hole: keep raw by (PnP normal may have lateral).
             if abs(by_raw) < CENTERED_BY_M:
                 by = by_raw
             if bx <= 0.1:
                 vision_valid = False
-                lam_used = 0.0
+                doffset_used = 0.0
             elif bx > MAX_GATE_BX_M or abs(bz) > MAX_ABS_BZ_M:
                 # Ghost / wrong-gate after a pass — hold altitude, don't chase.
                 vision_valid = False
-                lam_used = 0.0
+                doffset_used = 0.0
                 bx = by = bz = float("nan")
 
     elev_rate = 0.0
@@ -495,10 +574,8 @@ def compute_guidance(
     e_signed = 0.0
     ecross = np.zeros(3)
     if vision_valid:
-        # CTE on raw vision (hole). Lateral map dhat → e_signed≈bx≈11
-        # (pass-gate-v1); reject → bearing-only. Clip leftover map CTE.
-        # No optical fallback: e_signed=-by would double-count bearing bank.
-        dhat_b = path_dhat_body(delta_ned, gate_quat)
+        # CTE vs gate through-axis (same axis as doffset approach).
+        dhat_b = through_dhat_body(gate_quat, vision.get("normal_body"))
         if dhat_b is not None:
             ecross, e_signed = cross_track_error(bx_raw, by_raw, bz_raw, dhat_b)
             e_signed = float(np.clip(e_signed, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
@@ -564,7 +641,7 @@ def compute_guidance(
                                 "bx": float(bx),
                                 "by": float(by),
                                 "bz": float(bz),
-                                "lam": float(lam_used),
+                                "doffset": float(doffset_used),
                                 "bearing": float(bearing_body),
                                 "desired_roll": float(desired_roll),
                                 "e_signed": float(e_signed),
@@ -601,7 +678,8 @@ def compute_guidance(
         "v_target": v_target,
         "pitch_des_deg": pitch_des_deg,
         "source": (vision or {}).get("source", ""),
-        "lookahead": lam_used,
+        "lookahead": 0.0,  # segment λ unused; see doffset
+        "doffset": doffset_used,
         "e_signed": e_signed,
         "ecross": ecross,
         "elev_updated": elev_updated,
@@ -738,7 +816,7 @@ class GPPilot:
         controller.set_control_mode("attitude_quat")
         controller.set_attitude_quat_deg(0.0, 0.0, 0.0, 0.0)
         print(
-            f"[gp] AndurilGP controls pilot ready (lookahead λ={LOOKAHEAD_LAMBDA}"
+            f"[gp] AndurilGP controls pilot ready (doffset={DOFFSET_M}m"
             f", K_CROSS={K_CROSS}, flipz={self._gate_flipz}, gates={len(self.gate_map)})",
             flush=True,
         )
@@ -805,7 +883,7 @@ class GPPilot:
             self._log_wr.writerow(
                 "t roll pitch yaw cmd_roll_deg cmd_pitch_deg cmd_yaw_deg "
                 "thrust bx by bz blend d_lat d_vert vY vD vX v_target "
-                "pitch_des source lookahead e_signed".split()
+                "pitch_des source doffset e_signed".split()
             )
             print(f"[gp] flight log -> {path}", flush=True)
         except OSError as e:  # telemetry must never ground the pilot
@@ -828,7 +906,7 @@ class GPPilot:
             vt = dbg.get("v_target", float("nan"))
             pd = dbg.get("pitch_des_deg", float("nan"))
             src = str(dbg.get("source", "") or "")
-            la = float(dbg.get("lookahead", 0.0) or 0.0)
+            la = float(dbg.get("doffset", 0.0) or 0.0)
             es = float(dbg.get("e_signed", 0.0) or 0.0)
             self._log_wr.writerow(
                 [f"{now:.3f}"]
@@ -1038,8 +1116,8 @@ class GPPilot:
             dt=dt,
             flying_t=flying_t,
             delta_ned=delta_ned,
-            lookahead_lambda=LOOKAHEAD_LAMBDA,
             gate_quat=gate_quat,
+            doffset_m=DOFFSET_M,
         )
         # Latch the live bearing so a backoff can steer back toward the gate
         # after it leaves the camera FOV. Cheap, and _enter_backoff can't
