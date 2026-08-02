@@ -20,6 +20,7 @@ from enum import Enum, auto
 
 import numpy as np
 
+from simulator.anduril_gate_detect import CAM_TILT_DEG
 from simulator.gp_estimation import GPEstimation
 from simulator.gp_vision import (
     GateEstimateSmoother,
@@ -146,12 +147,125 @@ WEAK_BLEND_SCALE = 0.35  # reduce lateral authority on unreliable detections
 LEAN_RAMP_S = 2.5  # after GO: no dive past DESIRED_PITCH_DEG
 UNTRUSTED_VX_MPS = 0.5  # |vX| below this → no dive (immediate)
 
+# Gate-normal approach constants.
+DOFFSET_M = 1.5  # metres behind gate centre to aim, perpendicular entry
+K_CROSS = 0.3  # bank deg per metre of signed cross-track error
+E_SIGNED_CLIP_M = 2.0  # clip |e_signed| before applying CTE bank
+DOFFSET_FADE_NEAR_M = 5.0  # doffset fades to zero inside this range
+DOFFSET_FADE_FAR_M = 12.0  # doffset is full outside this range
+CENTERED_BY_M = 0.25  # |by| below this: hold raw by (don't let PnP nudge)
+
 
 class Phase(Enum):
     WAIT_FOR_DATA = auto()
     WAIT_FOR_START = auto()
     FLYING = auto()
     BACKOFF = auto()
+
+
+def gate_through_ned(gate_quat: np.ndarray) -> np.ndarray | None:
+    """Gate through-axis in world frame: R_wg @ [1,0,0]^T.
+
+    Accepts any valid finite quaternion (gate +x can point in any NED
+    direction). Rejects only nonfinite or degenerate (zero-norm) input.
+    """
+    try:
+        q = np.asarray(gate_quat, dtype=float).reshape(4)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(q)) or np.linalg.norm(q) < 1e-9:
+        return None
+    try:
+        from rl.core.spec import quat_to_R
+
+        R_wg = quat_to_R(q)
+    except (TypeError, ValueError):
+        return None
+    d = R_wg @ np.array([1.0, 0.0, 0.0])
+    if not np.all(np.isfinite(d)):
+        return None
+    n = float(np.linalg.norm(d))
+    if n < 1e-9:
+        return None
+    return d / n
+
+
+def through_dhat_body(
+    drone_quat: np.ndarray,
+    gate_quat: np.ndarray | None = None,
+    normal_body: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Body-frame through-axis unit vector.
+
+    From map: R_wg @ [1,0,0] in world, then R_wb.T rotates into body.
+    PnP fallback: negate normal_body (camera faces gate, through = -normal).
+    Returns None when no valid source exists.
+    """
+    if gate_quat is not None:
+        d_world = gate_through_ned(gate_quat)
+        if d_world is not None:
+            try:
+                from rl.core.spec import quat_to_R
+
+                R_wb = quat_to_R(np.asarray(drone_quat, dtype=float))
+                d_body = R_wb.T @ d_world
+            except (TypeError, ValueError):
+                return None
+            if not np.all(np.isfinite(d_body)):
+                return None
+            n = float(np.linalg.norm(d_body))
+            if n < 1e-9:
+                return None
+            return d_body / n
+    if normal_body is not None:
+        try:
+            n = np.asarray(normal_body, dtype=float).reshape(3)
+        except (TypeError, ValueError):
+            return None
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9 or not np.all(np.isfinite(n)):
+            return None
+        return -n / nn
+    return None
+
+
+def cross_track_error(bx: float, by: float, _bz: float, dhat_b: np.ndarray) -> float:
+    """Signed cross-track error projected perpendicular to the through-axis.
+
+    e = bx*dh_y - by*dh_x, clipped to ±E_SIGNED_CLIP_M.
+    """
+    dhat = np.asarray(dhat_b, dtype=float).reshape(3)
+    e = float(bx * dhat[1] - by * dhat[0])
+    return float(np.clip(e, -E_SIGNED_CLIP_M, E_SIGNED_CLIP_M))
+
+
+def apply_normal_approach_body(
+    bx: float,
+    by: float,
+    bz: float,
+    through_body: np.ndarray | None,
+    doffset: float,
+) -> tuple[float, float, float, float]:
+    """Bias aim point behind the gate centre along the body-frame through-axis.
+
+    p_approach = p_gate_body - doffset * through_body.
+    Returns (ax, ay, az, doffset_used). No-op when through_body is None,
+    doffset <= 0, or the result would place the aim behind the camera.
+    """
+    if doffset <= 0.0 or through_body is None:
+        return bx, by, bz, 0.0
+    try:
+        t = np.asarray(through_body, dtype=float).reshape(3)
+    except (TypeError, ValueError):
+        return bx, by, bz, 0.0
+    if not np.all(np.isfinite(t)):
+        return bx, by, bz, 0.0
+    ax = bx - doffset * float(t[0])
+    ay = by - doffset * float(t[1])
+    az = bz - doffset * float(t[2])
+    if ax <= 0.1:
+        return bx, by, bz, 0.0
+    return ax, ay, az, doffset
 
 
 def compute_guidance(
@@ -169,6 +283,8 @@ def compute_guidance(
     dt: float = 1.0 / GP_CONTROL_HZ,
     flying_t: float = float("nan"),
     floor_clearance_m: float = float("nan"),
+    gate_quat: np.ndarray | None = None,
+    doffset_m: float = DOFFSET_M,
 ) -> tuple[float, float, float, float, dict]:
     """Anduril FLYING guidance. Mutates `state`.
 
@@ -187,16 +303,46 @@ def compute_guidance(
     vision_valid = False
     reliable = False
     bx = by = bz = float("nan")
+    bx_raw = by_raw = bz_raw = float("nan")
     vis_frame_id = None
+    doffset_used = 0.0
+    through_b = None
     if vision is not None:
         bx = float(vision.get("body_x_m", float("nan")))
         by = float(vision.get("body_y_m", float("nan")))
         bz = float(vision.get("body_z_m", float("nan")))
+        bx_raw, by_raw, bz_raw = bx, by, bz
         vis_frame_id = vision.get("frame_id")
-        if not any(math.isnan(v) for v in (bx, by, bz)) and bx > 0.1:
+        if all(math.isfinite(v) for v in (bx, by, bz)) and bx > 0.1:
             vision_valid = True
             # Anduril reliable tier; YOLO/legacy estimates default True.
             reliable = bool(vision.get("reliable", True))
+            # Compute body-frame through-axis once for both doffset and CTE.
+            through_b = through_dhat_body(quat, gate_quat, vision.get("normal_body"))
+            # Gate-normal doffset approach: aim behind gate centre on the
+            # through-axis for a perpendicular entry. Fade near throat so
+            # aim returns to the actual hole.
+            if doffset_m > 0.0:
+                d_eff = doffset_m
+                fade = float(
+                    np.clip(
+                        (bx_raw - DOFFSET_FADE_NEAR_M)
+                        / max(DOFFSET_FADE_FAR_M - DOFFSET_FADE_NEAR_M, 1e-3),
+                        0.0,
+                        1.0,
+                    )
+                )
+                d_eff *= fade
+                bx, by, bz, doffset_used = apply_normal_approach_body(
+                    bx, by, bz, through_b, d_eff
+                )
+                # Centered on hole: keep raw by so PnP normal doesn't nudge.
+                if abs(by_raw) < CENTERED_BY_M:
+                    by = by_raw
+            # After doffset: check bx still valid.
+            if bx <= 0.1:
+                vision_valid = False
+                doffset_used = 0.0
 
     if vision_valid and vision.get("track_break"):
         # The smoother switched gates: previous frames describe a DIFFERENT
@@ -214,10 +360,15 @@ def compute_guidance(
     elev_fresh = vision_valid and bx > MIN_BX_FOR_ELEV and vis_frame_id is not None
     if elev_fresh:
         qw, qx, qy, qz = quat
+        # Use RAW vision for elevation (pre-doffset). Optical-elevation
+        # correction for Anduril source only: subtract the camera tilt offset.
+        bz_elev = bz_raw
+        if (vision or {}).get("source") == "anduril":
+            bz_elev = bz_raw - math.tan(math.radians(CAM_TILT_DEG)) * max(bx_raw, 0.1)
         gate_pD = (
-            2 * (qx * qz - qw * qy) * bx
-            + 2 * (qy * qz + qw * qx) * by
-            + (1 - 2 * (qx * qx + qy * qy)) * bz
+            2 * (qx * qz - qw * qy) * bx_raw
+            + 2 * (qy * qz + qw * qx) * by_raw
+            + (1 - 2 * (qx * qx + qy * qy)) * bz_elev
         )
         prev_fid = state.get("prev_elev_frame_id")
         if prev_fid is not None and 0 < vis_frame_id - prev_fid <= VIS_DERIV_MAX_GAP_FR:
@@ -368,9 +519,9 @@ def compute_guidance(
                     1.0,
                 )
             )
-            v_target = THRU_SPEED_MPS + (
-                CRUISE_SPEED_MPS - THRU_SPEED_MPS
-            ) * ease * vert_ok
+            v_target = (
+                THRU_SPEED_MPS + (CRUISE_SPEED_MPS - THRU_SPEED_MPS) * ease * vert_ok
+            )
         elif vision_valid:
             v_target = THRU_SPEED_MPS  # weak detection: crawl
         else:
@@ -411,8 +562,19 @@ def compute_guidance(
     )
     p_lat = K_BEARING * bearing_body * blend
     d_lat_term = K_LAT_D * d_lat * blend
+    e_signed_dbg = 0.0
     if vision_valid:
         desired_roll = float(np.clip(p_lat - d_lat_term, -MAX_BANK_DEG, MAX_BANK_DEG))
+        # Cross-track error bank bias: clip signed CTE from raw body coords.
+        if through_b is not None:
+            e_signed_dbg = cross_track_error(bx_raw, by_raw, bz_raw, through_b)
+            desired_roll = float(
+                np.clip(
+                    desired_roll - K_CROSS * e_signed_dbg,
+                    -MAX_BANK_DEG,
+                    MAX_BANK_DEG,
+                )
+            )
     else:
         # Blind (threading / suppressed): don't just level the wings — null
         # the residual sideslip so we cross the gate plane without drifting
@@ -481,6 +643,8 @@ def compute_guidance(
         "elev_i": float(state.get("elev_i", 0.0)),
         "source": (vision or {}).get("source", ""),
         "infer_ms": (vision or {}).get("infer_ms"),
+        "doffset": doffset_used,
+        "e_signed": e_signed_dbg,
     }
     return roll_cmd_deg, pitch_cmd_deg, yaw_cmd_deg, thrust, dbg
 
@@ -576,6 +740,8 @@ class GPPilot:
         self._log_wr = None
         self._log_last_flush = 0.0
         self._debug = os.environ.get("GP_DEBUG", "").strip() in ("1", "true", "yes")
+        self._gate_map: list = []
+        self._refresh_gate_map()
         # Original AndurilGP wire behavior: degree commands on the attitude
         # quaternion at 60 Hz (the encoding that flew the course).
         controller.control_hz = GP_CONTROL_HZ
@@ -644,6 +810,12 @@ class GPPilot:
             except OSError:
                 pass
         self._log, self._log_wr = None, None
+
+    def _refresh_gate_map(self) -> None:
+        """Load gate map from track burst or gate_map.json for gate_quat."""
+        from rl.experts.fly2_course import resolve_gate_map
+
+        self._gate_map = resolve_gate_map(self.data)
 
     def _log_tick(self, att, cmds, thrust, vY, vD, dbg, vX=float("nan")) -> None:
         if self._log_wr is None:
@@ -749,9 +921,7 @@ class GPPilot:
                 # No "already running → fly now" (that skipped the 3s hold after
                 # manual Restart Race).
                 race_fresh = start_ms > 0 and start_ms >= self._wait_start_sim_ms
-                countdown_done = (
-                    race_fresh and sim_ms >= start_ms and finish_ns < 0
-                )
+                countdown_done = race_fresh and sim_ms >= start_ms and finish_ns < 0
                 if self._debug and self._tick % DEBUG_EVERY_N == 0:
                     print(
                         f"[WAIT] sim_ms={sim_ms} race_start={start_ms} "
@@ -839,6 +1009,18 @@ class GPPilot:
                 self._floor_z0 = z_down
             floor_clearance = self._floor_z0 - z_down
 
+        # Resolve gate quaternion from the map for doffset/CTE.
+        gate_quat = None
+        if not self._gate_map:
+            self._refresh_gate_map()
+        if self._gate_map and 0 <= active < len(self._gate_map):
+            g = self._gate_map[active]
+            if isinstance(g, dict) and "quat" in g:
+                try:
+                    gate_quat = np.asarray(g["quat"], dtype=float)
+                except (TypeError, ValueError):
+                    gate_quat = None
+
         roll_cmd, pitch_cmd, yaw_cmd, thrust, dbg = compute_guidance(
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
@@ -852,6 +1034,8 @@ class GPPilot:
             dt=dt,
             flying_t=flying_t,
             floor_clearance_m=floor_clearance,
+            gate_quat=gate_quat,
+            doffset_m=DOFFSET_M,
         )
         roll_cmd, pitch_cmd, yaw_cmd, thrust = self._cmd_slew.apply(
             roll_cmd, pitch_cmd, yaw_cmd, thrust
