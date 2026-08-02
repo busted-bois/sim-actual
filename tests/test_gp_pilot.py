@@ -15,19 +15,24 @@ from simulator.gp_pilot import (
     BACKOFF_PITCH_DEG,
     BACKOFF_PITCH_WIRE_MAX_DEG,
     BACKOFF_PUSH_S,
+    DOFFSET_M,
     HOVER_THRUST,
     K_BEARING,
     K_CROSS,
-    LOOKAHEAD_LAMBDA,
+    LOOKAHEAD_FADE_FAR_M,
+    LOOKAHEAD_FADE_NEAR_M,
     MAX_BANK_DEG,
     PERP_BLEND_DIST,
     _backoff_pitch_target,
     _fresh_hold_state,
     apply_lookahead_body,
+    apply_normal_approach_body,
     compute_guidance,
     cross_track_error,
     gate_segment_delta_ned,
+    gate_through_ned,
     path_dhat_body,
+    through_dhat_body,
 )
 from simulator.gp_vision import gate_body_from_pinhole, vision_gate_estimate
 from simulator.gyro_ahrs import GyroAHRS, euler_to_quat
@@ -1423,56 +1428,6 @@ class LookaheadTests(unittest.TestCase):
         self.assertLess(abs(ay), LOOKAHEAD_OFFSET_MAX_M + 0.01)
         self.assertLess(abs(ay), 1.0)  # ~0.35*|−2.1|, not 0.35*24
 
-    def test_guidance_curves_toward_next(self):
-        """With modest Δ_y, lookahead should bank more (when not dead-centered)."""
-        from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
-
-        state = _fresh_hold_state()
-        # by above CENTERED_BY_M so lateral lookahead is not suppressed.
-        vision = {
-            "frame_id": 1,
-            "body_x_m": 12.0,
-            "body_y_m": 0.3,
-            "body_z_m": 0.0,
-            "normal_body": None,
-            "source": "anduril",
-        }
-        gq = self._level_quat()
-        _a, _b, _c, _t, dbg0 = compute_guidance(
-            roll_deg=0.0,
-            pitch_deg=0.0,
-            quat=self._level_quat(),
-            vY=0.0,
-            vD=0.0,
-            vision=vision,
-            vision_vel=None,
-            state=_fresh_hold_state(),
-            lookahead_lambda=0.0,
-            delta_ned=np.array([10.0, 4.0, 0.0]),
-            gate_quat=gq,
-        )
-        self.assertGreater(dbg0["bearing_deg"], 1.0)
-        self.assertEqual(dbg0["lookahead"], 0.0)
-
-        _a, _b, _c, _t, dbg1 = compute_guidance(
-            roll_deg=0.0,
-            pitch_deg=0.0,
-            quat=self._level_quat(),
-            vY=0.0,
-            vD=0.0,
-            vision=vision,
-            vision_vel=None,
-            state=state,
-            lookahead_lambda=0.35,
-            delta_ned=np.array([10.0, 4.0, 0.0]),
-            gate_quat=gq,
-        )
-        self.assertAlmostEqual(dbg1["lookahead"], 0.35)
-        self.assertGreater(dbg1["bearing_deg"], dbg0["bearing_deg"])
-        self.assertGreater(dbg1["desired_roll"], dbg0["desired_roll"])
-        # thru_off = clip(0.35*10, ±2) = 2 → bx = 14
-        self.assertAlmostEqual(dbg1["bx"], 12.0 + LOOKAHEAD_OFFSET_MAX_M, places=4)
-
     def test_ahrs_yaw_no_longer_cancels_range(self):
         """Regression: bx must stay ahead (old AHRS path collapsed it)."""
         from simulator.gp_pilot import LOOKAHEAD_OFFSET_MAX_M
@@ -1485,7 +1440,7 @@ class LookaheadTests(unittest.TestCase):
         self.assertLessEqual(abs(ax - 12.0), LOOKAHEAD_OFFSET_MAX_M + 0.01)
         self.assertLess(abs(ay), 1.0)
 
-    def test_last_gate_no_delta(self):
+    def test_last_gate_no_map_still_bears(self):
         state = _fresh_hold_state()
         vision = {
             "frame_id": 2,
@@ -1504,11 +1459,124 @@ class LookaheadTests(unittest.TestCase):
             vision_vel=None,
             state=state,
             delta_ned=None,
-            lookahead_lambda=LOOKAHEAD_LAMBDA,
+            gate_quat=None,
+            doffset_m=0.0,
         )
-        self.assertEqual(dbg["lookahead"], 0.0)
+        self.assertEqual(dbg["doffset"], 0.0)
         expected = math.degrees(math.atan2(0.5, 8.0))
         self.assertAlmostEqual(dbg["bearing_deg"], expected, places=4)
+
+
+class NormalApproachTests(unittest.TestCase):
+    def _level_quat(self):
+        return np.array(euler_to_quat(0.0, 0.0, 0.0), dtype=np.float64)
+
+    def test_gate_through_ned_identity(self):
+        n = gate_through_ned(self._level_quat())
+        self.assertIsNotNone(n)
+        np.testing.assert_allclose(n, [1.0, 0.0, 0.0], atol=1e-6)
+        self.assertIsNone(gate_through_ned(None))
+
+    def test_head_on_shortens_bx(self):
+        gq = self._level_quat()
+        ax, ay, az, used = apply_normal_approach_body(
+            12.0, 0.0, 0.0, gq, DOFFSET_M
+        )
+        self.assertAlmostEqual(used, DOFFSET_M)
+        self.assertAlmostEqual(ax, 12.0 - DOFFSET_M)
+        self.assertAlmostEqual(ay, 0.0)
+        self.assertAlmostEqual(az, 0.0)
+
+    def test_rotated_quat_still_gate_local_ex(self):
+        """Offset is gate-local −e_x; vision-aligned ≈ body keeps by/bz."""
+        gq90 = np.array([0.70710678, 0.0, 0.0, 0.70710678])
+        n = gate_through_ned(gq90)
+        self.assertIsNotNone(n)
+        self.assertAlmostEqual(float(np.linalg.norm(n)), 1.0, places=6)
+        ax, ay, az, used = apply_normal_approach_body(10.0, 0.2, -0.1, gq90, 1.5)
+        self.assertAlmostEqual(used, 1.5)
+        self.assertAlmostEqual(ax, 8.5)
+        self.assertAlmostEqual(ay, 0.2)
+        self.assertAlmostEqual(az, -0.1)
+
+    def test_pnp_normal_fallback(self):
+        # normal points at cam (−body x): aim moves closer along range
+        nb = np.array([-1.0, 0.0, 0.0])
+        ax, ay, az, used = apply_normal_approach_body(
+            12.0, 0.0, 0.0, None, 1.5, normal_body=nb
+        )
+        self.assertAlmostEqual(used, 1.5)
+        self.assertAlmostEqual(ax, 10.5)
+        self.assertAlmostEqual(ay, 0.0)
+
+    def test_missing_quat_and_normal_noop(self):
+        ax, ay, az, used = apply_normal_approach_body(12.0, 0.3, 0.0, None, 1.5)
+        self.assertEqual((ax, ay, az, used), (12.0, 0.3, 0.0, 0.0))
+
+    def test_guidance_applies_doffset_far(self):
+        """Beyond fade-far: full doffset → bx shortened, bearing from raw by."""
+        gq = self._level_quat()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": LOOKAHEAD_FADE_FAR_M,
+            "body_y_m": 0.3,
+            "body_z_m": 0.0,
+            "normal_body": None,
+            "source": "anduril",
+        }
+        _a, _b, _c, _t, dbg0 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            gate_quat=gq,
+            doffset_m=0.0,
+        )
+        _a, _b, _c, _t, dbg1 = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            gate_quat=gq,
+            doffset_m=DOFFSET_M,
+        )
+        self.assertEqual(dbg0["doffset"], 0.0)
+        self.assertAlmostEqual(dbg1["doffset"], DOFFSET_M, places=4)
+        self.assertAlmostEqual(dbg1["bx"], LOOKAHEAD_FADE_FAR_M - DOFFSET_M, places=4)
+        # Lateral unchanged when not center-locked away; bearing rises as bx shrinks
+        self.assertGreater(dbg1["bearing_deg"], dbg0["bearing_deg"])
+
+    def test_guidance_fade_near_throat(self):
+        gq = self._level_quat()
+        vision = {
+            "frame_id": 1,
+            "body_x_m": LOOKAHEAD_FADE_NEAR_M,
+            "body_y_m": 0.0,
+            "body_z_m": 0.0,
+            "normal_body": None,
+        }
+        _a, _b, _c, _t, dbg = compute_guidance(
+            roll_deg=0.0,
+            pitch_deg=0.0,
+            quat=self._level_quat(),
+            vY=0.0,
+            vD=0.0,
+            vision=vision,
+            vision_vel=None,
+            state=_fresh_hold_state(),
+            gate_quat=gq,
+            doffset_m=DOFFSET_M,
+        )
+        self.assertEqual(dbg["doffset"], 0.0)
+        self.assertAlmostEqual(dbg["bx"], LOOKAHEAD_FADE_NEAR_M, places=4)
 
 
 class CrossTrackTests(unittest.TestCase):
@@ -1525,6 +1593,13 @@ class CrossTrackTests(unittest.TestCase):
         self.assertIsNone(path_dhat_body(np.array([10.0, 0.0, 0.0]), None))
         self.assertIsNone(path_dhat_body(np.zeros(3), gq))
 
+    def test_through_dhat_from_quat(self):
+        d = through_dhat_body(self._level_quat())
+        np.testing.assert_allclose(d, [1.0, 0.0, 0.0], atol=1e-9)
+        d2 = through_dhat_body(None, normal_body=np.array([-1.0, 0.0, 0.0]))
+        np.testing.assert_allclose(d2, [1.0, 0.0, 0.0], atol=1e-9)
+        self.assertIsNone(through_dhat_body(None, None))
+
     def test_on_path_zero_cte(self):
         dhat = np.array([1.0, 0.0, 0.0])
         ecross, e_signed = cross_track_error(10.0, 0.0, 0.0, dhat)
@@ -1537,9 +1612,8 @@ class CrossTrackTests(unittest.TestCase):
         self.assertAlmostEqual(e_signed, -2.0, places=6)
 
     def test_guidance_banks_toward_path(self):
-        """by>0 with dhat along +x → extra +bank vs bearing-only."""
+        """by>0 with through dhat → extra +bank vs bearing-only (no quat)."""
         gq = self._level_quat()
-        delta = np.array([10.0, 0.0, 0.0])  # path along +X in gate/NED
         vision = {
             "frame_id": 1,
             "body_x_m": 12.0,
@@ -1557,9 +1631,8 @@ class CrossTrackTests(unittest.TestCase):
             vision=vision,
             vision_vel=None,
             state=_fresh_hold_state(),
-            delta_ned=None,
-            gate_quat=gq,
-            lookahead_lambda=0.0,
+            gate_quat=None,
+            doffset_m=0.0,
         )
         _a, _b, _c, _t, dbg1 = compute_guidance(
             roll_deg=0.0,
@@ -1570,18 +1643,18 @@ class CrossTrackTests(unittest.TestCase):
             vision=vision,
             vision_vel=None,
             state=_fresh_hold_state(),
-            delta_ned=delta,
             gate_quat=gq,
-            lookahead_lambda=0.0,
+            doffset_m=0.0,
         )
         self.assertAlmostEqual(dbg1["e_signed"], -0.4, places=4)
+        self.assertEqual(dbg0["e_signed"], 0.0)
         self.assertLess(abs(dbg0["desired_roll"]), MAX_BANK_DEG - 0.5)
         self.assertGreater(dbg1["desired_roll"], dbg0["desired_roll"])
         self.assertAlmostEqual(
             dbg1["desired_roll"] - dbg0["desired_roll"], K_CROSS * 0.4, places=3
         )
 
-    def test_last_gate_no_cte_term(self):
+    def test_through_cte_with_quat(self):
         vision = {
             "frame_id": 1,
             "body_x_m": 8.0,
@@ -1598,10 +1671,10 @@ class CrossTrackTests(unittest.TestCase):
             vision=vision,
             vision_vel=None,
             state=_fresh_hold_state(),
-            delta_ned=None,
             gate_quat=self._level_quat(),
+            doffset_m=0.0,
         )
-        self.assertEqual(dbg["e_signed"], 0.0)
+        self.assertAlmostEqual(dbg["e_signed"], -1.0, places=4)
 
 
 if __name__ == "__main__":
