@@ -174,6 +174,7 @@ class GateRacingEnv(gym.Env):
         self.steps += 1
         self.last_action = action
         rew, terminated, info = self._reward_done()
+        info["gates_cleared"] = int(self.gate_idx)
         truncated = self.steps >= self.max_steps
         return self._obs(), float(rew), bool(terminated), bool(truncated), info
 
@@ -254,11 +255,37 @@ def make_env(stage=0, gate_map=None, seed=None):
 
 # ---------------------------------------------------------------------------
 def _selftest():
+    import json
+    from pathlib import Path
+
     from stable_baselines3.common.env_checker import check_env
 
     env = GateRacingEnv(stage=0, seed=0)
     check_env(env, warn=True)
     print("[selftest] SB3 check_env passed (obs 24, act 4)")
+
+    baseline_path = Path(__file__).parents[1] / "data" / "baseline.json"
+    golden = json.loads(baseline_path.read_text())["golden_trajectory"]
+    golden_env = GateRacingEnv(stage=golden["stage"])
+    obs, _ = golden_env.reset(seed=golden["seed"])
+    action = np.asarray(golden["action"], dtype=np.float32)
+    for expected in golden["steps"]:
+        obs, reward, terminated, truncated, info = golden_env.step(action)
+        np.testing.assert_allclose(golden_env.p, expected["position"], atol=1e-12)
+        np.testing.assert_allclose(golden_env.v, expected["velocity"], atol=1e-12)
+        np.testing.assert_allclose(golden_env.q, expected["quaternion"], atol=1e-12)
+        np.testing.assert_allclose(
+            golden_env.omega, expected["angular_velocity"], atol=1e-12
+        )
+        np.testing.assert_allclose(reward, expected["reward"], atol=1e-12)
+        assert terminated is expected["terminated"]
+        assert truncated is expected["truncated"]
+        assert info["gates_cleared"] == expected["gate_index"]
+        assert {k: v for k, v in info.items() if k != "gates_cleared"} == expected[
+            "info"
+        ]
+    np.testing.assert_allclose(obs, golden["final_observation"], atol=1e-7)
+    print("[selftest] 16-step Wave 0 golden trajectory passed")
 
     # Random rollout — env must run and terminate sanely.
     obs, _ = env.reset(seed=1)
