@@ -48,7 +48,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "lefthook", specifier = ">=2.1.9" },
-    { name = "ruff", specifier = ">=0.15.15" },
+    { name = "ruff", specifier = "==0.15.15" },
 ]
 
 [[package]]

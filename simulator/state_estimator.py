@@ -37,6 +37,7 @@ import numpy as np
 
 GRAVITY = 9.81
 G_WORLD = np.array([0.0, 0.0, GRAVITY])  # NED: gravity points +Z (down)
+CHI2_3 = 7.815  # 3-DOF Mahalanobis NIS gate at 95%
 
 
 # ---- quaternion helpers (w,x,y,z) ------------------------------------------
@@ -120,6 +121,7 @@ class ESKF:
         )
         self.P = np.eye(9) * (p0_std**2)
         self.sa, self.sg = sigma_accel, sigma_gyro
+        self.n_rejected = 0
 
     # ---- prediction --------------------------------------------------------
     def predict(self, accel_body, gyro_body, dt):
@@ -146,44 +148,61 @@ class ESKF:
         self.P = F @ self.P @ F.T + Q
 
     # ---- generic update (Joseph form) --------------------------------------
-    def _update(self, H, r, Rm):
+    def _update(
+        self, H, r, Rm, gate: bool = False, chi2_thresh: float = CHI2_3
+    ) -> bool:
+        """Joseph-form update. If gate, reject when NIS r^T S^{-1} r >= chi2."""
+        r = np.asarray(r, float)
+        if not np.isfinite(r).all():
+            return False
         S = H @ self.P @ H.T + Rm
-        Kk = self.P @ H.T @ np.linalg.inv(S)
+        try:
+            if gate:
+                nu = float(r @ np.linalg.solve(S, r))
+                if not np.isfinite(nu) or nu >= chi2_thresh:
+                    self.n_rejected += 1
+                    return False
+            Kk = self.P @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return False
+        if not np.isfinite(Kk).all():
+            return False
         dx = Kk @ r
         self.p = self.p + dx[0:3]
         self.v = self.v + dx[3:6]
         self.q = quat_norm(quat_mult(self.q, quat_from_smallangle(dx[6:9])))
         I_KH = np.eye(9) - Kk @ H
         self.P = I_KH @ self.P @ I_KH.T + Kk @ Rm @ Kk.T
+        return True
 
-    def update_position(self, p_meas, sigma=0.5):
+    def update_position(self, p_meas, sigma=0.5, gate: bool = True) -> bool:
         H = np.zeros((3, 9))
         H[:, 0:3] = np.eye(3)
         r = np.asarray(p_meas, float) - self.p
-        self._update(H, r, (sigma**2) * np.eye(3))
+        return self._update(H, r, (sigma**2) * np.eye(3), gate=gate)
 
-    def update_z(self, z_meas, sigma=0.3):
+    def update_z(self, z_meas, sigma=0.3) -> bool:
         H = np.zeros((1, 9))
         H[0, 2] = 1.0
         r = np.array([z_meas - self.p[2]])
-        self._update(H, r, np.array([[sigma**2]]))
+        return self._update(H, r, np.array([[sigma**2]]), gate=False)
 
-    def update_gravity_tilt(self, accel_body, sigma):
+    def update_gravity_tilt(self, accel_body, sigma) -> bool:
         # At rest the accelerometer reads f = -R^T g. First-order in the
         # body-frame error: f = -u - skew(u) dtheta, u = R^T g.
         u = quat_to_R(self.q).T @ G_WORLD
         r = np.asarray(accel_body, float) - (-u)
         H = np.zeros((3, 9))
         H[:, 6:9] = -skew(u)
-        self._update(H, r, (sigma**2) * np.eye(3))
+        return self._update(H, r, (sigma**2) * np.eye(3), gate=False)
 
-    def update_mag(self, mag_unit_body, m_world_unit, sigma=0.1):
+    def update_mag(self, mag_unit_body, m_world_unit, sigma=0.1) -> bool:
         # Predicted body field u = R^T m_w; h = u + skew(u) dtheta.
         u = quat_to_R(self.q).T @ m_world_unit
         r = np.asarray(mag_unit_body, float) - u
         H = np.zeros((3, 9))
         H[:, 6:9] = skew(u)
-        self._update(H, r, (sigma**2) * np.eye(3))
+        return self._update(H, r, (sigma**2) * np.eye(3), gate=False)
 
 
 class StateEstimator:
@@ -375,16 +394,12 @@ class StateEstimator:
         with self._lock:
             if self.ekf is None:
                 return False
-            innov = float(np.linalg.norm(np.asarray(p_meas, float) - self.ekf.p))
-            # Gate opens with the filter's own position uncertainty, else a
-            # fixed gate can lock out recovery once dead-reckoning drift
-            # exceeds it (fixes rejected forever).
-            sigma_p = math.sqrt(max(1e-9, float(np.trace(self.ekf.P[0:3, 0:3])) / 3))
-            gate = max(self.p["landmark_gate_m"], 3.0 * sigma_p)
-            if innov > gate:
+            # Mahalanobis NIS gate inside update_position (camera/landmark).
+            if not self.ekf.update_position(
+                p_meas, self.p["sigma_landmark"], gate=True
+            ):
                 self.n_landmarks_rejected += 1
                 return False
-            self.ekf.update_position(p_meas, self.p["sigma_landmark"])
             self.n_landmarks += 1
             return True
 

@@ -74,7 +74,7 @@ class VQ2PoseEstimator:
         p0 = spawn_position_ned(gate_map, flipz=flipz)
         self._hold_z = float(hold_z if hold_z is not None else p0[2])
         yaw0 = spawn_heading_ned(gate_map)
-        self.ekf = ESKF(p0=p0, v0=np.zeros(3), q0=_level_quat(yaw0))
+        self.ekf = ESKF(p0=p0, v0=np.zeros(3), q0=_level_quat(yaw0), p0_std=5.0)
         self._last_imu_time_us = None
         self._pressure_alt_ref = None
         self._last_gate_frame_id = None
@@ -95,7 +95,7 @@ class VQ2PoseEstimator:
             )
         p0 = spawn_position_ned(gate_map, flipz=self._flipz)
         yaw0 = spawn_heading_ned(gate_map)
-        self.ekf = ESKF(p0=p0, v0=np.zeros(3), q0=_level_quat(yaw0))
+        self.ekf = ESKF(p0=p0, v0=np.zeros(3), q0=_level_quat(yaw0), p0_std=5.0)
         self._last_imu_time_us = None
         self._pressure_alt_ref = None
         return False

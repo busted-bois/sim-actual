@@ -126,7 +126,9 @@ class VQ2PoseTests(unittest.TestCase):
         self.assertAlmostEqual(abs(yaw), math.pi, delta=0.3)
 
     def test_fuse_pnp_gate_moves_position(self):
-        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3))
+        # p0_std must be realistic for a cold start a few meters from truth;
+        # otherwise NIS rejects a perfectly good first PnP fix.
+        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3), p0_std=5.0)
         det = {
             "conf": 0.9,
             "pose": {
@@ -144,7 +146,7 @@ class VQ2PoseTests(unittest.TestCase):
     def test_fuse_pnp_gate_rejects_wrong_gate(self):
         """A detection implying a drone position far from the prediction (e.g.
         the NEXT gate in frame, not the active one) must not poison the EKF."""
-        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3))
+        ekf = ESKF(p0=np.zeros(3), v0=np.zeros(3), p0_std=1.0)
         det = {
             "conf": 0.9,
             "pose": {
@@ -157,6 +159,7 @@ class VQ2PoseTests(unittest.TestCase):
         gate_world = np.array([20.0, 0.0, -5.0])  # implies drone at x=15
         self.assertFalse(fuse_pnp_gate(ekf, det, gate_world))
         np.testing.assert_allclose(ekf.p, np.zeros(3))
+        self.assertGreaterEqual(ekf.n_rejected, 1)
 
     def test_pnp_fusion_dedup_skips_repeated_frame(self):
         est = VQ2PoseEstimator()
