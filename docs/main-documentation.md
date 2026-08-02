@@ -417,7 +417,7 @@ Broadcast by the sim as a short burst at race start (DATA_TRANSMISSION_HANDSHAKE
 | `make check` | `ruff check --fix` + `ruff format` | Lint and format |
 | `make sim` | `uv run main.py` | Run the live pilot against the sim |
 | `make capture-gates` | `uv run scripts/capture_gates.py` | Capture the race-start gate-map burst |
-| `make fly` | `uv run -m rl.experts.fly2 --mode course` | Fly the full 6-gate course (measured-dynamics controller) |
+| `make fly` | `uv run -m rl.experts.fly2 --mode course` | Fly the captured full course (measured-dynamics controller) |
 | `make hover` | `uv run -m rl.experts.fly2 --mode hover --seconds 8` | Stable hover sanity check |
 | `make dynamics` | `uv run scripts/rl_diag_dynamics.py` | Open-loop dynamics characterization |
 | `make capture` | `uv run -m rl.environment.sim_interface` | Module 1 — telemetry + gate-map snapshot |
