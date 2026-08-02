@@ -30,3 +30,7 @@ rl/data/est_log_*.jsonl
 # GP expert demos + BC pretrain artifacts (make log-demos / make train-bc)
 rl/data/gp_demos.npz
 rl/data/policy_bc.pt
+
+# ai agent temp files
+.sisyphus/
+.serena/
