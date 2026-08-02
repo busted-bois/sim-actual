@@ -203,8 +203,8 @@ class ConfigConsumptionTests(unittest.TestCase):
         self.assertEqual(cfg.ppo.net_arch, [64, 64, 64])
         self.assertEqual(cfg.ppo.total_timesteps_per_stage, 300_000)
         self.assertEqual(cfg.ppo.n_envs, 8)
-        self.assertEqual(cfg.env.max_steps, 1000)
-        self.assertEqual(cfg.env.curriculum_stage, 2)
+        self.assertEqual(cfg.env.max_steps, 3500)
+        self.assertEqual(cfg.env.curriculum_stage, 3)
         self.assertEqual(cfg.device, "auto")
 
     def test_resolve_device(self):

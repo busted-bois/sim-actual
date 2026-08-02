@@ -18,8 +18,8 @@ class ConfigError(ValueError):
 
 @dataclass
 class EnvConfig:
-    curriculum_stage: int = 2
-    max_steps: int = 1000
+    curriculum_stage: int = 3
+    max_steps: int = 3500
     gate_size: float = 2.72
 
 
