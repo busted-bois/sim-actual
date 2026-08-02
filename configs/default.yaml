@@ -20,6 +20,8 @@ ppo:
     - 64
     - 64
     - 64
+  total_timesteps_per_stage: 300000
+  n_envs: 8
 bc:
   epochs: 40
   lr: 0.001
