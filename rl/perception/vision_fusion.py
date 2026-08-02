@@ -108,6 +108,59 @@ def _quat_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
     )
 
 
+def _extract_pnp(det: dict):
+    if not isinstance(det, dict):
+        return None
+    pose = det.get("pose") or {}
+    if not isinstance(pose, dict):
+        return None
+    gate_body = pose.get("gate_pos_body")
+    try:
+        conf = float(det.get("conf", 0.0) or 0.0)
+        reproj = float(pose.get("reproj_px", 1e9))
+        range_m = float(pose.get("range_m", 0.0))
+    except (TypeError, ValueError):
+        return None
+    if gate_body is None:
+        return None
+    try:
+        gb = np.asarray(gate_body, float)
+        if gb.shape != (3,) or not np.isfinite(gb).all():
+            return None
+    except (ValueError, TypeError):
+        return None
+    if conf < 0.5 or not math.isfinite(conf):
+        return None
+    if not (math.isfinite(reproj) and math.isfinite(range_m)):
+        return None
+    if reproj > 10.0 or not (0.5 < range_m < 40.0):
+        return None
+    return gb, conf, reproj, range_m
+
+
+def _fuse_pnp_position_yaw(ekf, gate_body, conf, gate_world_pos):
+    gb = np.asarray(gate_body, float)
+    gw = np.asarray(gate_world_pos, float)
+    if gb.shape != (3,) or gw.shape != (3,):
+        return False
+    if not (np.isfinite(gb).all() and np.isfinite(gw).all()):
+        return False
+    R_wb = spec.quat_to_R(np.asarray(ekf.q, float))
+    p_meas = gw - R_wb @ gb
+    p_prior = ekf.p.copy()
+    sigma = 1.2 - min(conf, 0.9)
+    ekf.update_position(p_meas, sigma=sigma)
+
+    dx, dy = gw[0] - p_prior[0], gw[1] - p_prior[1]
+    if math.hypot(dx, dy) >= 0.5:
+        yaw_bearing = math.atan2(gb[1], gb[0])
+        yaw_meas = _wrap(math.atan2(dy, dx) - yaw_bearing)
+        roll, pitch, _ = _rpy_from_quat(ekf.q)
+        q_meas = _quat_from_rpy(roll, pitch, yaw_meas)
+        ekf.update_attitude(q_meas, sigma=YAW_SIGMA_RAD * (1.1 - min(conf, 1.0)))
+    return True
+
+
 def fuse_pnp_gate(ekf, det: dict, gate_world_pos, max_pred_err_m: float = 6.0) -> bool:
     """Fuse a YOLO+PnP gate detection against the active gate's world position.
 
@@ -116,37 +169,25 @@ def fuse_pnp_gate(ekf, det: dict, gate_world_pos, max_pred_err_m: float = 6.0) -
     bearing/range path. Also anchors yaw the same way as fuse_gate_bearing_yaw.
     Gated on prediction error so a detection of the WRONG gate (two gates in
     frame) cannot poison the filter. Returns True when a position update ran.
+    Uses adaptive gate: max(max_pred_err_m, ekf.innovation_gate(max_pred_err_m)).
     """
-    pose = det.get("pose") or {}
-    gate_body = pose.get("gate_pos_body")
-    conf = float(det.get("conf", 0.0) or 0.0)
-    if gate_body is None or conf < 0.5:
+    extracted = _extract_pnp(det)
+    if extracted is None:
         return False
-    reproj = float(pose.get("reproj_px", 1e9))
-    range_m = float(pose.get("range_m", 0.0))
-    if reproj > 10.0 or not (0.5 < range_m < 40.0):
-        return False
+    gate_body, conf, _, _ = extracted
 
-    g = np.asarray(gate_world_pos, float)
+    gw = np.asarray(gate_world_pos, float)
+    if gw.shape != (3,) or not np.isfinite(gw).all():
+        return False
     R_wb = spec.quat_to_R(np.asarray(ekf.q, float))
-    p_meas = g - R_wb @ np.asarray(gate_body, float)
-    p_prior = ekf.p.copy()
-    if float(np.linalg.norm(p_meas - p_prior)) > max_pred_err_m:
-        return False
-    sigma = 1.2 - min(conf, 0.9)  # 0.3–0.7 m by detection confidence
-    ekf.update_position(p_meas, sigma=sigma)
+    p_meas = gw - R_wb @ np.asarray(gate_body, float)
+    innov = float(np.linalg.norm(p_meas - ekf.p))
 
-    # Yaw anchor: world bearing to the gate vs the body-frame PnP bearing.
-    dx, dy = g[0] - p_prior[0], g[1] - p_prior[1]
-    if math.hypot(dx, dy) >= 0.5:
-        yaw_bearing = float(
-            pose.get("yaw_bearing", math.atan2(gate_body[1], gate_body[0]))
-        )
-        yaw_meas = _wrap(math.atan2(dy, dx) - yaw_bearing)
-        roll, pitch, _ = _rpy_from_quat(ekf.q)
-        q_meas = _quat_from_rpy(roll, pitch, yaw_meas)
-        ekf.update_attitude(q_meas, sigma=YAW_SIGMA_RAD * (1.1 - min(conf, 1.0)))
-    return True
+    gate = max(max_pred_err_m, ekf.innovation_gate(max_pred_err_m))
+    if innov > gate:
+        return False
+
+    return _fuse_pnp_position_yaw(ekf, gate_body, conf, gw)
 
 
 def fuse_gate_bearing_yaw(
@@ -187,3 +228,45 @@ def fuse_gate_bearing_yaw(
     sigma = YAW_SIGMA_RAD * (1.1 - min(confidence, 1.0))
     ekf.update_attitude(q_meas, sigma=sigma)
     return True
+
+
+def step_pnp_fusion(ekf, det, gate_world_pos, dt, max_coast, gate_floor=3.0):
+    try:
+        gw = np.asarray(gate_world_pos, float)
+        if gw.shape != (3,) or not np.isfinite(gw).all():
+            ekf.coast(1, dt)
+            return "miss"
+    except (ValueError, TypeError):
+        ekf.coast(1, dt)
+        return "miss"
+
+    if not ekf.healthy() or ekf.coast_count >= max_coast:
+        if not np.isfinite(ekf.q).all():
+            ekf.coast(1, dt)
+            return "rejected"
+        extracted = _extract_pnp(det) if det else None
+        if extracted is not None:
+            gate_body, conf, _, _ = extracted
+            ekf.reset_on_detection(pnp_gate_body=gate_body, gate_world_pos=gw)
+            _fuse_pnp_position_yaw(ekf, gate_body, conf, gw)
+            return "reset"
+        ekf.coast(1, dt)
+        return "miss"
+
+    extracted = _extract_pnp(det) if det else None
+    if extracted is None:
+        ekf.coast(1, dt)
+        return "miss"
+
+    gate_body, conf, _, _ = extracted
+    R_wb = spec.quat_to_R(np.asarray(ekf.q, float))
+    p_meas = gw - R_wb @ np.asarray(gate_body, float)
+    innov = float(np.linalg.norm(p_meas - ekf.p))
+    gate = max(gate_floor, ekf.innovation_gate(gate_floor))
+
+    if innov > gate:
+        ekf.coast(1, dt)
+        return "rejected"
+
+    accepted = _fuse_pnp_position_yaw(ekf, gate_body, conf, gw)
+    return "update" if accepted else "rejected"
