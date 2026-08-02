@@ -20,7 +20,9 @@ from rl.training.train_bc import (
     train_bc,
 )
 from rl.training.train_ppo import (
+    LEGACY_RUN_DIR,
     NET_ARCH,
+    POLICY_PT,
     StandalonePolicy,
     _ProgressCallback,
     _largest_safe_divisor,
@@ -404,6 +406,12 @@ def _verify_export_with(model, std, n=64):
 
 
 class LegacyCompatTests(unittest.TestCase):
+    def test_legacy_train_outputs_do_not_target_anchor(self):
+        self.assertNotEqual(
+            os.path.realpath(os.path.join(LEGACY_RUN_DIR, "policy.pt")),
+            os.path.realpath(POLICY_PT),
+        )
+
     def test_train_bc_signature(self):
         obs = torch.zeros((8, spec.OBS_DIM))
         act = torch.zeros((8, spec.ACTION_DIM))
