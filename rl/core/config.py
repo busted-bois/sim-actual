@@ -31,6 +31,8 @@ class PPOConfig:
     lr: float = 3e-4
     n_epochs: int = 10
     net_arch: list[int] = field(default_factory=lambda: [64, 64, 64])
+    total_timesteps_per_stage: int = 300_000
+    n_envs: int = 8
 
 
 @dataclass
@@ -113,6 +115,10 @@ def _validate(cfg: RLConfig) -> None:
         raise ConfigError("eval_episodes and env.max_steps must be positive")
     if cfg.ppo.n_steps < 1 or cfg.ppo.batch_size < 1 or cfg.ppo.n_epochs < 1:
         raise ConfigError("PPO step, batch, and epoch counts must be positive")
+    if cfg.ppo.total_timesteps_per_stage < 1:
+        raise ConfigError("ppo.total_timesteps_per_stage must be positive")
+    if cfg.ppo.n_envs < 1:
+        raise ConfigError("ppo.n_envs must be positive")
     if not cfg.ppo.net_arch or any(width < 1 for width in cfg.ppo.net_arch):
         raise ConfigError("ppo.net_arch widths must be positive")
     if cfg.bc.epochs < 1:
