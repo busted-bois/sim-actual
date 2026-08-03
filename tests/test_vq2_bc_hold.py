@@ -525,7 +525,12 @@ class PPOConstructorTests(unittest.TestCase):
 
         env = DummyVecEnv([lambda: VQ2RaceEnv(n_gates=1, seed=0, detector_dropout=0.0)])
         m = _make_ppo(env, seed=0)
-        self.assertEqual(m.learning_rate, 1e-4)
+        # Lowered 1e-4 -> 3e-5 on measurement, not taste: at 1e-4 a stage-1
+        # update logged approx_kl=0.26273 against this same target_kl of 0.03
+        # (8.7x over), and the policy went from 0.55 gates to 0.00 in one
+        # 75k-step chunk. The target only gets checked between epochs, so a
+        # single epoch can already blow through it.
+        self.assertEqual(m.learning_rate, 3e-5)
         self.assertEqual(m.target_kl, 0.03)
         self.assertAlmostEqual(m.gamma, 0.995, places=4)
         env.close()

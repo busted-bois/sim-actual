@@ -74,7 +74,12 @@ def _gravity_from_accel(imu) -> np.ndarray | None:
     if not imu:
         return None
     a = np.array(
-        [imu.get("xacc", 0.0), imu.get("yacc", 0.0), imu.get("zacc", 0.0)], float
+        [
+            imu.get("ax", imu.get("xacc", 0.0)),
+            imu.get("ay", imu.get("yacc", 0.0)),
+            imu.get("az", imu.get("zacc", 0.0)),
+        ],
+        float,
     )
     n = float(np.linalg.norm(a))
     if not np.isfinite(n) or n < 1e-3:
@@ -117,7 +122,11 @@ class VQ2Pilot:
     def _gyro(self) -> np.ndarray:
         imu = self.data.get("imu") or {}
         g = np.array(
-            [imu.get("xgyro", 0.0), imu.get("ygyro", 0.0), imu.get("zgyro", 0.0)],
+            [
+                imu.get("gx", imu.get("xgyro", 0.0)),
+                imu.get("gy", imu.get("ygyro", 0.0)),
+                imu.get("gz", imu.get("zgyro", 0.0)),
+            ],
             dtype=float,
         )
         g = np.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
@@ -139,8 +148,14 @@ class VQ2Pilot:
         if not self._seeded:
             g = _gravity_from_accel(imu)
             if g is not None and abs(float(np.linalg.norm(g)) - 1.0) < 0.2:
-                pitch = math.degrees(math.atan2(g[0], g[2]))
-                roll = math.degrees(math.atan2(-g[1], g[2]))
+                # gravity in body for ZYX euler is
+                #     [-sin(pitch), sin(roll)cos(pitch), cos(roll)cos(pitch)]
+                # so pitch takes -g[0] and roll takes +g[1]. Getting these
+                # backwards seeds the AHRS nose-UP 17.8 deg when the drone
+                # actually sits nose-DOWN 17.8 deg on the pad -- a 35 deg
+                # attitude error before the first command is ever sent.
+                pitch = math.degrees(math.atan2(-g[0], g[2]))
+                roll = math.degrees(math.atan2(g[1], g[2]))
                 self.ahrs = type(self.ahrs)(
                     initial_pitch_deg=pitch, initial_roll_deg=roll
                 )

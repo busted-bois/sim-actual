@@ -197,6 +197,134 @@ def collect_demos(
     return episodes
 
 
+def collect_dagger(
+    model,
+    stage: int,
+    n_episodes: int,
+    beta: float,
+    seed_base: int,
+    device: str = "cpu",
+):
+    """DAgger round: roll a beta-mixture of expert and policy, label with expert.
+
+    Behaviour cloning alone cannot fix this system. Measured on stage 0 with a
+    fully converged clone (rl/training/diagnose_vq2.py, 15 episodes):
+
+        channel   err on EXPERT states   err on POLICY states   ratio
+          roll                  0.0091                 0.6413   70.7x
+         pitch                  0.0320                 0.8841   27.7x
+           yaw                  0.0161                 0.3631   22.5x
+        thrust                  0.0188                 0.1176    6.3x
+
+    i.e. the clone reproduces the expert almost exactly on the states the demos
+    cover, and is wrong by two orders of magnitude on the states its own errors
+    lead it into -- 26.4x overall, 0.00 gates, 15/15 into the ground. That is
+    covariate shift, and more demonstrations of the SAME distribution cannot
+    address it. DAgger can, because it labels the states the LEARNER visits.
+
+    beta is the probability of executing the expert's action this episode;
+    annealing it from 1 toward 0 walks the state distribution from the expert's
+    to the policy's own while the expert keeps supplying the labels.
+    """
+    cfg = CURRICULUM[stage]
+    episodes = []
+    for ep in range(n_episodes):
+        s = seed_base + ep
+        env = VQ2RaceEnv(
+            n_gates=cfg["n_gates"],
+            seed=s,
+            spacing=cfg["spacing"],
+            jitter=cfg["jitter"],
+            domain_rand=False,
+        )
+        try:
+            obs, _ = env.reset(seed=s)
+            state, first = None, True
+            ep_obs, ep_act, ep_rew = [], [], []
+            term = trunc = False
+            use_expert = np.random.default_rng(s).random() < beta
+            while not (term or trunc):
+                expert_a = env.expert_action().astype(np.float32)
+                # Label is ALWAYS the expert's action, whoever is driving.
+                ep_obs.append(obs.copy())
+                ep_act.append(expert_a)
+                if use_expert:
+                    step_a = expert_a
+                else:
+                    a, state = model.predict(
+                        obs[None],
+                        state=state,
+                        episode_start=np.array([first]),
+                        deterministic=True,
+                    )
+                    first = False
+                    step_a = np.asarray(a[0], dtype=np.float32)
+                obs, r, term, trunc, _ = env.step(step_a)
+                ep_rew.append(float(r))
+            if len(ep_obs) >= 8:
+                o = np.asarray(ep_obs, np.float32)
+                a_arr = np.asarray(ep_act, np.float32)
+                # Real rewards and discounted returns, NOT zeros. These episodes
+                # are aggregated with the demos and handed to fit_critic, so
+                # zero-filled returns would train the value head toward zero on
+                # a growing majority of the data.
+                rew = np.asarray(ep_rew, np.float32)
+                episodes.append((o, a_arr, rew, discounted_returns(rew, GAMMA)))
+        finally:
+            env.close()
+    return episodes
+
+
+def _actor_mean_batched(policy, x_pad, n_seq, seq_len):
+    """Action means for n_seq sequences of seq_len steps, run in ONE LSTM pass.
+
+    _process_sequence reshapes its input to (n_seq, T, feat), so a padded batch
+    of equal-length segments goes through in parallel instead of one forward
+    pass per segment. With ~1300 segments that is the difference between ~100 s
+    and a few seconds per BC epoch, which is the difference between iterating
+    on this pipeline and not.
+
+    x_pad is (n_seq * seq_len, obs_dim), ordered sequence-major.
+    """
+    feats = policy.extract_features(x_pad)
+    if isinstance(feats, tuple):
+        feats = feats[0]
+    lstm = policy.lstm_actor
+    h = torch.zeros(lstm.num_layers, n_seq, lstm.hidden_size, device=feats.device)
+    starts = torch.zeros(n_seq, seq_len, device=feats.device)
+    starts[:, 0] = 1.0  # every sequence begins with a fresh hidden state
+    latent, _ = policy._process_sequence(
+        feats, (h, h.clone()), starts.reshape(-1), lstm
+    )
+    return policy.action_net(policy.mlp_extractor.forward_actor(latent))
+
+
+def _pad_segments(segs, device):
+    """Pad (obs, act) segments to a common length; return tensors + a mask.
+
+    Segments are already <= BPTT_LEN, and only the tail of each episode is
+    short, so padding wastes very little. The mask keeps padded steps out of
+    the loss so a short tail cannot pull the gradient toward zero actions.
+    """
+    seq_len = max(len(o) for o, _ in segs)
+    n_seq = len(segs)
+    obs_dim = segs[0][0].shape[1]
+    act_dim = segs[0][1].shape[1]
+    x = np.zeros((n_seq, seq_len, obs_dim), np.float32)
+    y = np.zeros((n_seq, seq_len, act_dim), np.float32)
+    m = np.zeros((n_seq, seq_len), np.float32)
+    for i, (o, a) in enumerate(segs):
+        t = len(o)
+        x[i, :t], y[i, :t], m[i, :t] = o, a, 1.0
+    return (
+        torch.as_tensor(x.reshape(n_seq * seq_len, obs_dim), device=device),
+        torch.as_tensor(y.reshape(n_seq * seq_len, act_dim), device=device),
+        torch.as_tensor(m.reshape(n_seq * seq_len, 1), device=device),
+        n_seq,
+        seq_len,
+    )
+
+
 def _actor_mean_sequence(policy, x_seq):
     feats = policy.extract_features(x_seq)
     if isinstance(feats, tuple):
@@ -215,34 +343,31 @@ def train_bc(
     epochs=30,
     lr=1e-3,
     device="cpu",
-    eps_per_batch=8,
+    eps_per_batch=32,
     log: RunnerLog | None = None,
 ):
+    """Clone the expert over truncated sequences, batched through the LSTM."""
     policy = model.policy
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
-    data = [
-        (torch.as_tensor(o, device=device), torch.as_tensor(a, device=device))
-        for o, a in truncate(episodes)
-    ]
+    segs = truncate(episodes)
     rng = np.random.default_rng(0)
     for ep in range(epochs):
-        order = rng.permutation(len(data))
+        order = rng.permutation(len(segs))
         tot, nstep = 0.0, 0
         for i in range(0, len(order), eps_per_batch):
+            batch = [segs[j] for j in order[i : i + eps_per_batch]]
+            x, y, mask, n_seq, seq_len = _pad_segments(batch, device)
+            pred = _actor_mean_batched(policy, x, n_seq, seq_len)
+            # Mean over REAL steps only; padded rows contribute nothing.
+            denom = mask.sum() * y.shape[1]
+            loss = (((pred - y) ** 2) * mask).sum() / denom.clamp(min=1.0)
             opt.zero_grad()
-            batch = order[i : i + eps_per_batch]
-            loss_sum = 0.0
-            for j in batch:
-                xs, ys = data[j]
-                loss = torch.nn.functional.mse_loss(
-                    _actor_mean_sequence(policy, xs), ys
-                )
-                (loss / len(batch)).backward()
-                loss_sum += float(loss.detach()) * len(xs)
-                nstep += len(xs)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
             opt.step()
-            tot += loss_sum
+            real = int(mask.sum().item())
+            tot += float(loss.detach()) * real
+            nstep += real
         if ep % 5 == 0 or ep == epochs - 1:
             msg = f"epoch {ep + 1}/{epochs} loss={tot / max(nstep, 1):.5f}"
             if log is not None:
@@ -250,6 +375,8 @@ def train_bc(
             else:
                 print(f"[bc] {msg}", flush=True)
 
+    # The clone taught the MEAN. Leaving PPO's initial log_std untouched injects
+    # full-scale exploration noise into a policy that was just taught to fly.
     with torch.no_grad():
         policy.log_std.fill_(-1.6)
     return model
@@ -272,16 +399,42 @@ def _critic_params(policy):
     return critic_p
 
 
+def _pad_returns(segs, device):
+    """Pad (obs, returns) segments; returns tensors + mask, like _pad_segments."""
+    seq_len = max(len(o) for o, _ in segs)
+    n_seq = len(segs)
+    obs_dim = segs[0][0].shape[1]
+    x = np.zeros((n_seq, seq_len, obs_dim), np.float32)
+    y = np.zeros((n_seq, seq_len), np.float32)
+    m = np.zeros((n_seq, seq_len), np.float32)
+    for i, (o, r) in enumerate(segs):
+        t = len(o)
+        x[i, :t], y[i, :t], m[i, :t] = o, r, 1.0
+    return (
+        torch.as_tensor(x.reshape(n_seq * seq_len, obs_dim), device=device),
+        torch.as_tensor(y.reshape(-1), device=device),
+        torch.as_tensor(m.reshape(-1), device=device),
+        n_seq,
+        seq_len,
+    )
+
+
 def fit_critic(
     model,
     episodes,
     epochs=20,
     lr=1e-3,
     device="cpu",
-    eps_per_batch=4,
+    eps_per_batch=32,
     max_grad_norm=0.5,
     log: RunnerLog | None = None,
 ):
+    """Fit the value head on Monte-Carlo returns, batched through the LSTM.
+
+    Same truncation and batching as train_bc: one padded forward pass per batch
+    of segments instead of one per episode (~110 s/epoch -> a few seconds).
+    Only critic parameters are optimized, so this cannot disturb the clone.
+    """
     policy = model.policy
     critic_p = _critic_params(policy)
     if not critic_p:
@@ -289,43 +442,37 @@ def fit_critic(
     opt = torch.optim.Adam(critic_p, lr=lr)
     policy.zero_grad(set_to_none=True)
 
-    data = [
-        (torch.as_tensor(o, device=device), torch.as_tensor(r, device=device))
-        for o, _, _, r in episodes
-    ]
+    segs = []
+    for ep in episodes:
+        o, ret = ep[0], ep[3]
+        for i in range(0, len(o), BPTT_LEN):
+            so, sr = o[i : i + BPTT_LEN], ret[i : i + BPTT_LEN]
+            if len(so) >= 8:
+                segs.append((so, sr))
     rng = np.random.default_rng(0)
 
-    for ep in range(epochs):
-        order = rng.permutation(len(data))
-        tot_v_loss, nstep = 0.0, 0
+    lstm = policy.lstm_critic if policy.lstm_critic is not None else policy.lstm_actor
+    for ep_i in range(epochs):
+        order = rng.permutation(len(segs))
+        tot, nstep = 0.0, 0
         for i in range(0, len(order), eps_per_batch):
+            batch = [segs[j] for j in order[i : i + eps_per_batch]]
+            x, y, mask, n_seq, seq_len = _pad_returns(batch, device)
+            h = torch.zeros(lstm.num_layers, n_seq, lstm.hidden_size, device=device)
+            starts = torch.zeros(n_seq, seq_len, device=device)
+            starts[:, 0] = 1.0
+            values = policy.predict_values(x, (h, h.clone()), starts.reshape(-1))
+            v = values.squeeze(-1)
+            loss = (((v - y) ** 2) * mask).sum() / mask.sum().clamp(min=1.0)
             opt.zero_grad()
-            batch = order[i : i + eps_per_batch]
-            v_loss_sum = 0.0
-            for j in batch:
-                xs, rets = data[j]
-                T = xs.shape[0]
-
-                h = torch.zeros(
-                    policy.lstm_critic.num_layers,
-                    1,
-                    policy.lstm_critic.hidden_size,
-                    device=device,
-                )
-                c = h.clone()
-                starts = torch.zeros(T, device=device)
-                starts[0] = 1.0
-
-                values = policy.predict_values(xs, (h, c), starts)
-                v_loss = torch.nn.functional.mse_loss(values.squeeze(-1), rets)
-                (v_loss / len(batch)).backward()
-                v_loss_sum += float(v_loss.detach()) * T
-                nstep += T
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(critic_p, max_grad_norm)
             opt.step()
-            tot_v_loss += v_loss_sum
-        if ep % 5 == 0 or ep == epochs - 1:
-            msg = f"epoch {ep + 1}/{epochs} value_loss={tot_v_loss / max(nstep, 1):.5f}"
+            real = int(mask.sum().item())
+            tot += float(loss.detach()) * real
+            nstep += real
+        if ep_i % 5 == 0 or ep_i == epochs - 1:
+            msg = f"epoch {ep_i + 1}/{epochs} value_loss={tot / max(nstep, 1):.5f}"
             if log is not None:
                 log.info(msg, component="critic")
             else:
@@ -405,10 +552,10 @@ def _make_ppo(env, seed: int, device: str = "cpu"):
         batch_size=256,
         gamma=GAMMA,
         gae_lambda=0.95,
-        learning_rate=1e-4,
+        learning_rate=3e-5,  # measured approx_kl 0.263 vs target_kl 0.03 at 1e-4
         ent_coef=0.003,
         clip_range=0.2,
-        n_epochs=6,
+        n_epochs=3,  # fewer passes per rollout: same reason as the lr drop
         target_kl=0.03,
         seed=seed,
         device=device,
@@ -539,6 +686,8 @@ def main():
     ap.add_argument("--demo-episodes", type=_positive_int, default=60)
     ap.add_argument("--bc-epochs", type=_positive_int, default=30)
     ap.add_argument("--critic-epochs", type=_positive_int, default=20)
+    ap.add_argument("--dagger-rounds", type=int, default=5)
+    ap.add_argument("--dagger-episodes", type=_positive_int, default=25)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out-dir", default=OUT_DIR)
     args = ap.parse_args()
@@ -552,6 +701,8 @@ def main():
         args.demo_episodes = 2
         args.bc_epochs = 2
         args.critic_epochs = 2
+        args.dagger_rounds = 1
+        args.dagger_episodes = 2
 
     out_dir = args.out_dir
     policy_path = os.path.join(out_dir, os.path.basename(POLICY_PT))
@@ -599,6 +750,38 @@ def main():
             component="bc",
         )
 
+        print("=== 2b/4 DAgger (stage 0) ===", flush=True)
+        log.info(
+            f"{args.dagger_rounds} DAgger rounds x {args.dagger_episodes} episodes",
+            component="dagger",
+        )
+        for it in range(args.dagger_rounds):
+            beta = 0.5 ** (it + 1)
+            new = collect_dagger(
+                model,
+                stage=0,
+                n_episodes=args.dagger_episodes,
+                beta=beta,
+                seed_base=50_000 + 1000 * it,
+                device=args.device,
+            )
+            episodes = episodes + new
+            train_bc(
+                model,
+                episodes,
+                epochs=max(args.bc_epochs // 4, 4),
+                lr=5e-4,
+                device=args.device,
+                log=log,
+            )
+            d_m = evaluate(model, 0, episodes=10)
+            log.info(
+                f"round {it + 1}/{args.dagger_rounds} beta={beta:.3f} "
+                f"data={len(episodes)} eps gates={d_m['gates']:.2f} "
+                f"success={d_m['success']:.2f}",
+                component="dagger",
+            )
+
         print("=== 3/4 recurrent critic fitting ===", flush=True)
         log.info("fitting recurrent critic on expert returns", component="critic")
         model = fit_critic(
@@ -631,6 +814,37 @@ def main():
                 f"shaping={shaping:.2f} domain_rand={dr}",
                 component="ppo",
             )
+
+            # DAgger on THIS stage before PPO touches it. Stage 0 was solved by
+            # DAgger alone (pre-eval 1.00) while stage 1, which had never seen
+            # it, entered at 0.55/3 gates and PPO then drove it to 0.00 with
+            # approx_kl 0.263 against a 0.03 target. The clone has to be able to
+            # fly a stage before RL can improve on it.
+            if stage > 0 and args.dagger_rounds > 0:
+                for it in range(max(args.dagger_rounds // 2, 1)):
+                    beta = 0.5 ** (it + 1)
+                    episodes = episodes + collect_dagger(
+                        model,
+                        stage=stage,
+                        n_episodes=args.dagger_episodes,
+                        beta=beta,
+                        seed_base=60_000 + 5000 * stage + 1000 * it,
+                        device=args.device,
+                    )
+                    train_bc(
+                        model,
+                        episodes,
+                        epochs=max(args.bc_epochs // 4, 4),
+                        lr=5e-4,
+                        device=args.device,
+                        log=log,
+                    )
+                    d_m = evaluate(model, stage, episodes=10)
+                    log.info(
+                        f"stage {stage} round {it + 1} beta={beta:.3f} "
+                        f"gates={d_m['gates']:.2f} frac={d_m['gate_frac']:.2f}",
+                        component="dagger",
+                    )
             _train_stage(
                 model,
                 stage,

@@ -1,4 +1,4 @@
-.PHONY: train-vq2 vq2-observe vq2-fly i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-train rl-eval rl-baseline rl-test attitude-harness log-demos train-bc
+.PHONY: rl-live train-vq2 vq2-observe vq2-fly i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-train rl-eval rl-baseline rl-test attitude-harness log-demos train-bc
 
 i install:
 	uv sync
@@ -19,7 +19,10 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_vq2_observation tests.test_vq2_env tests.test_vq2_thrust_plumbing tests.test_vq2_bc_hold tests.test_vq2_logging -v
+	uv run python -m unittest discover -s tests -t . -p "test_*.py"
+# Discovery, not a hand-maintained list: the old explicit list had drifted
+# 17 files behind tests/, which is how 4 Windows path failures in
+# test_train_rl_script.py went unnoticed for an entire branch.
 
 sim:
 	uv run main.py
@@ -162,14 +165,21 @@ rl-test:
 	uv run -m rl.environment.env --selftest
 	uv run -m rl.deploy --selftest
 
-# --- VQ2 vision-only RL (17-gate course, no gate map, no odometry) -----------
-# Train the recurrent policy in the camera-rendered surrogate. ~1-3 h on this
-# box; --quick for a smoke run. Offline: no simulator needed.
-train-vq2:
-	uv run -m rl.training.train_vq2
+# --- VQ2 RL: LIVE SIMULATOR ONLY ---------------------------------------------
+# Everything below trains and runs against the REAL simulator over MAVLink.
+# There is no offline/surrogate training path in this workflow. The internal
+# physics model still exists, but ONLY as a unit-test fixture (see tests/);
+# it is never used to produce a policy.
+
+# Train the policy ON THE LIVE SIMULATOR. Start the sim and a race session
+# first; the trainer arms, flies, resets and repeats unattended.
+train-vq2: rl-live
+
+rl-live:
+	uv run -m rl.training.train_live
 
 # READ-ONLY live check. Runs perception -> VQ2 observation against the live sim
-# and logs every field. Never arms, never commands. Run this BEFORE vq2-fly.
+# and logs every field. Never arms, never commands. Run this BEFORE flying.
 vq2-observe:
 	uv run -m rl.deploy_vq2 --observe --seconds 30
 
