@@ -66,6 +66,8 @@ CRASH_PENALTY = 10.0
 TIME_PENALTY = 0.02
 MAX_HORIZ_ACCEL = 8.0  # ~39 deg of lean; beyond this the rate loop cannot hold it
 
+COURSE_GATES = 17  # the VQ2 course length; the gate_idx feature normalizes by it
+
 CURRICULUM = [
     {"n_gates": 1, "spacing": (10.0, 16.0), "jitter": 0.8},
     {"n_gates": 3, "spacing": (12.0, 20.0), "jitter": 1.6},
@@ -107,8 +109,10 @@ class VQ2RaceEnv(gym.Env):
         max_seconds: float = 90.0,
         spacing: tuple[float, float] = (12.0, 28.0),
         jitter: float = 3.0,
+        dr_scale: float = 1.0,
     ):
         super().__init__()
+        self.dr_scale = float(dr_scale)
         self.n_gates = int(n_gates)
         self.domain_rand = bool(domain_rand)
         self.detector_dropout = float(detector_dropout)
@@ -122,7 +126,15 @@ class VQ2RaceEnv(gym.Env):
             -vo.OBS_ABS_MAX, vo.OBS_ABS_MAX, (vo.OBS_DIM,), np.float32
         )
         self.np_random, _ = gym.utils.seeding.np_random(seed)
-        self.tracker = vo.GateFeatureTracker(n_gates=max(self.n_gates, 2))
+        # Normalize gate_idx by the REAL course length, never by the stage's
+        # gate count. Otherwise the same observation value means different
+        # things per stage (always 0 in a 1-gate stage, sweeping 0->1 in a
+        # 17-gate one) and the curriculum changes the meaning of the input
+        # rather than the difficulty. Measured: BC on stage-0 demos alone
+        # scores 0.75, BC on all four stages mixed scores 0.00 -- four times
+        # the data, strictly worse. It also has to match deployment, where the
+        # course is always COURSE_GATES long.
+        self.tracker = vo.GateFeatureTracker(n_gates=COURSE_GATES)
         self._build()
 
     # ---- course ------------------------------------------------------------
@@ -148,16 +160,32 @@ class VQ2RaceEnv(gym.Env):
 
         # Plant. env.py's docstring claimed domain randomization and shipped
         # none; every constant was fixed, which is the classic sim-to-real trap.
-        if self.domain_rand:
-            u = self.np_random.uniform
-            self.hover_thrust = float(np.clip(0.27 * u(0.85, 1.15), 0.15, 0.45))
-            self.thrust_accel = spec.GRAVITY / self.hover_thrust * float(u(0.9, 1.1))
-            self.rate_tau = float(u(0.03, 0.09))
-            self.drag = float(u(0.05, 0.35))
+        #
+        # dr_scale widens the sampling range from nominal (0.0) to full (1.0).
+        # It exists because a BC prior cloned on the nominal plant is BRITTLE to
+        # exactly two of these, measured on stage 0 (1.00 = clears the gate):
+        #     rate_gain     1.8 -> 0.00   2.7 -> 1.00   3.6 -> 0.00
+        #     thrust_accel  0.9x-> 0.00   1.0x-> 1.00   1.1x-> 0.00
+        #     drag / rate_tau / hover_thrust / latency:  0.95-1.00 throughout
+        # On the full range the clone scores 0.37, so PPO launched straight into
+        # it has almost no successful trajectory to reinforce and walks away
+        # from the warm start. Ramp dr_scale up instead of starting at 1.0.
+        if self.domain_rand and self.dr_scale > 0.0:
+            u, s = self.np_random.uniform, float(np.clip(self.dr_scale, 0.0, 1.0))
+
+            def jit(nominal, half):
+                return float(nominal + s * half * u(-1.0, 1.0))
+
+            self.hover_thrust = float(np.clip(jit(0.27, 0.27 * 0.15), 0.15, 0.45))
+            self.thrust_accel = float(
+                jit(spec.GRAVITY / 0.27, (spec.GRAVITY / 0.27) * 0.10)
+            )
+            self.rate_tau = float(np.clip(jit(0.05, 0.03), 0.02, 0.12))
+            self.drag = float(np.clip(jit(0.15, 0.15), 0.02, 0.40))
             # The live plant amplifies rate commands ~2.7-3x (memory, live
             # confirmed) and has never been measured on this machine.
-            self.rate_gain = float(u(1.8, 3.6))
-            self.latency = int(self.np_random.integers(0, 3))
+            self.rate_gain = float(np.clip(jit(2.7, 0.9), 1.0, 4.5))
+            self.latency = int(round(np.clip(jit(1.0, 1.2), 0, 3)))
         else:
             self.hover_thrust = 0.27
             self.thrust_accel = spec.GRAVITY / 0.27
@@ -178,7 +206,7 @@ class VQ2RaceEnv(gym.Env):
         self._prev_signed = self._signed(0)
         self._prev_dist = float(np.linalg.norm(np.asarray(gates[0]["pos"]) - self.p))
         self._next_detect_t = 0.0
-        self.tracker.n_gates = max(self.n_gates, 2)
+        self.tracker.n_gates = COURSE_GATES
         self.tracker.reset()
 
     # ---- gate geometry -----------------------------------------------------
@@ -329,7 +357,15 @@ class VQ2RaceEnv(gym.Env):
             rel = self.p - gc
             dy, dz = abs(float(right @ rel)), abs(float(down @ rel))
             if dy < HALF_OPENING and dz < HALF_OPENING:
-                rew += self.shaping * GATE_BONUS
+                # NOT scaled by `shaping`. Annealing the dense range-based
+                # shaping to zero is the point; annealing the gate event to
+                # zero as well leaves a 17-gate course with completion as its
+                # only signal, which a policy at 0 gates never discovers -- its
+                # best strategy becomes hovering to dodge the crash penalty,
+                # which is exactly what stage 3 produced (gates=0.00 across
+                # 400k steps). A gate pass is a discrete, unambiguous,
+                # oracle-supplied event; it stays.
+                rew += GATE_BONUS
                 self.gate_idx += 1
                 info["gate_passed"] = True
                 if self.gate_idx >= len(self.gates):

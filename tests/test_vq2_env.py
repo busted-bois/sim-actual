@@ -211,6 +211,23 @@ class RewardTests(unittest.TestCase):
         )
         self.assertGreater(total, vq2_env.COMPLETE_BONUS * 0.5)
 
+    def test_gate_bonus_survives_full_shaping_anneal(self):
+        """Annealing dense shaping to zero must NOT delete the gate reward.
+        With shaping=0 and no gate bonus, a 17-gate course has completion as
+        its only signal and the policy just learns to hover."""
+        env = vq2_env.VQ2RaceEnv(n_gates=17, seed=0, shaping=0.0)
+        env.reset(seed=0)
+        env.p = np.asarray(env.gates[0]["pos"], dtype=float) - env._gate_normal(0) * 0.4
+        env.v = env._gate_normal(0) * 8.0
+        got = 0.0
+        for _ in range(5):
+            _, r, _, _, info = env.step(np.zeros(4, dtype=np.float32))
+            if info.get("gate_passed"):
+                got = r
+                break
+        self.assertTrue(info.get("gate_passed"), "should have passed the gate")
+        self.assertGreater(got, vq2_env.GATE_BONUS * 0.5)
+
     def test_shaping_weight_zero_leaves_only_sparse_terms(self):
         """The official objective is sparse terminal success. Shaping must be
         an annealable scaffold, not baked in."""
@@ -283,3 +300,94 @@ class DomainRandomizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RandomizationCurriculumTests(unittest.TestCase):
+    """dr_scale exists because the BC clone is brittle to exactly two plant
+    parameters (rate_gain and thrust_accel each drop it from 1.00 to 0.00 on
+    their own; the clone scores 0.37 on the full range). PPO must ramp into
+    randomization rather than start inside it."""
+
+    def test_scale_zero_is_exactly_nominal(self):
+        seen = set()
+        for k in range(8):
+            env = vq2_env.VQ2RaceEnv(n_gates=1, seed=k, dr_scale=0.0)
+            env.reset(seed=k)
+            seen.add((env.rate_gain, env.thrust_accel, env.drag, env.rate_tau))
+        self.assertEqual(len(seen), 1, "dr_scale=0 must pin the plant")
+
+    def test_scale_widens_monotonically(self):
+        def spread(scale):
+            vals = []
+            for k in range(24):
+                env = vq2_env.VQ2RaceEnv(n_gates=1, seed=k, dr_scale=scale)
+                env.reset(seed=k)
+                vals.append(env.rate_gain)
+            return max(vals) - min(vals)
+
+        self.assertAlmostEqual(spread(0.0), 0.0)
+        self.assertLess(spread(0.4), spread(1.0))
+
+    def test_full_scale_still_brackets_the_nominal_plant(self):
+        vals = []
+        for k in range(40):
+            env = vq2_env.VQ2RaceEnv(n_gates=1, seed=k, dr_scale=1.0)
+            env.reset(seed=k)
+            vals.append(env.rate_gain)
+        self.assertLess(min(vals), 2.7)
+        self.assertGreater(max(vals), 2.7)
+
+
+class ObservationConsistencyAcrossStagesTests(unittest.TestCase):
+    """The curriculum must vary DIFFICULTY, not the meaning of an input.
+
+    gate_idx was normalized by the stage's gate count, so the same number meant
+    different things per stage and did not match deployment (always a 17-gate
+    course). Measured cost: BC on stage-0 demos alone scored 0.75, BC on all
+    four stages mixed scored 0.00 -- four times the data, strictly worse.
+    """
+
+    def test_gate_index_normalizer_is_the_course_length_not_the_stage(self):
+        for n in (1, 3, 8, 17):
+            env = vq2_env.VQ2RaceEnv(n_gates=n, seed=0)
+            env.reset(seed=0)
+            self.assertEqual(env.tracker.n_gates, vq2_env.COURSE_GATES, f"n={n}")
+
+    def test_same_gate_index_gives_same_feature_in_every_stage(self):
+        vals = []
+        for n in (3, 8, 17):
+            env = vq2_env.VQ2RaceEnv(n_gates=n, seed=0, detector_dropout=0.0)
+            env.reset(seed=0)
+            env.gate_idx = 1
+            obs = env._obs(None)
+            vals.append(float(obs[vq2_env.vo.OBS_LAYOUT["gate_idx"]][0]))
+        self.assertAlmostEqual(max(vals), min(vals), places=6)
+
+
+class BPTTTruncationTests(unittest.TestCase):
+    """Demo episodes run 125-2689 steps. Backprop through a whole one is
+    untrainable: measured all-stage BC scored 0.00 with full-episode BPTT and
+    0.40 at BPTT=128, with loss dropping 0.0029 -> 0.0008."""
+
+    def test_long_episodes_are_split(self):
+        from rl.training.train_vq2 import BPTT_LEN, truncate
+
+        eps = [(np.zeros((1000, 4), np.float32), np.zeros((1000, 2), np.float32))]
+        segs = truncate(eps)
+        self.assertGreater(len(segs), 1)
+        self.assertTrue(all(len(o) <= BPTT_LEN for o, _ in segs))
+
+    def test_short_episodes_survive_intact(self):
+        from rl.training.train_vq2 import truncate
+
+        eps = [(np.zeros((40, 4), np.float32), np.zeros((40, 2), np.float32))]
+        segs = truncate(eps)
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(len(segs[0][0]), 40)
+
+    def test_runt_tail_is_dropped(self):
+        from rl.training.train_vq2 import truncate
+
+        eps = [(np.zeros((130, 4), np.float32), np.zeros((130, 2), np.float32))]
+        segs = truncate(eps, maxlen=128, minlen=8)
+        self.assertEqual(len(segs), 1, "a 2-step tail is not a usable sequence")
