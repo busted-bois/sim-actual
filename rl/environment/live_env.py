@@ -79,6 +79,13 @@ RESET_SETTLE_S = 0.5
 READY_TIMEOUT_S = 20.0
 RACE_START_TIMEOUT_S = 30.0
 RACE_GO_TIMEOUT_S = 15.0
+# YOLO cold start. MEASURED on a live observe run (2026-08-03): the first gate
+# detection appeared 14.4 s after process start -- torch/CUDA init plus the
+# 16.6 MB weights load -- while the camera stream was flowing the whole time.
+# preflight.wait_for_session_ready keys on CAMERA FRAMES, so it returns
+# immediately and does NOT cover this. Any episode begun inside that window
+# flies completely blind on a 29-D observation whose vision half is empty.
+VISION_WARMUP_TIMEOUT_S = 45.0
 
 # Command shaping. UNCALIBRATED: flightlab/calibration.json has never been
 # produced on this machine, so these are defaults, not measurements. They are
@@ -131,8 +138,10 @@ class LiveVQ2Env(gym.Env):
         ip: str = "127.0.0.1",
         port: int = 14550,
         verbose: bool = True,
+        vision_warmup_s: float = VISION_WARMUP_TIMEOUT_S,
     ):
         super().__init__()
+        self.vision_warmup_s = float(vision_warmup_s)
         from simulator.gyro_ahrs import GyroAHRS
         from simulator.setup import setup_components
 
@@ -247,6 +256,28 @@ class LiveVQ2Env(gym.Env):
             self._gate_index(),
         )
 
+    def wait_for_vision(self, timeout_s: float | None = None) -> bool:
+        """Block until the detector produces its FIRST real gate estimate.
+
+        Called once, before the first episode. Camera frames are not enough --
+        YOLO needs ~14 s of cold start after them (measured), and an episode
+        started before that has no vision at all.
+        """
+        timeout_s = self.vision_warmup_s if timeout_s is None else float(timeout_s)
+        deadline = time.monotonic() + timeout_s
+        said = False
+        while time.monotonic() < deadline:
+            if self._vision() is not None:
+                self._say(
+                    f"vision ready after {timeout_s - (deadline - time.monotonic()):.1f}s"
+                )
+                return True
+            if not said:
+                self._say("waiting for the detector to warm up (YOLO cold start ~14s)")
+                said = True
+            time.sleep(0.1)
+        return False
+
     # -- lifecycle -------------------------------------------------------
     def _say(self, msg):
         if self.verbose:
@@ -259,6 +290,14 @@ class LiveVQ2Env(gym.Env):
         timeout so a stuck simulator surfaces as an exception instead of hanging
         an overnight training run forever.
         """
+        # First reset only: pay the detector's cold start before flying, not
+        # during episode 1.
+        if self._episode == 0 and not self.wait_for_vision():
+            raise RuntimeError(
+                "live reset: detector never produced a gate estimate "
+                f"within {self.vision_warmup_s:.1f}s -- is a gate in view?"
+            )
+
         self._episode += 1
         self._say(f"episode {self._episode}: resetting sim")
 

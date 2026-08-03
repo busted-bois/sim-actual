@@ -81,6 +81,28 @@ def _fake_setup(data, boot_ms, ip, port):
             "race_finish_time_ns": -1,
         },
     )
+    # A realistic detection so the real best_pose_gate() path is exercised.
+    # Values are the ones actually measured on the live sim (2026-08-03):
+    # gate ~6.0 m ahead and slightly above, conf 0.931, 4 of 8 keypoints.
+    data.setdefault(
+        "pose",
+        {
+            "frame_id": 1,
+            "gates": [
+                {
+                    "conf": 0.931,
+                    "pose": {
+                        "gate_pos_body": np.array([5.82, 0.01, -1.55]),
+                        "normal_body": np.array([-1.0, 0.0, 0.0]),
+                        "range_m": 6.02,
+                        "reproj_px": 0.6,
+                        "n_visible": 4,
+                        "method": "ippe-yolo8",
+                    },
+                }
+            ],
+        },
+    )
     data.setdefault("active_gate_index", 0)
     return {
         "controller": _FakeController(data),
@@ -138,6 +160,7 @@ def _mk_env(**kw):
 
     kw.setdefault("verbose", False)
     kw.setdefault("control_hz", 1000.0)  # keep tests fast; pacing is Controller's
+    kw.setdefault("vision_warmup_s", 0.3)  # real default is 45s -- too slow here
     return LiveVQ2Env(**kw)
 
 
@@ -244,6 +267,50 @@ class IMUPlumbingTests(unittest.TestCase):
                 env.step(np.zeros(4, np.float32))
             after = env.ahrs.euler_deg()
             self.assertNotAlmostEqual(before[0], after[0], places=3)
+            env.close()
+
+
+class VisionWarmupTests(unittest.TestCase):
+    """MEASURED live 2026-08-03: the first gate detection arrived 14.4 s after
+    process start (YOLO/torch/CUDA cold start), while camera frames flowed the
+    whole time. preflight.wait_for_session_ready keys on camera frames, so it
+    returns immediately and does not cover this. Episode 1 must not fly blind."""
+
+    def test_first_reset_waits_for_a_real_gate_estimate(self):
+        with _patch_live():
+            env = _mk_env(vision_warmup_s=5.0)
+            calls = {"n": 0}
+
+            def slow_vision():
+                calls["n"] += 1
+                return (
+                    None if calls["n"] < 4 else {"gate_pos_body": np.array([6.0, 0, 0])}
+                )
+
+            env._vision = slow_vision
+            env.reset()
+            self.assertGreaterEqual(calls["n"], 4, "must poll until vision appears")
+            env.close()
+
+    def test_reset_raises_if_vision_never_warms_up(self):
+        with _patch_live():
+            env = _mk_env()
+            env._vision = lambda: None
+            with self.assertRaises(RuntimeError) as ctx:
+                env.reset()
+            self.assertIn("gate estimate", str(ctx.exception))
+            env.close()
+
+    def test_later_resets_do_not_re_pay_the_warmup(self):
+        """The cold start is per-process, not per-episode -- paying it every
+        reset would add 14 s to an already expensive 4.2 s reset."""
+        with _patch_live():
+            env = _mk_env()
+            env._vision = lambda: {"gate_pos_body": np.array([6.0, 0, 0])}
+            env.reset()
+            env._vision = lambda: None  # detector goes quiet mid-session
+            env.reset()  # must NOT block or raise
+            self.assertEqual(env._episode, 2)
             env.close()
 
 
