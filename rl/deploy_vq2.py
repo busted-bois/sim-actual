@@ -40,10 +40,12 @@ import csv
 import math
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 
 from rl.core import vq2_observation as vo
+from rl.core.diagnostics import RunnerLog
 
 # Command-sign defaults follow rl/experts/fly2_course.py, the rate-wire pilot.
 SIGN_ROLL = float(os.environ.get("RL_SIGN_ROLL", -1.0))
@@ -62,7 +64,9 @@ CONTROL_HZ = float(os.environ.get("RL_HZ", 50.0))  # match training DECISION_HZ
 
 N_GATES = int(os.environ.get("RL_N_GATES", 17))
 STALL_TIMEOUT_S = float(os.environ.get("RL_STALL_S", 20.0))
-LOG_DIR = os.path.join("rl", "data")
+# Per-tick telemetry CSV lives under logs/ (gitignored) next to the runner's
+# own timestamped log file; both survive a crash and never pollute rl/data.
+LOG_DIR = os.path.join("logs", "vq2")
 
 
 def _gravity_from_accel(imu) -> np.ndarray | None:
@@ -83,7 +87,9 @@ def _gravity_from_accel(imu) -> np.ndarray | None:
 class VQ2Pilot:
     """Perception -> VQ2 observation -> policy -> attitude-rate command."""
 
-    def __init__(self, data, controller, policy=None, n_gates=N_GATES, log=None):
+    def __init__(
+        self, data, controller, policy=None, n_gates=N_GATES, log=None, csv_log=None
+    ):
         from simulator.gyro_ahrs import GyroAHRS
 
         self.data = data
@@ -102,8 +108,10 @@ class VQ2Pilot:
         self._last_gate_t = self._t0
         self.gates_passed = 0
         self._log = log
+        self._csv = csv_log
         self._ticks = 0
         self._det_ticks = 0
+        self._bad_gate_index_warned = False
 
     # -- sensing ---------------------------------------------------------
     def _gyro(self) -> np.ndarray:
@@ -137,11 +145,12 @@ class VQ2Pilot:
                     initial_pitch_deg=pitch, initial_roll_deg=roll
                 )
                 self._seeded = True
-                print(
-                    f"[vq2] AHRS seeded from accel: roll={roll:+.1f} "
-                    f"pitch={pitch:+.1f} deg",
-                    flush=True,
-                )
+                if self._log is not None:
+                    self._log.info(
+                        f"AHRS seeded from accel: roll={roll:+.1f} "
+                        f"pitch={pitch:+.1f} deg",
+                        component="ahrs",
+                    )
 
         gx, gy, gz = self._gyro()
         if 0.0 < dt < 0.5:
@@ -168,7 +177,20 @@ class VQ2Pilot:
 
     def _gate_index(self) -> int:
         """Authoritative progress from race_status — the only oracle VQ2 gives."""
-        return int(self.data.get("active_gate_index", 0) or 0)
+        raw = self.data.get("active_gate_index", 0)
+        try:
+            value = float(0 if raw is None else raw)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if not np.isfinite(value) or value < 0.0 or not value.is_integer():
+            if self._log is not None and not self._bad_gate_index_warned:
+                self._log.warn(
+                    f"invalid active_gate_index={raw!r}; retaining {self._last_gate}",
+                    component="sensor",
+                )
+            self._bad_gate_index_warned = True
+            return self._last_gate
+        return int(value)
 
     # -- control ---------------------------------------------------------
     def observation(self) -> np.ndarray:
@@ -180,10 +202,11 @@ class VQ2Pilot:
             self._last_gate = idx
             self.gates_passed = idx
             self._last_gate_t = time.monotonic()
-            print(
-                f"[vq2] gate {idx} passed at {time.monotonic() - self._t0:.1f}s",
-                flush=True,
-            )
+            if self._log is not None:
+                self._log.info(
+                    f"gate {idx} passed at {time.monotonic() - self._t0:.1f}s",
+                    component="gate",
+                )
         return self.tracker.update(
             time.monotonic(),
             est,
@@ -203,11 +226,16 @@ class VQ2Pilot:
             deterministic=True,
         )
         self._first = False
-        return np.asarray(a[0], dtype=float)
+        action = np.asarray(a[0], dtype=float)
+        if action.shape != (4,) or not np.all(np.isfinite(action)):
+            raise RuntimeError(f"policy emitted invalid action: {action!r}")
+        return action
 
     def tick(self):
         self._ticks += 1
         obs = self.observation()
+        if obs.shape != (vo.OBS_DIM,) or not np.all(np.isfinite(obs)):
+            raise RuntimeError("VQ2 observation is malformed or nonfinite")
         action = np.clip(self.act(obs), -1.0, 1.0)
         self._last_action = action
 
@@ -222,8 +250,8 @@ class VQ2Pilot:
 
         if self.controller is not None:
             self.controller.set_attitude_rates(roll, pitch, yaw, thrust)
-        if self._log:
-            self._log.writerow(
+        if self._csv is not None:
+            self._csv.writerow(
                 [
                     f"{time.monotonic() - self._t0:.3f}",
                     self.gates_passed,
@@ -238,26 +266,133 @@ class VQ2Pilot:
     def stalled(self) -> bool:
         return (time.monotonic() - self._last_gate_t) > STALL_TIMEOUT_S
 
-    def report(self):
+    def report(self, log: RunnerLog | None = None):
         det = 100.0 * self._det_ticks / max(self._ticks, 1)
-        print(
-            f"[vq2] {self._ticks} ticks, gates={self.gates_passed}, "
+        line = (
+            f"{self._ticks} ticks, gates={self.gates_passed}, "
             f"vision on {det:.1f}% of ticks, "
-            f"{time.monotonic() - self._t0:.1f}s elapsed",
-            flush=True,
+            f"{time.monotonic() - self._t0:.1f}s elapsed"
         )
+        if log is not None:
+            log.info(f"final report: {line}")
+        else:
+            print(f"[vq2] {line}", flush=True)
 
 
-def load_policy(path: str):
+def load_policy(path: str, log: RunnerLog | None = None):
     from sb3_contrib import RecurrentPPO
 
     if not os.path.exists(path):
-        raise SystemExit(
-            f"[vq2] no policy at {path} — run `make train-vq2` first "
+        raise FileNotFoundError(
+            f"no policy at {path} — run `make train-vq2` first "
             "(or use --observe, which needs no policy)"
         )
-    print(f"[vq2] loading {path}", flush=True)
+    if log is not None:
+        log.info(f"loading policy: {path}")
     return RecurrentPPO.load(path, device="cpu")
+
+
+def _run(args, run_log: RunnerLog) -> None:
+    os.environ.setdefault("AUTO_PILOT", "none")
+    from simulator.setup import setup_components
+
+    comps = {}
+    try:
+        shared: dict = {}
+        boot_ms = int(time.time() * 1000)
+        comps = setup_components(shared, boot_ms, "127.0.0.1", 14550)
+        controller = comps["controller"]
+        policy = None if args.observe else load_policy(args.policy, log=run_log)
+
+        Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        csv_path = os.path.join(
+            LOG_DIR, f"vq2_{'obs' if args.observe else 'fly'}_{stamp}.csv"
+        )
+        with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(
+                ["t", "gate", "roll", "pitch", "yaw", "thrust"]
+                + [
+                    f"{key}{i}"
+                    for key, section in vo.OBS_LAYOUT.items()
+                    for i in range(section.stop - section.start)
+                ]
+            )
+
+            pilot = VQ2Pilot(
+                shared,
+                None if args.observe else controller,
+                policy=policy,
+                n_gates=args.n_gates,
+                log=run_log,
+                csv_log=writer,
+            )
+            controller.pilot = pilot
+            controller.control_hz = CONTROL_HZ
+
+            run_log.info(
+                f"policy={'observe (no policy)' if args.observe else args.policy}"
+            )
+            run_log.info(f"mode={'observe' if args.observe else 'fly'}")
+            run_log.info(f"csv -> {csv_path}")
+            run_log.info(f"log -> {run_log.file_path}")
+            if args.observe:
+                run_log.warn("OBSERVE mode — not arming, not commanding.")
+            else:
+                run_log.info(
+                    f"signs=({SIGN_ROLL:+.0f},{SIGN_PITCH:+.0f},{SIGN_YAW:+.0f}) "
+                    f"rate_gain={RATE_GAIN} clip=±{RATE_CLIP} rad/s "
+                    f"thrust=[{THRUST_MIN},{THRUST_MAX}] @ {CONTROL_HZ:.0f} Hz",
+                    component="control",
+                )
+                controller.arm()
+                run_log.info("armed", component="control")
+
+            t0 = time.monotonic()
+            period = 1.0 / CONTROL_HZ
+            stop_reason = "completed"
+            try:
+                while True:
+                    loop = time.monotonic()
+                    if args.observe:
+                        pilot.tick()
+                    else:
+                        controller.update()
+                    run_log.tick(
+                        f"tick gates={pilot.gates_passed} "
+                        f"det={100.0 * pilot._det_ticks / max(pilot._ticks, 1):.0f}% "
+                        f"t={time.monotonic() - t0:.1f}s"
+                    )
+                    if args.seconds and time.monotonic() - t0 > args.seconds:
+                        stop_reason = "seconds limit reached"
+                        break
+                    if args.fly and pilot.stalled():
+                        run_log.warn(
+                            f"no gate progress for {STALL_TIMEOUT_S:.0f}s — stopping",
+                            component="gate",
+                        )
+                        stop_reason = "stall timeout"
+                        break
+                    slack = period - (time.monotonic() - loop)
+                    if slack > 0:
+                        time.sleep(slack)
+            except KeyboardInterrupt:
+                stop_reason = "interrupted"
+                run_log.warn("interrupted (Ctrl+C)")
+            except Exception as exc:
+                stop_reason = f"exception: {type(exc).__name__}"
+                raise
+            finally:
+                run_log.info(f"stop reason: {stop_reason}")
+                pilot.report(log=run_log)
+                csv_file.flush()
+                run_log.info(f"csv -> {csv_path}")
+    finally:
+        for key in ("ts_loop", "mavlink_rx", "vision_rx"):
+            component = comps.get(key)
+            if component is not None and hasattr(component, "get_thread_for_join"):
+                component.get_thread_for_join().join(timeout=2.0)
 
 
 def main():
@@ -274,83 +409,14 @@ def main():
     ap.add_argument("--n-gates", type=int, default=N_GATES)
     args = ap.parse_args()
 
-    os.environ.setdefault("AUTO_PILOT", "none")
-    from simulator.setup import setup_components
-
-    shared: dict = {}
-    boot_ms = int(time.time() * 1000)
-    comps = setup_components(shared, boot_ms, "127.0.0.1", 14550)
-    controller = comps["controller"]
-
-    policy = None if args.observe else load_policy(args.policy)
-
-    os.makedirs(LOG_DIR, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(
-        LOG_DIR, f"vq2_{'obs' if args.observe else 'fly'}_{stamp}.csv"
-    )
-    fh = open(log_path, "w", newline="")
-    writer = csv.writer(fh)
-    writer.writerow(
-        ["t", "gate", "roll", "pitch", "yaw", "thrust"]
-        + [
-            f"{k}{i}"
-            for k, sl in vo.OBS_LAYOUT.items()
-            for i in range(sl.stop - sl.start)
-        ]
-    )
-
-    pilot = VQ2Pilot(
-        shared,
-        None if args.observe else controller,
-        policy=policy,
-        n_gates=args.n_gates,
-        log=writer,
-    )
-    controller.pilot = pilot
-    controller.control_hz = CONTROL_HZ
-
-    if args.observe:
-        print("[vq2] OBSERVE mode — not arming, not commanding.", flush=True)
-    else:
-        print(
-            f"[vq2] FLY mode — signs=({SIGN_ROLL:+.0f},{SIGN_PITCH:+.0f},"
-            f"{SIGN_YAW:+.0f}) rate_gain={RATE_GAIN} clip=±{RATE_CLIP} rad/s "
-            f"thrust=[{THRUST_MIN},{THRUST_MAX}] @ {CONTROL_HZ:.0f} Hz",
-            flush=True,
-        )
-        controller.arm()
-
-    t0 = time.monotonic()
-    period = 1.0 / CONTROL_HZ
+    run_log = RunnerLog(tag="vq2", log_dir=LOG_DIR)
     try:
-        while True:
-            loop = time.monotonic()
-            if args.observe:
-                pilot.tick()  # builds + logs the observation, commands nothing
-            else:
-                controller.update()  # calls pilot.tick(), then sends the setpoint
-            if args.seconds and (time.monotonic() - t0) > args.seconds:
-                break
-            if args.fly and pilot.stalled():
-                print(
-                    f"[vq2] no gate progress for {STALL_TIMEOUT_S:.0f}s — stopping",
-                    flush=True,
-                )
-                break
-            slack = period - (time.monotonic() - loop)
-            if slack > 0:
-                time.sleep(slack)
-    except KeyboardInterrupt:
-        print("\n[vq2] interrupted", flush=True)
+        _run(args, run_log)
+    except Exception as exc:  # noqa: BLE001 - capture + re-raise after logging
+        run_log.fatal(f"unhandled VQ2 runner exception: {exc}")
+        raise
     finally:
-        pilot.report()
-        fh.close()
-        print(f"[vq2] log -> {log_path}", flush=True)
-        for k in ("ts_loop", "mavlink_rx", "vision_rx"):
-            c = comps.get(k)
-            if c is not None and hasattr(c, "get_thread_for_join"):
-                c.get_thread_for_join().join(timeout=2.0)
+        run_log.close()
 
 
 if __name__ == "__main__":
