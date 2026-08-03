@@ -1,7 +1,7 @@
 """Module 4 — Corner detection + PnP pose estimation.
 
 From a gate segmentation mask: extract the 4 opening corners, solve PnP
-against the known square gate (side spec.GATE_SIZE_M) using the fixed
+against the known 1.5 m square opening using the fixed
 intrinsics, and produce a
 vision-based pose estimate:
 
@@ -26,10 +26,10 @@ from rl.core import spec
 # Order matches the canonical image order TL, TR, BR, BL.
 _OBJ = np.array(
     [
-        [-spec.GATE_HALF, +spec.GATE_HALF, 0.0],
-        [+spec.GATE_HALF, +spec.GATE_HALF, 0.0],
-        [+spec.GATE_HALF, -spec.GATE_HALF, 0.0],
-        [-spec.GATE_HALF, -spec.GATE_HALF, 0.0],
+        [-spec.GATE_OPENING_HALF, +spec.GATE_OPENING_HALF, 0.0],
+        [+spec.GATE_OPENING_HALF, +spec.GATE_OPENING_HALF, 0.0],
+        [+spec.GATE_OPENING_HALF, -spec.GATE_OPENING_HALF, 0.0],
+        [-spec.GATE_OPENING_HALF, -spec.GATE_OPENING_HALF, 0.0],
     ],
     dtype=np.float64,
 )

@@ -51,7 +51,7 @@ def project_gate_mask(
     for g in gate_map:
         gpos = np.asarray(g["pos"], dtype=np.float64)
         gquat = np.asarray(g["quat"], dtype=np.float64)
-        corners = spec.gate_corners_world(gpos, gquat)
+        corners = spec.gate_opening_corners_world(gpos, gquat)
         px, in_front = spec.project(corners, dpos, dq)
         if int(in_front.sum()) < min_corners_front:
             continue
