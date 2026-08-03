@@ -57,7 +57,7 @@ def make_synthetic_gate(seed: int = 0):
             ``pnp.estimate_pose`` expects, so it yields a valid pose.
     """
     drone_pos, drone_quat, gate_pos, gate_quat = _scene(seed)
-    corners_world = spec.gate_corners_world(gate_pos, gate_quat)
+    corners_world = spec.gate_opening_corners_world(gate_pos, gate_quat)
     px, in_front = spec.project(corners_world, drone_pos, drone_quat)
     if not bool(in_front.all()):
         raise RuntimeError("synthetic gate corners fell behind the camera")
