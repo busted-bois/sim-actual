@@ -1,0 +1,2188 @@
+{
+ "schema": 2,
+ "run_id": "20260802_212714",
+ "target": "control-flight",
+ "entry": "auto_gp.py",
+ "pilot": "gp",
+ "git": {
+  "sha": "1f29858",
+  "branch": "classical+blueline",
+  "dirty": true,
+  "diff_sha": "8800e6cedcc1",
+  "untracked": [
+   "flightlab/fitness.py",
+   "flightlab/flight_runner.py",
+   "flightlab/tuner.py",
+   "rl/log_manual_demos.py",
+   "scripts/gp_tune.py",
+   "tests/fake_flight.py",
+   "tests/test_fitness.py",
+   "tests/test_gp_tune.py",
+   "tests/test_log_manual_demos.py"
+  ],
+  "submodule": "a7bd580a14dc"
+ },
+ "config": {
+  "env": {
+   "AUTO_PILOT": "gp",
+   "GATE1_TIMEOUT_S": "20",
+   "GATE_PROGRESS_TIMEOUT_S": "10"
+  },
+  "argv": [
+   "auto_gp.py"
+  ]
+ },
+ "track": null,
+ "log_columns": [
+  "t",
+  "roll",
+  "pitch",
+  "yaw",
+  "up",
+  "upset",
+  "cmd_roll_deg",
+  "cmd_pitch_deg",
+  "cmd_yaw_deg",
+  "thrust",
+  "bx",
+  "by",
+  "bz",
+  "blend",
+  "bearing_deg",
+  "desired_roll",
+  "d_lat",
+  "d_vert",
+  "vY_imu",
+  "vY_fused",
+  "vD",
+  "vX",
+  "v_target",
+  "pitch_des",
+  "elev_i",
+  "elev_err",
+  "agl",
+  "turn_ff",
+  "reliable",
+  "vision_valid",
+  "elev_fresh",
+  "is_new_d",
+  "bl_found",
+  "bl_hdg",
+  "bl_conf",
+  "bl_hdg_valid",
+  "bl_span",
+  "bl_paired",
+  "bl_cy",
+  "bl_gap",
+  "src_switch",
+  "source",
+  "infer_ms",
+  "mode",
+  "gate",
+  "gate_id",
+  "peek_side",
+  "peek_strength",
+  "peek_active",
+  "occ_gap",
+  "collision"
+ ],
+ "started_utc": "2026-08-03T04:27:14Z",
+ "ended_utc": "2026-08-03T05:57:13Z",
+ "video": {
+  "fps_nominal": 30.0,
+  "fps_actual": 14.691,
+  "frames": 79107,
+  "width": 640,
+  "height": 360,
+  "first_frame_unix": 1785731246.791,
+  "first_frame_overlay_s": 0.01883673667907715,
+  "bytes": 1903307280
+ },
+ "attempts": [
+  {
+   "n": 1,
+   "telemetry": "gp_log_20260802_212714_a1.csv",
+   "t_start_unix": 1785731255.941,
+   "t_end_unix": 1785731339.541,
+   "gates_passed": 2,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 2,
+   "telemetry": "gp_log_20260802_212714_a2.csv",
+   "t_start_unix": 1785731343.904,
+   "t_end_unix": 1785731368.681,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 3,
+   "telemetry": "gp_log_20260802_212714_a3.csv",
+   "t_start_unix": 1785731373.232,
+   "t_end_unix": 1785731397.774,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 4,
+   "telemetry": "gp_log_20260802_212714_a4.csv",
+   "t_start_unix": 1785731402.304,
+   "t_end_unix": 1785731427.092,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 5,
+   "telemetry": "gp_log_20260802_212714_a5.csv",
+   "t_start_unix": 1785731431.643,
+   "t_end_unix": 1785731448.39,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 6,
+   "telemetry": "gp_log_20260802_212714_a6.csv",
+   "t_start_unix": 1785731452.936,
+   "t_end_unix": 1785731480.959,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 7,
+   "telemetry": "gp_log_20260802_212714_a7.csv",
+   "t_start_unix": 1785731485.008,
+   "t_end_unix": 1785731515.325,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 8,
+   "telemetry": "gp_log_20260802_212714_a8.csv",
+   "t_start_unix": 1785731519.364,
+   "t_end_unix": 1785731543.873,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 9,
+   "telemetry": "gp_log_20260802_212714_a9.csv",
+   "t_start_unix": 1785731547.945,
+   "t_end_unix": 1785731569.447,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 10,
+   "telemetry": "gp_log_20260802_212714_a10.csv",
+   "t_start_unix": 1785731573.989,
+   "t_end_unix": 1785731591.253,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 11,
+   "telemetry": "gp_log_20260802_212714_a11.csv",
+   "t_start_unix": 1785731595.809,
+   "t_end_unix": 1785731624.596,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 12,
+   "telemetry": "gp_log_20260802_212714_a12.csv",
+   "t_start_unix": 1785731629.133,
+   "t_end_unix": 1785731646.899,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 13,
+   "telemetry": "gp_log_20260802_212714_a13.csv",
+   "t_start_unix": 1785731651.449,
+   "t_end_unix": 1785731667.968,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 14,
+   "telemetry": "gp_log_20260802_212714_a14.csv",
+   "t_start_unix": 1785731671.995,
+   "t_end_unix": 1785731697.574,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 15,
+   "telemetry": "gp_log_20260802_212714_a15.csv",
+   "t_start_unix": 1785731702.069,
+   "t_end_unix": 1785731729.887,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 16,
+   "telemetry": "gp_log_20260802_212714_a16.csv",
+   "t_start_unix": 1785731733.919,
+   "t_end_unix": 1785731758.941,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 17,
+   "telemetry": "gp_log_20260802_212714_a17.csv",
+   "t_start_unix": 1785731762.998,
+   "t_end_unix": 1785731787.248,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 18,
+   "telemetry": "gp_log_20260802_212714_a18.csv",
+   "t_start_unix": 1785731791.312,
+   "t_end_unix": 1785731807.795,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 19,
+   "telemetry": "gp_log_20260802_212714_a19.csv",
+   "t_start_unix": 1785731811.838,
+   "t_end_unix": 1785731833.375,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 20,
+   "telemetry": "gp_log_20260802_212714_a20.csv",
+   "t_start_unix": 1785731837.933,
+   "t_end_unix": 1785731854.697,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 21,
+   "telemetry": "gp_log_20260802_212714_a21.csv",
+   "t_start_unix": 1785731859.234,
+   "t_end_unix": 1785731880.245,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 22,
+   "telemetry": "gp_log_20260802_212714_a22.csv",
+   "t_start_unix": 1785731884.778,
+   "t_end_unix": 1785731909.544,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 23,
+   "telemetry": "gp_log_20260802_212714_a23.csv",
+   "t_start_unix": 1785731913.614,
+   "t_end_unix": 1785731939.657,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 24,
+   "telemetry": "gp_log_20260802_212714_a24.csv",
+   "t_start_unix": 1785731943.689,
+   "t_end_unix": 1785731960.211,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 25,
+   "telemetry": "gp_log_20260802_212714_a25.csv",
+   "t_start_unix": 1785731964.756,
+   "t_end_unix": 1785731993.563,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 26,
+   "telemetry": "gp_log_20260802_212714_a26.csv",
+   "t_start_unix": 1785731997.608,
+   "t_end_unix": 1785732019.155,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 27,
+   "telemetry": "gp_log_20260802_212714_a27.csv",
+   "t_start_unix": 1785732023.154,
+   "t_end_unix": 1785732048.189,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 28,
+   "telemetry": "gp_log_20260802_212714_a28.csv",
+   "t_start_unix": 1785732052.238,
+   "t_end_unix": 1785732073.775,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 29,
+   "telemetry": "gp_log_20260802_212714_a29.csv",
+   "t_start_unix": 1785732078.296,
+   "t_end_unix": 1785732099.356,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 30,
+   "telemetry": "gp_log_20260802_212714_a30.csv",
+   "t_start_unix": 1785732103.354,
+   "t_end_unix": 1785732124.928,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 31,
+   "telemetry": "gp_log_20260802_212714_a31.csv",
+   "t_start_unix": 1785732128.928,
+   "t_end_unix": 1785732145.185,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 32,
+   "telemetry": "gp_log_20260802_212714_a32.csv",
+   "t_start_unix": 1785732149.732,
+   "t_end_unix": 1785732170.743,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 33,
+   "telemetry": "gp_log_20260802_212714_a33.csv",
+   "t_start_unix": 1785732174.79,
+   "t_end_unix": 1785732196.309,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 34,
+   "telemetry": "gp_log_20260802_212714_a34.csv",
+   "t_start_unix": 1785732200.852,
+   "t_end_unix": 1785732221.876,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 35,
+   "telemetry": "gp_log_20260802_212714_a35.csv",
+   "t_start_unix": 1785732225.916,
+   "t_end_unix": 1785732247.413,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 36,
+   "telemetry": "gp_log_20260802_212714_a36.csv",
+   "t_start_unix": 1785732251.982,
+   "t_end_unix": 1785732272.962,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 37,
+   "telemetry": "gp_log_20260802_212714_a37.csv",
+   "t_start_unix": 1785732277.06,
+   "t_end_unix": 1785732298.507,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 38,
+   "telemetry": "gp_log_20260802_212714_a38.csv",
+   "t_start_unix": 1785732302.62,
+   "t_end_unix": 1785732319.387,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 39,
+   "telemetry": "gp_log_20260802_212714_a39.csv",
+   "t_start_unix": 1785732323.437,
+   "t_end_unix": 1785732344.975,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 40,
+   "telemetry": "gp_log_20260802_212714_a40.csv",
+   "t_start_unix": 1785732349.495,
+   "t_end_unix": 1785732370.572,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 41,
+   "telemetry": "gp_log_20260802_212714_a41.csv",
+   "t_start_unix": 1785732375.05,
+   "t_end_unix": 1785732396.135,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 42,
+   "telemetry": "gp_log_20260802_212714_a42.csv",
+   "t_start_unix": 1785732400.613,
+   "t_end_unix": 1785732421.671,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 43,
+   "telemetry": "gp_log_20260802_212714_a43.csv",
+   "t_start_unix": 1785732426.182,
+   "t_end_unix": 1785732447.243,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 44,
+   "telemetry": "gp_log_20260802_212714_a44.csv",
+   "t_start_unix": 1785732451.746,
+   "t_end_unix": 1785732472.817,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 45,
+   "telemetry": "gp_log_20260802_212714_a45.csv",
+   "t_start_unix": 1785732477.313,
+   "t_end_unix": 1785732498.403,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 46,
+   "telemetry": "gp_log_20260802_212714_a46.csv",
+   "t_start_unix": 1785732502.89,
+   "t_end_unix": 1785732523.964,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 47,
+   "telemetry": "gp_log_20260802_212714_a47.csv",
+   "t_start_unix": 1785732528.448,
+   "t_end_unix": 1785732549.545,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 48,
+   "telemetry": "gp_log_20260802_212714_a48.csv",
+   "t_start_unix": 1785732554.0,
+   "t_end_unix": 1785732570.786,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 49,
+   "telemetry": "gp_log_20260802_212714_a49.csv",
+   "t_start_unix": 1785732575.319,
+   "t_end_unix": 1785732596.388,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 50,
+   "telemetry": "gp_log_20260802_212714_a50.csv",
+   "t_start_unix": 1785732600.395,
+   "t_end_unix": 1785732621.984,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 51,
+   "telemetry": "gp_log_20260802_212714_a51.csv",
+   "t_start_unix": 1785732626.44,
+   "t_end_unix": 1785732647.561,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 52,
+   "telemetry": "gp_log_20260802_212714_a52.csv",
+   "t_start_unix": 1785732652.017,
+   "t_end_unix": 1785732673.113,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 53,
+   "telemetry": "gp_log_20260802_212714_a53.csv",
+   "t_start_unix": 1785732677.081,
+   "t_end_unix": 1785732697.136,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 54,
+   "telemetry": "gp_log_20260802_212714_a54.csv",
+   "t_start_unix": 1785732701.134,
+   "t_end_unix": 1785732722.707,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 55,
+   "telemetry": "gp_log_20260802_212714_a55.csv",
+   "t_start_unix": 1785732726.719,
+   "t_end_unix": 1785732748.284,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 56,
+   "telemetry": "gp_log_20260802_212714_a56.csv",
+   "t_start_unix": 1785732752.771,
+   "t_end_unix": 1785732773.86,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 57,
+   "telemetry": "gp_log_20260802_212714_a57.csv",
+   "t_start_unix": 1785732778.325,
+   "t_end_unix": 1785732799.416,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 58,
+   "telemetry": "gp_log_20260802_212714_a58.csv",
+   "t_start_unix": 1785732803.389,
+   "t_end_unix": 1785732823.916,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 59,
+   "telemetry": "gp_log_20260802_212714_a59.csv",
+   "t_start_unix": 1785732828.47,
+   "t_end_unix": 1785732849.496,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 60,
+   "telemetry": "gp_log_20260802_212714_a60.csv",
+   "t_start_unix": 1785732853.522,
+   "t_end_unix": 1785732875.065,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 61,
+   "telemetry": "gp_log_20260802_212714_a61.csv",
+   "t_start_unix": 1785732879.603,
+   "t_end_unix": 1785732900.652,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 62,
+   "telemetry": "gp_log_20260802_212714_a62.csv",
+   "t_start_unix": 1785732904.652,
+   "t_end_unix": 1785732926.234,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 63,
+   "telemetry": "gp_log_20260802_212714_a63.csv",
+   "t_start_unix": 1785732930.218,
+   "t_end_unix": 1785732946.758,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 64,
+   "telemetry": "gp_log_20260802_212714_a64.csv",
+   "t_start_unix": 1785732951.276,
+   "t_end_unix": 1785732972.359,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 65,
+   "telemetry": "gp_log_20260802_212714_a65.csv",
+   "t_start_unix": 1785732976.342,
+   "t_end_unix": 1785732997.929,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 66,
+   "telemetry": "gp_log_20260802_212714_a66.csv",
+   "t_start_unix": 1785733002.413,
+   "t_end_unix": 1785733023.504,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 67,
+   "telemetry": "gp_log_20260802_212714_a67.csv",
+   "t_start_unix": 1785733027.51,
+   "t_end_unix": 1785733044.742,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 68,
+   "telemetry": "gp_log_20260802_212714_a68.csv",
+   "t_start_unix": 1785733048.801,
+   "t_end_unix": 1785733065.541,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 69,
+   "telemetry": "gp_log_20260802_212714_a69.csv",
+   "t_start_unix": 1785733070.12,
+   "t_end_unix": 1785733091.113,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 70,
+   "telemetry": "gp_log_20260802_212714_a70.csv",
+   "t_start_unix": 1785733095.163,
+   "t_end_unix": 1785733116.731,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 71,
+   "telemetry": "gp_log_20260802_212714_a71.csv",
+   "t_start_unix": 1785733120.74,
+   "t_end_unix": 1785733137.768,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 72,
+   "telemetry": "gp_log_20260802_212714_a72.csv",
+   "t_start_unix": 1785733141.776,
+   "t_end_unix": 1785733163.34,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 73,
+   "telemetry": "gp_log_20260802_212714_a73.csv",
+   "t_start_unix": 1785733167.855,
+   "t_end_unix": 1785733183.852,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 74,
+   "telemetry": "gp_log_20260802_212714_a74.csv",
+   "t_start_unix": 1785733187.897,
+   "t_end_unix": 1785733209.433,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 75,
+   "telemetry": "gp_log_20260802_212714_a75.csv",
+   "t_start_unix": 1785733213.466,
+   "t_end_unix": 1785733235.017,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 76,
+   "telemetry": "gp_log_20260802_212714_a76.csv",
+   "t_start_unix": 1785733239.548,
+   "t_end_unix": 1785733260.597,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 77,
+   "telemetry": "gp_log_20260802_212714_a77.csv",
+   "t_start_unix": 1785733264.614,
+   "t_end_unix": 1785733280.886,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 78,
+   "telemetry": "gp_log_20260802_212714_a78.csv",
+   "t_start_unix": 1785733285.423,
+   "t_end_unix": 1785733306.46,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 79,
+   "telemetry": "gp_log_20260802_212714_a79.csv",
+   "t_start_unix": 1785733310.98,
+   "t_end_unix": 1785733332.013,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 80,
+   "telemetry": "gp_log_20260802_212714_a80.csv",
+   "t_start_unix": 1785733336.044,
+   "t_end_unix": 1785733357.614,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 81,
+   "telemetry": "gp_log_20260802_212714_a81.csv",
+   "t_start_unix": 1785733362.099,
+   "t_end_unix": 1785733383.188,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 82,
+   "telemetry": "gp_log_20260802_212714_a82.csv",
+   "t_start_unix": 1785733387.658,
+   "t_end_unix": 1785733408.741,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 83,
+   "telemetry": "gp_log_20260802_212714_a83.csv",
+   "t_start_unix": 1785733412.737,
+   "t_end_unix": 1785733441.046,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 84,
+   "telemetry": "gp_log_20260802_212714_a84.csv",
+   "t_start_unix": 1785733445.078,
+   "t_end_unix": 1785733462.068,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 85,
+   "telemetry": "gp_log_20260802_212714_a85.csv",
+   "t_start_unix": 1785733466.611,
+   "t_end_unix": 1785733487.646,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 86,
+   "telemetry": "gp_log_20260802_212714_a86.csv",
+   "t_start_unix": 1785733492.196,
+   "t_end_unix": 1785733508.96,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 87,
+   "telemetry": "gp_log_20260802_212714_a87.csv",
+   "t_start_unix": 1785733513.497,
+   "t_end_unix": 1785733534.538,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 88,
+   "telemetry": "gp_log_20260802_212714_a88.csv",
+   "t_start_unix": 1785733538.545,
+   "t_end_unix": 1785733555.285,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 89,
+   "telemetry": "gp_log_20260802_212714_a89.csv",
+   "t_start_unix": 1785733559.351,
+   "t_end_unix": 1785733575.865,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 90,
+   "telemetry": "gp_log_20260802_212714_a90.csv",
+   "t_start_unix": 1785733579.909,
+   "t_end_unix": 1785733601.443,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 91,
+   "telemetry": "gp_log_20260802_212714_a91.csv",
+   "t_start_unix": 1785733605.963,
+   "t_end_unix": 1785733627.01,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 92,
+   "telemetry": "gp_log_20260802_212714_a92.csv",
+   "t_start_unix": 1785733631.539,
+   "t_end_unix": 1785733652.582,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 93,
+   "telemetry": "gp_log_20260802_212714_a93.csv",
+   "t_start_unix": 1785733656.587,
+   "t_end_unix": 1785733678.127,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 94,
+   "telemetry": "gp_log_20260802_212714_a94.csv",
+   "t_start_unix": 1785733682.684,
+   "t_end_unix": 1785733701.433,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 95,
+   "telemetry": "gp_log_20260802_212714_a95.csv",
+   "t_start_unix": 1785733705.96,
+   "t_end_unix": 1785733727.013,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 96,
+   "telemetry": "gp_log_20260802_212714_a96.csv",
+   "t_start_unix": 1785733731.536,
+   "t_end_unix": 1785733757.304,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 97,
+   "telemetry": "gp_log_20260802_212714_a97.csv",
+   "t_start_unix": 1785733761.361,
+   "t_end_unix": 1785733782.872,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 98,
+   "telemetry": "gp_log_20260802_212714_a98.csv",
+   "t_start_unix": 1785733787.453,
+   "t_end_unix": 1785733805.226,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 99,
+   "telemetry": "gp_log_20260802_212714_a99.csv",
+   "t_start_unix": 1785733809.224,
+   "t_end_unix": 1785733830.786,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 100,
+   "telemetry": "gp_log_20260802_212714_a100.csv",
+   "t_start_unix": 1785733835.304,
+   "t_end_unix": 1785733856.368,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 101,
+   "telemetry": "gp_log_20260802_212714_a101.csv",
+   "t_start_unix": 1785733860.882,
+   "t_end_unix": 1785733881.953,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 102,
+   "telemetry": "gp_log_20260802_212714_a102.csv",
+   "t_start_unix": 1785733886.436,
+   "t_end_unix": 1785733955.21,
+   "gates_passed": 1,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 103,
+   "telemetry": "gp_log_20260802_212714_a103.csv",
+   "t_start_unix": 1785733959.609,
+   "t_end_unix": 1785733980.783,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 104,
+   "telemetry": "gp_log_20260802_212714_a104.csv",
+   "t_start_unix": 1785733984.681,
+   "t_end_unix": 1785734006.351,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 105,
+   "telemetry": "gp_log_20260802_212714_a105.csv",
+   "t_start_unix": 1785734010.238,
+   "t_end_unix": 1785734031.927,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 106,
+   "telemetry": "gp_log_20260802_212714_a106.csv",
+   "t_start_unix": 1785734035.823,
+   "t_end_unix": 1785734057.494,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 107,
+   "telemetry": "gp_log_20260802_212714_a107.csv",
+   "t_start_unix": 1785734061.399,
+   "t_end_unix": 1785734078.191,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 108,
+   "telemetry": "gp_log_20260802_212714_a108.csv",
+   "t_start_unix": 1785734082.681,
+   "t_end_unix": 1785734103.769,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 109,
+   "telemetry": "gp_log_20260802_212714_a109.csv",
+   "t_start_unix": 1785734108.285,
+   "t_end_unix": 1785734127.024,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 110,
+   "telemetry": "gp_log_20260802_212714_a110.csv",
+   "t_start_unix": 1785734131.057,
+   "t_end_unix": 1785734152.657,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 111,
+   "telemetry": "gp_log_20260802_212714_a111.csv",
+   "t_start_unix": 1785734156.642,
+   "t_end_unix": 1785734181.188,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 112,
+   "telemetry": "gp_log_20260802_212714_a112.csv",
+   "t_start_unix": 1785734185.186,
+   "t_end_unix": 1785734206.754,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 113,
+   "telemetry": "gp_log_20260802_212714_a113.csv",
+   "t_start_unix": 1785734211.27,
+   "t_end_unix": 1785734228.052,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 114,
+   "telemetry": "gp_log_20260802_212714_a114.csv",
+   "t_start_unix": 1785734232.073,
+   "t_end_unix": 1785734249.326,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 115,
+   "telemetry": "gp_log_20260802_212714_a115.csv",
+   "t_start_unix": 1785734253.376,
+   "t_end_unix": 1785734287.402,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 116,
+   "telemetry": "gp_log_20260802_212714_a116.csv",
+   "t_start_unix": 1785734291.952,
+   "t_end_unix": 1785734313.027,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 117,
+   "telemetry": "gp_log_20260802_212714_a117.csv",
+   "t_start_unix": 1785734317.545,
+   "t_end_unix": 1785734334.579,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 118,
+   "telemetry": "gp_log_20260802_212714_a118.csv",
+   "t_start_unix": 1785734338.607,
+   "t_end_unix": 1785734355.318,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 119,
+   "telemetry": "gp_log_20260802_212714_a119.csv",
+   "t_start_unix": 1785734359.896,
+   "t_end_unix": 1785734380.879,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 120,
+   "telemetry": "gp_log_20260802_212714_a120.csv",
+   "t_start_unix": 1785734384.959,
+   "t_end_unix": 1785734406.488,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 121,
+   "telemetry": "gp_log_20260802_212714_a121.csv",
+   "t_start_unix": 1785734411.04,
+   "t_end_unix": 1785734428.559,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 122,
+   "telemetry": "gp_log_20260802_212714_a122.csv",
+   "t_start_unix": 1785734433.073,
+   "t_end_unix": 1785734454.148,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 123,
+   "telemetry": "gp_log_20260802_212714_a123.csv",
+   "t_start_unix": 1785734458.651,
+   "t_end_unix": 1785734487.701,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 124,
+   "telemetry": "gp_log_20260802_212714_a124.csv",
+   "t_start_unix": 1785734492.259,
+   "t_end_unix": 1785734521.253,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 125,
+   "telemetry": "gp_log_20260802_212714_a125.csv",
+   "t_start_unix": 1785734525.823,
+   "t_end_unix": 1785734546.859,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 126,
+   "telemetry": "gp_log_20260802_212714_a126.csv",
+   "t_start_unix": 1785734550.88,
+   "t_end_unix": 1785734567.402,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 127,
+   "telemetry": "gp_log_20260802_212714_a127.csv",
+   "t_start_unix": 1785734571.935,
+   "t_end_unix": 1785734596.727,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 128,
+   "telemetry": "gp_log_20260802_212714_a128.csv",
+   "t_start_unix": 1785734600.767,
+   "t_end_unix": 1785734625.819,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 129,
+   "telemetry": "gp_log_20260802_212714_a129.csv",
+   "t_start_unix": 1785734629.852,
+   "t_end_unix": 1785734646.346,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 130,
+   "telemetry": "gp_log_20260802_212714_a130.csv",
+   "t_start_unix": 1785734650.903,
+   "t_end_unix": 1785734674.668,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 131,
+   "telemetry": "gp_log_20260802_212714_a131.csv",
+   "t_start_unix": 1785734678.731,
+   "t_end_unix": 1785734696.015,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 132,
+   "telemetry": "gp_log_20260802_212714_a132.csv",
+   "t_start_unix": 1785734700.031,
+   "t_end_unix": 1785734716.594,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 133,
+   "telemetry": "gp_log_20260802_212714_a133.csv",
+   "t_start_unix": 1785734720.576,
+   "t_end_unix": 1785734737.075,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 134,
+   "telemetry": "gp_log_20260802_212714_a134.csv",
+   "t_start_unix": 1785734741.144,
+   "t_end_unix": 1785734766.939,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 135,
+   "telemetry": "gp_log_20260802_212714_a135.csv",
+   "t_start_unix": 1785734770.925,
+   "t_end_unix": 1785734787.707,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 136,
+   "telemetry": "gp_log_20260802_212714_a136.csv",
+   "t_start_unix": 1785734791.737,
+   "t_end_unix": 1785734808.004,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 137,
+   "telemetry": "gp_log_20260802_212714_a137.csv",
+   "t_start_unix": 1785734812.538,
+   "t_end_unix": 1785734833.587,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 138,
+   "telemetry": "gp_log_20260802_212714_a138.csv",
+   "t_start_unix": 1785734837.589,
+   "t_end_unix": 1785734859.218,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 139,
+   "telemetry": "gp_log_20260802_212714_a139.csv",
+   "t_start_unix": 1785734863.653,
+   "t_end_unix": 1785734884.81,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 140,
+   "telemetry": "gp_log_20260802_212714_a140.csv",
+   "t_start_unix": 1785734888.709,
+   "t_end_unix": 1785734914.015,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 141,
+   "telemetry": "gp_log_20260802_212714_a141.csv",
+   "t_start_unix": 1785734918.043,
+   "t_end_unix": 1785734934.812,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 142,
+   "telemetry": "gp_log_20260802_212714_a142.csv",
+   "t_start_unix": 1785734938.824,
+   "t_end_unix": 1785734955.339,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 143,
+   "telemetry": "gp_log_20260802_212714_a143.csv",
+   "t_start_unix": 1785734959.393,
+   "t_end_unix": 1785734991.252,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 144,
+   "telemetry": "gp_log_20260802_212714_a144.csv",
+   "t_start_unix": 1785734995.764,
+   "t_end_unix": 1785735021.302,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 145,
+   "telemetry": "gp_log_20260802_212714_a145.csv",
+   "t_start_unix": 1785735025.308,
+   "t_end_unix": 1785735046.92,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 146,
+   "telemetry": "gp_log_20260802_212714_a146.csv",
+   "t_start_unix": 1785735051.411,
+   "t_end_unix": 1785735079.648,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 147,
+   "telemetry": "gp_log_20260802_212714_a147.csv",
+   "t_start_unix": 1785735084.237,
+   "t_end_unix": 1785735105.249,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 148,
+   "telemetry": "gp_log_20260802_212714_a148.csv",
+   "t_start_unix": 1785735109.77,
+   "t_end_unix": 1785735134.319,
+   "gates_passed": 2,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 149,
+   "telemetry": "gp_log_20260802_212714_a149.csv",
+   "t_start_unix": 1785735138.315,
+   "t_end_unix": 1785735167.645,
+   "gates_passed": 3,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 150,
+   "telemetry": "gp_log_20260802_212714_a150.csv",
+   "t_start_unix": 1785735171.673,
+   "t_end_unix": 1785735193.266,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 151,
+   "telemetry": "gp_log_20260802_212714_a151.csv",
+   "t_start_unix": 1785735197.235,
+   "t_end_unix": 1785735218.875,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 152,
+   "telemetry": "gp_log_20260802_212714_a152.csv",
+   "t_start_unix": 1785735222.801,
+   "t_end_unix": 1785735239.628,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 153,
+   "telemetry": "gp_log_20260802_212714_a153.csv",
+   "t_start_unix": 1785735244.111,
+   "t_end_unix": 1785735265.217,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 154,
+   "telemetry": "gp_log_20260802_212714_a154.csv",
+   "t_start_unix": 1785735269.67,
+   "t_end_unix": 1785735286.496,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 155,
+   "telemetry": "gp_log_20260802_212714_a155.csv",
+   "t_start_unix": 1785735290.482,
+   "t_end_unix": 1785735312.202,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 156,
+   "telemetry": "gp_log_20260802_212714_a156.csv",
+   "t_start_unix": 1785735316.321,
+   "t_end_unix": 1785735333.423,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 157,
+   "telemetry": "gp_log_20260802_212714_a157.csv",
+   "t_start_unix": 1785735337.339,
+   "t_end_unix": 1785735358.995,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 158,
+   "telemetry": "gp_log_20260802_212714_a158.csv",
+   "t_start_unix": 1785735363.153,
+   "t_end_unix": 1785735381.448,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 159,
+   "telemetry": "gp_log_20260802_212714_a159.csv",
+   "t_start_unix": 1785735385.523,
+   "t_end_unix": 1785735407.049,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 160,
+   "telemetry": "gp_log_20260802_212714_a160.csv",
+   "t_start_unix": 1785735411.073,
+   "t_end_unix": 1785735432.745,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 161,
+   "telemetry": "gp_log_20260802_212714_a161.csv",
+   "t_start_unix": 1785735436.934,
+   "t_end_unix": 1785735458.348,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 162,
+   "telemetry": "gp_log_20260802_212714_a162.csv",
+   "t_start_unix": 1785735462.449,
+   "t_end_unix": 1785735481.491,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 163,
+   "telemetry": "gp_log_20260802_212714_a163.csv",
+   "t_start_unix": 1785735486.07,
+   "t_end_unix": 1785735507.191,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 164,
+   "telemetry": "gp_log_20260802_212714_a164.csv",
+   "t_start_unix": 1785735511.291,
+   "t_end_unix": 1785735532.817,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 165,
+   "telemetry": "gp_log_20260802_212714_a165.csv",
+   "t_start_unix": 1785735536.897,
+   "t_end_unix": 1785735558.452,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 166,
+   "telemetry": "gp_log_20260802_212714_a166.csv",
+   "t_start_unix": 1785735562.507,
+   "t_end_unix": 1785735584.086,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 167,
+   "telemetry": "gp_log_20260802_212714_a167.csv",
+   "t_start_unix": 1785735588.287,
+   "t_end_unix": 1785735609.688,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 168,
+   "telemetry": "gp_log_20260802_212714_a168.csv",
+   "t_start_unix": 1785735614.346,
+   "t_end_unix": 1785735635.451,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 169,
+   "telemetry": "gp_log_20260802_212714_a169.csv",
+   "t_start_unix": 1785735639.411,
+   "t_end_unix": 1785735661.285,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 170,
+   "telemetry": "gp_log_20260802_212714_a170.csv",
+   "t_start_unix": 1785735665.491,
+   "t_end_unix": 1785735686.848,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 171,
+   "telemetry": "gp_log_20260802_212714_a171.csv",
+   "t_start_unix": 1785735691.035,
+   "t_end_unix": 1785735712.508,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 172,
+   "telemetry": "gp_log_20260802_212714_a172.csv",
+   "t_start_unix": 1785735716.679,
+   "t_end_unix": 1785735738.192,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 173,
+   "telemetry": "gp_log_20260802_212714_a173.csv",
+   "t_start_unix": 1785735742.716,
+   "t_end_unix": 1785735763.865,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 174,
+   "telemetry": "gp_log_20260802_212714_a174.csv",
+   "t_start_unix": 1785735767.974,
+   "t_end_unix": 1785735789.509,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 175,
+   "telemetry": "gp_log_20260802_212714_a175.csv",
+   "t_start_unix": 1785735794.111,
+   "t_end_unix": 1785735815.142,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 176,
+   "telemetry": "gp_log_20260802_212714_a176.csv",
+   "t_start_unix": 1785735819.582,
+   "t_end_unix": 1785735840.826,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 177,
+   "telemetry": "gp_log_20260802_212714_a177.csv",
+   "t_start_unix": 1785735845.004,
+   "t_end_unix": 1785735866.368,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 178,
+   "telemetry": "gp_log_20260802_212714_a178.csv",
+   "t_start_unix": 1785735870.456,
+   "t_end_unix": 1785735892.0,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 179,
+   "telemetry": "gp_log_20260802_212714_a179.csv",
+   "t_start_unix": 1785735896.032,
+   "t_end_unix": 1785735917.584,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 180,
+   "telemetry": "gp_log_20260802_212714_a180.csv",
+   "t_start_unix": 1785735921.583,
+   "t_end_unix": 1785735943.288,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 181,
+   "telemetry": "gp_log_20260802_212714_a181.csv",
+   "t_start_unix": 1785735947.404,
+   "t_end_unix": 1785735968.915,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 182,
+   "telemetry": "gp_log_20260802_212714_a182.csv",
+   "t_start_unix": 1785735972.932,
+   "t_end_unix": 1785735994.536,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 183,
+   "telemetry": "gp_log_20260802_212714_a183.csv",
+   "t_start_unix": 1785735998.537,
+   "t_end_unix": 1785736020.23,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 184,
+   "telemetry": "gp_log_20260802_212714_a184.csv",
+   "t_start_unix": 1785736024.343,
+   "t_end_unix": 1785736045.835,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 185,
+   "telemetry": "gp_log_20260802_212714_a185.csv",
+   "t_start_unix": 1785736049.947,
+   "t_end_unix": 1785736071.394,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 186,
+   "telemetry": "gp_log_20260802_212714_a186.csv",
+   "t_start_unix": 1785736075.45,
+   "t_end_unix": 1785736098.5,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 187,
+   "telemetry": "gp_log_20260802_212714_a187.csv",
+   "t_start_unix": 1785736103.029,
+   "t_end_unix": 1785736124.137,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 188,
+   "telemetry": "gp_log_20260802_212714_a188.csv",
+   "t_start_unix": 1785736128.029,
+   "t_end_unix": 1785736146.108,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 189,
+   "telemetry": "gp_log_20260802_212714_a189.csv",
+   "t_start_unix": 1785736150.151,
+   "t_end_unix": 1785736171.712,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 190,
+   "telemetry": "gp_log_20260802_212714_a190.csv",
+   "t_start_unix": 1785736176.169,
+   "t_end_unix": 1785736194.985,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 191,
+   "telemetry": "gp_log_20260802_212714_a191.csv",
+   "t_start_unix": 1785736198.936,
+   "t_end_unix": 1785736220.644,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 192,
+   "telemetry": "gp_log_20260802_212714_a192.csv",
+   "t_start_unix": 1785736224.862,
+   "t_end_unix": 1785736242.606,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 193,
+   "telemetry": "gp_log_20260802_212714_a193.csv",
+   "t_start_unix": 1785736246.639,
+   "t_end_unix": 1785736264.473,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 194,
+   "telemetry": "gp_log_20260802_212714_a194.csv",
+   "t_start_unix": 1785736268.383,
+   "t_end_unix": 1785736290.049,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 195,
+   "telemetry": "gp_log_20260802_212714_a195.csv",
+   "t_start_unix": 1785736294.754,
+   "t_end_unix": 1785736315.751,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 196,
+   "telemetry": "gp_log_20260802_212714_a196.csv",
+   "t_start_unix": 1785736319.729,
+   "t_end_unix": 1785736341.357,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 197,
+   "telemetry": "gp_log_20260802_212714_a197.csv",
+   "t_start_unix": 1785736345.336,
+   "t_end_unix": 1785736366.999,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 198,
+   "telemetry": "gp_log_20260802_212714_a198.csv",
+   "t_start_unix": 1785736371.177,
+   "t_end_unix": 1785736389.162,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 199,
+   "telemetry": "gp_log_20260802_212714_a199.csv",
+   "t_start_unix": 1785736393.219,
+   "t_end_unix": 1785736412.196,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 200,
+   "telemetry": "gp_log_20260802_212714_a200.csv",
+   "t_start_unix": 1785736416.327,
+   "t_end_unix": 1785736437.86,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 201,
+   "telemetry": "gp_log_20260802_212714_a201.csv",
+   "t_start_unix": 1785736442.06,
+   "t_end_unix": 1785736463.57,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 202,
+   "telemetry": "gp_log_20260802_212714_a202.csv",
+   "t_start_unix": 1785736467.649,
+   "t_end_unix": 1785736486.645,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 203,
+   "telemetry": "gp_log_20260802_212714_a203.csv",
+   "t_start_unix": 1785736490.711,
+   "t_end_unix": 1785736509.933,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 204,
+   "telemetry": "gp_log_20260802_212714_a204.csv",
+   "t_start_unix": 1785736514.14,
+   "t_end_unix": 1785736535.563,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 205,
+   "telemetry": "gp_log_20260802_212714_a205.csv",
+   "t_start_unix": 1785736539.566,
+   "t_end_unix": 1785736558.352,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 206,
+   "telemetry": "gp_log_20260802_212714_a206.csv",
+   "t_start_unix": 1785736562.343,
+   "t_end_unix": 1785736584.006,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 207,
+   "telemetry": "gp_log_20260802_212714_a207.csv",
+   "t_start_unix": 1785736588.025,
+   "t_end_unix": 1785736609.603,
+   "gates_passed": 0,
+   "outcome": "gate1_fail",
+   "lap_s": null,
+   "end_reason": "reset"
+  },
+  {
+   "n": 208,
+   "telemetry": "gp_log_20260802_212714_a208.csv",
+   "t_start_unix": 1785736613.743,
+   "t_end_unix": 1785736632.309,
+   "gates_passed": 1,
+   "outcome": "gate_stall",
+   "lap_s": null,
+   "end_reason": "reset"
+  }
+ ],
+ "totals": {
+  "attempts": 208,
+  "best_gates": 3,
+  "best_lap_s": null
+ }
+}
