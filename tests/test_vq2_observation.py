@@ -258,6 +258,50 @@ class UntrustworthyDetectionTests(unittest.TestCase):
         self.assertAlmostEqual(obs[vo.OBS_LAYOUT["detected"]][0], 0.0)
 
 
+class TimestampContractTests(unittest.TestCase):
+    """The `t` passed to update() must be a monotonic ARRIVAL clock.
+
+    HIGHRES_IMU.time_usec is frozen on this build (probe 2026-08-01: 1141
+    samples, 0 us span), so feeding the sensor stamp yields dt=0 every tick and
+    the feature rates collapse or divide by zero. Callers MUST use arrival time.
+    These pin that contract: a monotonic arrival clock produces finite,
+    correctly-signed feature rates, and a repeated timestamp (the frozen-stamp
+    failure mode) can never produce a non-finite observation.
+    """
+
+    def test_monotonic_arrival_clock_yields_finite_signed_range_rate(self):
+        # Closing ~1 m of range across a 50 Hz arrival tick -> negative
+        # log_range_rate, finite and nonzero (closing, not a re-lock jump).
+        tr = vo.GateFeatureTracker(n_gates=17)
+        tr.update(0.000, _est((10.0, 0, 0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0)
+        obs = tr.update(
+            0.020, _est((9.98, 0, 0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0
+        )
+        rate = float(obs[vo.OBS_LAYOUT["log_range_rate"]][0])
+        self.assertTrue(np.isfinite(rate))
+        self.assertLess(rate, 0.0, "closing range under arrival dt -> negative rate")
+
+    def test_monotonic_arrival_clock_yields_finite_signed_dir_rate(self):
+        # Gate sliding into +y of the body frame under a 50 Hz arrival tick ->
+        # finite positive gate_dir_rate[1] (motion, not a discontinuity).
+        tr = vo.GateFeatureTracker(n_gates=17)
+        tr.update(0.000, _est((10.0, 0.0, 0.0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0)
+        obs = tr.update(
+            0.020, _est((10.0, 1.0, 0.0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0
+        )
+        dy = float(obs[vo.OBS_LAYOUT["gate_dir_rate"]][1])
+        self.assertTrue(np.isfinite(dy))
+        self.assertGreater(dy, 0.0, "gate moving right -> +y dir rate")
+
+    def test_equal_arrival_time_cannot_divide_by_zero(self):
+        # The exact frozen-stamp failure mode: two updates carrying the same t.
+        # The tracker must not divide by a zero dt and must stay finite.
+        tr = vo.GateFeatureTracker(n_gates=17)
+        tr.update(2.5, _est((10.0, 0, 0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0)
+        obs = tr.update(2.5, _est((9.0, 0, 0)), (0, 0, 0), LEVEL_GRAVITY, NO_ACTION, 0)
+        self.assertTrue(np.all(np.isfinite(obs)), "equal t must not divide by zero")
+
+
 class TemporalDerivativeTests(unittest.TestCase):
     """Velocity is not observable in VQ2 (measured estimator RMSE 28.9 m/s), so
     the policy gets the honest measured rates of the vision features instead of

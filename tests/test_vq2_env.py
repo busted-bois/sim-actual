@@ -281,5 +281,78 @@ class DomainRandomizationTests(unittest.TestCase):
         self.assertEqual(len(set(vals)), 1)
 
 
+class GateSizeIsolationTests(unittest.TestCase):
+    """spec.GATE_SIZE_M = 2.72 is applied elsewhere as the OPENING, which scales
+    range by 1.81x -- the real opening is 1.5 m inside a 2.7 m frame (measured
+    inner/outer width ratio 0.560 over 551 gates). VQ2 geometry is isolated
+    from those legacy constants. The check reads the source as an AST so the
+    comments explaining WHY the constants are absent are not mistaken for use.
+    """
+
+    VQ2_SOURCE_FILES = (
+        "rl/core/vq2_observation.py",
+        "rl/environment/vq2_env.py",
+    )
+
+    def test_vq2_source_never_references_legacy_gate_size(self):
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for rel in self.VQ2_SOURCE_FILES:
+            tree = ast.parse((root / rel).read_text(), filename=rel)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in (
+                    "GATE_SIZE_M",
+                    "GATE_HALF",
+                ):
+                    offenders.append(f"{rel}:{node.lineno} spec.{node.attr}")
+                if isinstance(node, ast.Name) and node.id in (
+                    "GATE_SIZE_M",
+                    "GATE_HALF",
+                ):
+                    offenders.append(f"{rel}:{node.lineno} {node.id}")
+        self.assertEqual(
+            offenders,
+            [],
+            f"VQ2 geometry must not use legacy spec gate-size constants: {offenders}",
+        )
+
+
+class CurriculumSmokeTests(unittest.TestCase):
+    """Every curriculum stage must build, reset and step a finite 29-D
+    observation, and the gate ladder must be the competition course (1 -> 3 ->
+    8 -> 17). A regression that breaks stage wiring or shortens the ladder is
+    otherwise invisible until hours into a training run.
+    """
+
+    EXPECTED_GATES = [1, 3, 8, 17]
+
+    def test_every_stage_smokes_with_the_competition_gate_counts(self):
+        self.assertEqual(len(vq2_env.CURRICULUM), len(self.EXPECTED_GATES))
+        for stage, want in enumerate(self.EXPECTED_GATES):
+            env = vq2_env.make_env(stage=stage, seed=0)()
+            try:
+                obs, _ = env.reset(seed=0)
+                self.assertEqual(obs.shape, (vo.OBS_DIM,))
+                self.assertEqual(obs.dtype, np.float32)
+                self.assertTrue(
+                    np.all(np.isfinite(obs)), f"non-finite obs at stage {stage}"
+                )
+                self.assertEqual(
+                    len(env.gates), want, f"stage {stage} gate count mismatch"
+                )
+                for _ in range(5):
+                    obs, *_ = env.step(np.zeros(4, dtype=np.float32))
+                    self.assertEqual(obs.shape, (vo.OBS_DIM,))
+                    self.assertTrue(
+                        np.all(np.isfinite(obs)),
+                        f"non-finite obs stepping stage {stage}",
+                    )
+            finally:
+                env.close()
+
+
 if __name__ == "__main__":
     unittest.main()
