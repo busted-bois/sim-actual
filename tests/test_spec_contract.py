@@ -14,6 +14,8 @@ class SpecContractTests(unittest.TestCase):
         self.assertEqual(spec.OBS_DIM, 24)
         self.assertEqual(spec.GRAVITY, 9.81)
         self.assertEqual(spec.GATE_SIZE_M, 2.72)
+        self.assertEqual(spec.GATE_OPENING_M, 1.5)
+        self.assertEqual(spec.GATE_OPENING_HALF, 0.75)
         self.assertEqual(
             [spec.MAX_ROLL_RATE, spec.MAX_PITCH_RATE, spec.MAX_YAW_RATE],
             [0.6, 0.6, 0.6],

@@ -43,13 +43,13 @@ DIST = np.zeros((5,), dtype=np.float64)  # no lens distortion (given)
 CAM_TILT_DEG = 20.0  # camera pitched up from body-forward
 
 # ----------------------------------------------------------------------------
-# Gate geometry — square opening, side GATE_SIZE_M (meters). Value matches the
-# w/h the sim broadcasts in the gate map (data/gate_map.json: 2.72 for all 6).
-# PnP (Module 4) and mask projection (Module 2) must use the REAL size or range
-# estimates scale by the wrong factor and the pass-through lateral gate is off.
+# Gate geometry. The simulator broadcasts the 2.72 m outer frame dimensions,
+# while camera pose estimation targets the 1.5 m fly-through opening.
 # ----------------------------------------------------------------------------
 GATE_SIZE_M = 2.72
 GATE_HALF = GATE_SIZE_M / 2.0
+GATE_OPENING_M = 1.5
+GATE_OPENING_HALF = GATE_OPENING_M / 2.0
 
 # Gate-local frame: +x = through-gate normal (travel dir), +y = right (width),
 # +z = down (height). Corners ordered TL, TR, BR, BL with "top" = NED-up (-z).
@@ -59,6 +59,15 @@ GATE_CORNERS_LOCAL = np.array(
         [0.0, +GATE_HALF, -GATE_HALF],  # TR
         [0.0, +GATE_HALF, +GATE_HALF],  # BR
         [0.0, -GATE_HALF, +GATE_HALF],  # BL
+    ],
+    dtype=np.float64,
+)
+GATE_OPENING_CORNERS_LOCAL = np.array(
+    [
+        [0.0, -GATE_OPENING_HALF, -GATE_OPENING_HALF],
+        [0.0, +GATE_OPENING_HALF, -GATE_OPENING_HALF],
+        [0.0, +GATE_OPENING_HALF, +GATE_OPENING_HALF],
+        [0.0, -GATE_OPENING_HALF, +GATE_OPENING_HALF],
     ],
     dtype=np.float64,
 )
@@ -180,6 +189,14 @@ def gate_corners_world(gate_pos: np.ndarray, gate_quat: np.ndarray) -> np.ndarra
     """4 gate corners (TL,TR,BR,BL) in world NED."""
     R = quat_to_R(gate_quat)
     return gate_pos + GATE_CORNERS_LOCAL @ R.T
+
+
+def gate_opening_corners_world(
+    gate_pos: np.ndarray, gate_quat: np.ndarray
+) -> np.ndarray:
+    """Fly-through opening corners (TL,TR,BR,BL) in world NED."""
+    R = quat_to_R(gate_quat)
+    return gate_pos + GATE_OPENING_CORNERS_LOCAL @ R.T
 
 
 def scale_action(a: np.ndarray) -> np.ndarray:

@@ -21,6 +21,17 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _paths(text: str) -> str:
+    r"""Normalize path separators before matching.
+
+    The script builds paths with os.path.join, so on Windows it prints
+    rl\data\best\ppo\policy.pt while these assertions are written with POSIX
+    separators. That is a difference in separator style, not in behaviour, so
+    normalize rather than asserting one platform's spelling.
+    """
+    return text.replace("\\", "/")
+
+
 class TrainRlScriptTests(unittest.TestCase):
     def test_default_dry_run_has_ordered_complete_pipeline(self):
         result = _run("--dry-run")
@@ -35,8 +46,8 @@ class TrainRlScriptTests(unittest.TestCase):
         )
         positions = [result.stdout.index(stage) for stage in stages]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("rl/data/best/ppo/policy.pt", result.stdout)
-        self.assertIn("--bc-init rl/data/policy_bc.pt", result.stdout)
+        self.assertIn("rl/data/best/ppo/policy.pt", _paths(result.stdout))
+        self.assertIn("--bc-init rl/data/policy_bc.pt", _paths(result.stdout))
         self.assertIn("course_gates=17", result.stdout)
         self.assertNotIn("[demos]", result.stdout)
 
@@ -63,12 +74,12 @@ class TrainRlScriptTests(unittest.TestCase):
             "--seeds 0 4 9",
             "rl/data/best/windows-run/expert-eval.csv",
         ):
-            self.assertIn(expected, result.stdout)
+            self.assertIn(expected, _paths(result.stdout))
 
     def test_custom_config_resolves_checkpoint_directory(self):
         result = _run("--dry-run", "--config", "configs/default.yaml")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("checkpoint.dir=rl/data/best", result.stdout)
+        self.assertIn("checkpoint.dir=rl/data/best", _paths(result.stdout))
 
     def test_help(self):
         result = _run("--help")
