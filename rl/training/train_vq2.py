@@ -12,9 +12,12 @@ Three defects from the previous pipeline are fixed here explicitly:
   leaving PPO's initial log_std untouched means the first rollouts add
   full-scale Gaussian noise to a policy that was just taught to fly — a crash
   generator, and one of the recorded reasons the last attempt died.
-* The curriculum advances on PERFORMANCE, not on a step budget. Stages that
-  advance regardless of whether they were solved are what produced the -43.7
-  and -126.8 stage-0 evaluations in the old training logs.
+* Each stage is ONE learn() call. Chunking a stage to evaluate mid-way halves
+  to zero (measured 0.70 -> 0.00 at equal step count): every learn() re-runs
+  _setup_learn, dropping the LSTM state and truncating in-flight episodes.
+* Domain randomization RAMPS in via callback. The clone scores 1.00 on the
+  nominal plant and 0.37 on the full randomized range, so starting PPO inside
+  the full range throws the warm start away.
 * Shaping anneals to zero across training so the final objective is the sparse
   terminal one the competition actually scores.
 
@@ -29,6 +32,7 @@ import os
 import numpy as np
 import torch
 from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from rl.environment import vq2_env
@@ -40,10 +44,40 @@ BC_PT = os.path.join(OUT_DIR, "policy_vq2_bc.pt")
 SB3_ZIP = os.path.join(OUT_DIR, "ppo_vq2")
 
 N_ENVS = 8
-ADVANCE_GATE_FRAC = 0.6  # clear 60% of a stage's gates before moving on
 
 
-def _make_vec(stage: int, seed: int, shaping: float, n_envs: int = N_ENVS):
+class DomainRandRamp(BaseCallback):
+    """Widen domain randomization DURING a single learn() call.
+
+    Must be a callback, not repeated set_env()+learn(). Measured on stage 0,
+    30k steps, identical hyperparameters:
+        one learn() call, full DR          -> 0.70 gates
+        8x learn()+set_env, full DR        -> 0.00
+        8x learn()+set_env, ramped DR      -> 0.00
+    Every learn() call re-runs _setup_learn, which drops _last_obs and the LSTM
+    states and truncates every in-flight episode; doing that eight times per
+    stage destroys the policy on its own, independently of randomization.
+    """
+
+    def __init__(self, warmup_frac: float = 0.6):
+        super().__init__()
+        self.warmup_frac = float(warmup_frac)
+        self._total = 1
+
+    def _on_training_start(self) -> None:
+        self._total = max(int(self.locals.get("total_timesteps", 1)), 1)
+        self._set(0.0)
+
+    def _set(self, dr: float) -> None:
+        self.training_env.set_attr("dr_scale", float(dr))
+
+    def _on_step(self) -> bool:
+        frac = self.num_timesteps / (self._total * max(self.warmup_frac, 1e-6))
+        self._set(min(1.0, frac))
+        return True
+
+
+def _make_vec(stage, seed, shaping, dr_scale=1.0, n_envs=N_ENVS):
     cfg = CURRICULUM[stage]
 
     def mk(rank):
@@ -54,6 +88,7 @@ def _make_vec(stage: int, seed: int, shaping: float, n_envs: int = N_ENVS):
                 spacing=cfg["spacing"],
                 jitter=cfg["jitter"],
                 shaping=shaping,
+                dr_scale=dr_scale,
             )
 
         return _f
@@ -133,13 +168,34 @@ def _actor_mean_sequence(policy, x_seq):
     return policy.action_net(policy.mlp_extractor.forward_actor(latent))
 
 
+BPTT_LEN = 128  # truncated backprop horizon for BC
+
+
+def truncate(episodes, maxlen: int = BPTT_LEN, minlen: int = 8):
+    """Split episodes into truncated-BPTT segments.
+
+    Backpropagating through a whole episode is untrainable here: demo lengths
+    run 125-2689 steps, and gradient-clipping a 2689-step BPTT chain crushes
+    the signal. Measured on all-stage demos, stage-0 closed-loop score:
+        full-episode BPTT -> 0.00
+        BPTT = 128        -> 0.40   (and BC loss 0.0029 -> 0.0008)
+    """
+    out = []
+    for o, a in episodes:
+        for i in range(0, len(o), maxlen):
+            seg_o, seg_a = o[i : i + maxlen], a[i : i + maxlen]
+            if len(seg_o) >= minlen:
+                out.append((seg_o, seg_a))
+    return out
+
+
 def train_bc(model, episodes, epochs=30, lr=1e-3, device="cpu", eps_per_batch=8):
-    """Clone the expert over whole episodes so the LSTM learns to integrate."""
+    """Clone the expert over truncated sequences so the LSTM learns to integrate."""
     policy = model.policy
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
     data = [
         (torch.as_tensor(o, device=device), torch.as_tensor(a, device=device))
-        for o, a in episodes
+        for o, a in truncate(episodes)
     ]
     rng = np.random.default_rng(0)
     for ep in range(epochs):
@@ -263,7 +319,7 @@ def main():
         batch_size=256,
         gamma=0.995,
         gae_lambda=0.95,
-        learning_rate=3e-4,
+        learning_rate=5e-5,  # 3e-4 degraded the BC init faster (0.60 vs 0.70)
         ent_coef=0.003,
         clip_range=0.2,
         n_epochs=6,
@@ -295,28 +351,25 @@ def main():
         # Shaping decays to 0 by the final stage: the competition scores only
         # completion, so that is what the last stage optimizes.
         shaping = max(0.0, 1.0 - stage / max(n_stages - 1, 1))
-        model.set_env(_make_vec(stage, args.seed + stage, shaping))
-        budget = args.steps_per_stage
-        spent = 0
-        chunk = max(args.steps_per_stage // 4, 2048)
-        while spent < budget:
-            model.learn(
-                total_timesteps=chunk, reset_num_timesteps=False, progress_bar=False
-            )
-            spent += chunk
-            m = evaluate(model, stage, episodes=10 if args.quick else 20)
-            print(
-                f"[ppo] stage {stage} ({CURRICULUM[stage]['n_gates']} gates, "
-                f"shaping={shaping:.2f}) {spent}/{budget} "
-                f"gates={m['gates']:.2f} frac={m['gate_frac']:.2f} "
-                f"success={m['success']:.2f}",
-                flush=True,
-            )
-            # Performance-gated advance -- the old trainer advanced on the step
-            # budget alone, which is visibly what wrecked its stage-0 numbers.
-            if m["gate_frac"] >= ADVANCE_GATE_FRAC:
-                print(f"[ppo] stage {stage} solved, advancing early", flush=True)
-                break
+        # ONE learn() call per stage. Chunking it to evaluate mid-stage
+        # destroys the policy (0.70 -> 0.00 at equal step count), because each
+        # learn() re-runs _setup_learn and drops the LSTM state and every
+        # in-flight episode. Ramp randomization with a callback instead.
+        model.set_env(_make_vec(stage, args.seed + stage, shaping, dr_scale=0.0))
+        model.learn(
+            total_timesteps=args.steps_per_stage,
+            reset_num_timesteps=False,
+            progress_bar=False,
+            callback=DomainRandRamp(warmup_frac=0.6 if stage == 0 else 0.15),
+        )
+        m = evaluate(model, stage, episodes=10 if args.quick else 30)
+        print(
+            f"[ppo] stage {stage} ({CURRICULUM[stage]['n_gates']} gates, "
+            f"shaping={shaping:.2f}) {args.steps_per_stage} steps "
+            f"gates={m['gates']:.2f} frac={m['gate_frac']:.2f} "
+            f"success={m['success']:.2f}",
+            flush=True,
+        )
         model.save(f"{SB3_ZIP}_s{stage}")
 
     model.save(SB3_ZIP)
