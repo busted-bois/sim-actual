@@ -9,8 +9,26 @@ for stale/absent YOLO frames and for tools that do not run GatePoseRunner.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
+
+
+def env_f(name: str, default: float) -> float:
+    """Env-overridable float, ignoring anything unparseable."""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_flag(name: str, default: bool = True) -> bool:
+    """Env-overridable on/off switch. Everything but 0/false/no/off is on."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
 
 GATE_OUTER_W_M = 2.7
 FX = 320.0
@@ -37,6 +55,35 @@ MAX_GATES_CONSIDERED = 2
 YOLO_NEAR_BX_M = 2.0  # gate centre closer than this → threading it: go blind
 YOLO_NEAR_BOX_FRAC = 0.85  # box filling this fraction of the frame = on top of gate
 YOLO_PASS_COOLDOWN_FR = 10  # camera frames to stay blind after a near-gate pass
+
+# --- Source continuity (measured on gp_log_20260728_192003) -------------------
+# The ladder is re-picked every camera frame, and there is no NVIDIA GPU here
+# (AMD integrated; torch reports cuda_available=False), so YOLO runs on CPU at
+# 100-350 ms/frame = 3-10 camera frames of lag and YOLO_STALE_GAP_FR trips
+# constantly. Result: 15.9 source changes/s, 82% of them gate<->gate, median
+# lock streak 0.17 s. The estimators disagree about the SAME gate by far more
+# than the gate moves between frames:
+#     within one source   |dby| p50 0.000  p90 0.074 m
+#     across a switch     |dby| p50 0.180  p90 0.809 m   (|dbx| p90 2.25 m)
+#
+# GateEstimateSmoother already snaps + sets track_break on a flip, which covers
+# the DERIVATIVE. Nothing covered the PROPORTIONAL term: at the median lock
+# range (bx 8.9 m) a 0.809 m step is 5.18 deg of bearing = 12.9 deg of roll
+# demand out of a 14 deg cap, applied in whichever direction the two estimators
+# happened to disagree. Three mechanisms, each independently switchable:
+#
+#   PROPAGATE  keep a stale YOLO packet alive by advancing it with body motion,
+#              so the sawtooth never starts (fixes the outbound half).
+#   STICKY     once fallen back, require N consecutive frames of the preferred
+#              source before returning to it (fixes the return half).
+#   BLEND      when a switch does happen, publish the old position and bleed the
+#              offset to zero, so the P term sees a ramp instead of a step.
+GP_YOLO_PROPAGATE = env_flag("GP_YOLO_PROPAGATE", True)
+YOLO_PROPAGATE_MAX_GAP_FR = 12  # past this the packet is too old to trust at all
+GP_SRC_STICKY_FR = int(env_f("GP_SRC_STICKY_FR", 3))  # 0 disables
+GP_SRC_BLEND_S = env_f("GP_SRC_BLEND_S", 0.3)  # 0 disables
+SRC_BLEND_MAX_M = 3.0  # a bigger jump is a different gate, not an offset
+CAM_HZ = 30.0
 
 
 def gate_body_from_pinhole(
@@ -96,25 +143,70 @@ def best_pose_gate(data: dict) -> dict | None:
     return best
 
 
-def _yolo_pose_estimate(data: dict) -> dict | None:
-    """Fresh YOLO pose packet → estimate dict (no suppression logic)."""
+def _propagate_body(gb: np.ndarray, gap_fr: int, motion: dict | None) -> np.ndarray:
+    """Advance a gate's body-frame position by our own motion over `gap_fr`.
+
+    The gate is static in the world, so between the frame YOLO looked at and
+    now, its BODY-frame position moved by exactly minus our own displacement,
+    plus the rotation our yaw applied to the frame itself. Without a motion
+    estimate this is the identity — a stale packet held in place, which is
+    still closer to the truth than an estimator carrying a ~0.8 m offset.
+    """
+    if not motion or gap_fr <= 0:
+        return gb
+    dt = gap_fr / CAM_HZ
+    vx = float(motion.get("vX", 0.0) or 0.0)
+    vy = float(motion.get("vY", 0.0) or 0.0)
+    vd = float(motion.get("vD", 0.0) or 0.0)
+    if not all(math.isfinite(v) for v in (vx, vy, vd)):
+        return gb
+    out = gb - np.array([vx * dt, vy * dt, vd * dt], dtype=np.float64)
+    # Yaw rotates the body frame under the (world-static) gate.
+    wz = float(motion.get("yaw_rate_rps", 0.0) or 0.0)
+    if math.isfinite(wz) and wz != 0.0:
+        a = -wz * dt
+        ca, sa = math.cos(a), math.sin(a)
+        out = np.array(
+            [ca * out[0] - sa * out[1], sa * out[0] + ca * out[1], out[2]],
+            dtype=np.float64,
+        )
+    return out
+
+
+def _yolo_pose_estimate(data: dict, motion: dict | None = None) -> dict | None:
+    """YOLO pose packet → estimate dict (no suppression logic).
+
+    Past YOLO_STALE_GAP_FR the packet is not discarded outright: with inference
+    on CPU it is stale most of the time, and dropping it is what hands the pilot
+    to a different estimator 13 times a second. Instead it is advanced by our own
+    motion (`motion`) out to YOLO_PROPAGATE_MAX_GAP_FR and flagged `propagated`.
+    """
     pose_pkt = data.get("pose") or {}
     fid = pose_pkt.get("frame_id")
     if fid is None:
         return None
     latest = (data.get("frame") or {}).get("frame_id")
-    if latest is not None and latest - fid > YOLO_STALE_GAP_FR:
-        return None  # inference fell behind — don't servo on an old world
+    gap = 0 if latest is None else int(latest - fid)
+    propagated = False
+    if gap > YOLO_STALE_GAP_FR:
+        if not GP_YOLO_PROPAGATE or gap > YOLO_PROPAGATE_MAX_GAP_FR:
+            return None  # inference fell behind — don't servo on an old world
+        propagated = True
     g = best_pose_gate(data)
     if g is None:
         return None
     p = g["pose"]
     gb = np.asarray(p["gate_pos_body"], dtype=np.float64).reshape(3)
+    if propagated:
+        gb = _propagate_body(gb, gap, motion)
+        if not np.all(np.isfinite(gb)) or gb[0] <= 0.1:
+            return None
     return {
         "frame_id": fid,
         "body_x_m": float(gb[0]),
         "body_y_m": float(gb[1]),
         "body_z_m": float(gb[2]),
+        "propagated": propagated,
         "pnp_ok": True,
         "pnp_rvec": None,
         "normal_body": np.asarray(p["normal_body"], dtype=np.float64).reshape(3),
@@ -122,6 +214,11 @@ def _yolo_pose_estimate(data: dict) -> dict | None:
         "v_px": None,
         "reliable": True,
         "source": "yolo",
+        # PnP method: "edge-pair" is a single-edge fallback whose normal is a
+        # fixed camera-tilt placeholder, not a measured plane — consumers that
+        # read the full normal vector (RL obs) must not trust it as a real
+        # orientation. The GP guidance ignores the normal's z so it never cared.
+        "method": p.get("method"),
         "infer_ms": pose_pkt.get("infer_ms"),
     }
 
@@ -171,7 +268,9 @@ class YoloGateTracker:
         if fid is not None:
             self._suppress_until_fid = fid + YOLO_PASS_COOLDOWN_FR
 
-    def update(self, data: dict) -> tuple[dict | None, bool]:
+    def update(
+        self, data: dict, motion: dict | None = None
+    ) -> tuple[dict | None, bool]:
         """(estimate, suppress). suppress=True means a gate is being threaded —
         the caller must return None without falling back to other sources."""
         pose_pkt = data.get("pose") or {}
@@ -180,7 +279,13 @@ class YoloGateTracker:
             return None, False
         latest = (data.get("frame") or {}).get("frame_id")
         ref_fid = latest if latest is not None else fid
-        stale = latest is not None and latest - fid > YOLO_STALE_GAP_FR
+        # "Too old to use at all" — which now means past the PROPAGATION
+        # ceiling, not past YOLO_STALE_GAP_FR. Tying near-gate suppression to
+        # the same window a propagated packet is trusted over keeps the
+        # pass-through blind spot intact: a packet good enough to steer on is
+        # good enough to notice we are on top of the gate.
+        horizon = YOLO_PROPAGATE_MAX_GAP_FR if GP_YOLO_PROPAGATE else YOLO_STALE_GAP_FR
+        stale = latest is not None and latest - fid > horizon
         if not stale and self._near_gate(pose_pkt.get("gates") or []):
             self._in_gate = True
             return None, True
@@ -191,43 +296,27 @@ class YoloGateTracker:
             if ref_fid < self._suppress_until_fid:
                 return None, True
             self._suppress_until_fid = None
-        return _yolo_pose_estimate(data), False
+        return _yolo_pose_estimate(data, motion), False
 
 
-def vision_gate_estimate(
-    data: dict, yolo_tracker: YoloGateTracker | None = None
-) -> dict | None:
-    """Build Anduril-compatible vision estimate.
-
-    Preference order for GPPilot:
-      1. YOLO pose packet — 8-keypoint PnP aimed at the opening, when fresh
-      2. data["anduril_gate"] — HSV-red detect_gate + PnP/pinhole
-      3. HSV gate_target rays / pinhole
-
-    With a yolo_tracker, near-gate pass-through suppression blanks ALL
-    sources so the pilot flies through blind instead of chasing the near
-    edge with a lower-grade detector.
-    """
-    if yolo_tracker is not None:
-        est, suppress = yolo_tracker.update(data)
-        if suppress:
-            return None
-    else:
-        est = _yolo_pose_estimate(data)
-    if est is not None:
-        return est
-
+def _anduril_estimate(data: dict) -> dict | None:
+    """data["anduril_gate"] — HSV-red detect_gate + PnP/pinhole."""
     anduril = data.get("anduril_gate")
-    if anduril is not None and anduril.get("body_x_m") is not None:
-        bx = float(anduril["body_x_m"])
-        by = float(anduril["body_y_m"])
-        bz = float(anduril["body_z_m"])
-        if not any(math.isnan(v) for v in (bx, by, bz)):
-            out = dict(anduril)
-            out.setdefault("source", "anduril")
-            out.setdefault("reliable", True)
-            return out
+    if anduril is None or anduril.get("body_x_m") is None:
+        return None
+    bx = float(anduril["body_x_m"])
+    by = float(anduril["body_y_m"])
+    bz = float(anduril["body_z_m"])
+    if any(math.isnan(v) for v in (bx, by, bz)):
+        return None
+    out = dict(anduril)
+    out.setdefault("source", "anduril")
+    out.setdefault("reliable", True)
+    return out
 
+
+def _hsv_estimate(data: dict) -> dict | None:
+    """Legacy HSV gate_target — rays when ranged, else pinhole on the box."""
     pose_pkt = data.get("pose") or {}
     frame_id = pose_pkt.get("frame_id")
     gt = data.get("gate_target") or {}
@@ -282,6 +371,54 @@ def vision_gate_estimate(
         "reliable": False,
         "source": "hsv",
     }
+
+
+def gate_candidates(
+    data: dict,
+    yolo_tracker: YoloGateTracker | None = None,
+    motion: dict | None = None,
+) -> tuple[dict[str, dict], bool]:
+    """({source: estimate}, suppress) for every source that resolved this frame.
+
+    Ladder order is the dict's insertion order, so `next(iter(...))` is the
+    plain preference pick. Returning ALL of them (rather than the first) is what
+    lets the stabilizer ask "is the source I already committed to still
+    available?" — the question hysteresis needs and the old short-circuit
+    ladder could not answer.
+    """
+    if yolo_tracker is not None:
+        yolo, suppress = yolo_tracker.update(data, motion)
+        if suppress:
+            return {}, True
+    else:
+        yolo, suppress = _yolo_pose_estimate(data, motion), False
+
+    out: dict[str, dict] = {}
+    for est in (yolo, _anduril_estimate(data), _hsv_estimate(data)):
+        if est is not None:
+            out.setdefault(str(est.get("source")), est)
+    return out, suppress
+
+
+def vision_gate_estimate(
+    data: dict,
+    yolo_tracker: YoloGateTracker | None = None,
+    motion: dict | None = None,
+) -> dict | None:
+    """Build Anduril-compatible vision estimate.
+
+    Preference order for GPPilot:
+      1. YOLO pose packet — 8-keypoint PnP aimed at the opening, fresh OR
+         motion-propagated within YOLO_PROPAGATE_MAX_GAP_FR (see `motion`)
+      2. data["anduril_gate"] — HSV-red detect_gate + PnP/pinhole
+      3. HSV gate_target rays / pinhole
+
+    With a yolo_tracker, near-gate pass-through suppression blanks ALL
+    sources so the pilot flies through blind instead of chasing the near
+    edge with a lower-grade detector.
+    """
+    cands, _suppress = gate_candidates(data, yolo_tracker, motion)
+    return next(iter(cands.values()), None)
 
 
 def gate_tilt_deg_from_normal(normal_body: np.ndarray) -> float:
@@ -364,23 +501,126 @@ class GateEstimateSmoother:
         self._last_src_key: tuple | None = None
         self._pending: np.ndarray | None = None
         self._pending_n = 0
+        self._src: str | None = None  # source currently committed to
+        self._challenger: str | None = None
+        self._challenger_n = 0
+        self._offset: np.ndarray | None = None  # A4: bleeding-off switch step
+        self._offset_end = 0  # camera fid the ramp finishes on
+        self._offset_span = 0
 
-    def update(self, data: dict) -> dict | None:
-        est = vision_gate_estimate(data, self.yolo_tracker)
+    def _pick(self, cands: dict[str, dict]) -> dict | None:
+        """Hysteresis over the preference ladder.
+
+        The ladder's own first choice churns: with YOLO stale most frames the
+        preferred source alternates yolo/anduril nearly every tick. Stay on the
+        committed source while it is still resolving, and require the preferred
+        one to hold for GP_SRC_STICKY_FR consecutive frames before going back.
+        """
+        if not cands:
+            self._challenger, self._challenger_n = None, 0
+            return None
+        preferred = next(iter(cands))
+        if GP_SRC_STICKY_FR <= 0 or self._src is None or self._src == preferred:
+            self._challenger, self._challenger_n = None, 0
+            return cands[preferred]
+        if self._src not in cands:
+            # Committed source produced nothing — no choice but to move.
+            self._challenger, self._challenger_n = None, 0
+            return cands[preferred]
+        # Both available and the ladder prefers the other one: make it wait.
+        if self._challenger == preferred:
+            self._challenger_n += 1
+        else:
+            self._challenger, self._challenger_n = preferred, 1
+        if self._challenger_n >= GP_SRC_STICKY_FR:
+            self._challenger, self._challenger_n = None, 0
+            return cands[preferred]
+        return cands[self._src]
+
+    def _start_blend(
+        self, prev_vec: np.ndarray, vec: np.ndarray, cam_fid: int | None
+    ) -> None:
+        """Capture the step a source switch just introduced, to bleed off.
+
+        Snapping is right for the target (the new source IS the better estimate)
+        but wrong for the CONTROLLER, which reads the snap as a real lateral
+        error and answers with up to 12.9 deg of roll out of a 14 deg cap. Publish
+        the old position and walk it to the new one over GP_SRC_BLEND_S.
+        """
+        # Continue from where we are CURRENTLY publishing, not from the raw
+        # previous source. Switches come closer together than the ramp is long
+        # (median lock streak 0.17 s vs a 0.3 s ramp), and restarting from the
+        # raw value makes the published jump BIGGER than no ramp at all.
+        residual = np.zeros(3, dtype=np.float64)
+        if (
+            self._offset is not None
+            and cam_fid is not None
+            and cam_fid < self._offset_end
+        ):
+            residual = self._offset * (
+                (self._offset_end - cam_fid) / self._offset_span
+            )
+        self._offset = None
+        self._offset_end = self._offset_span = 0
+        span = int(round(GP_SRC_BLEND_S * CAM_HZ))
+        if span <= 0 or cam_fid is None:
+            return
+        delta = (prev_vec + residual) - vec
+        if not np.all(np.isfinite(delta)):
+            return
+        if float(np.linalg.norm(delta)) > SRC_BLEND_MAX_M:
+            return  # too big to be the same gate seen differently
+        self._offset = delta
+        self._offset_span = span
+        self._offset_end = cam_fid + span
+
+    def _present(self, est: dict | None, cam_fid: int | None) -> dict | None:
+        """Publish a copy carrying the decaying switch offset.
+
+        Runs on the CAMERA clock, not on publication events, and on every return
+        path including the dedup short-circuit. YOLO only publishes once per
+        inference (~9 camera frames on CPU), so a ramp advanced per-publication
+        stalls at full offset for the whole stale window — which is exactly the
+        span the ramp exists to cover.
+
+        `track_break` is re-asserted for the whole ramp: it already means "do not
+        differentiate across this" to both compute_guidance and
+        VisionVelocityTracker, and a ramp is exactly as unsafe to differentiate
+        as the step it replaced (0.8 m over 0.3 s reads as 2.7 m/s).
+        """
+        if est is None or self._offset is None:
+            return est
+        if cam_fid is None or cam_fid >= self._offset_end:
+            self._offset = None
+            return est
+        frac = (self._offset_end - cam_fid) / self._offset_span
+        out = dict(est)
+        out["body_x_m"] = est["body_x_m"] + float(self._offset[0]) * frac
+        out["body_y_m"] = est["body_y_m"] + float(self._offset[1]) * frac
+        out["body_z_m"] = est["body_z_m"] + float(self._offset[2]) * frac
+        out["src_blend"] = True
+        out["track_break"] = True
+        return out
+
+    def update(self, data: dict, motion: dict | None = None) -> dict | None:
+        cands, _suppress = gate_candidates(data, self.yolo_tracker, motion)
+        est = self._pick(cands)
         if est is None:
             self._clear_track()
             return None
+        # Read the camera clock up front: every return path below has to present
+        # through _present(), and the blend ramp is measured on this clock.
+        cam_fid = (data.get("frame") or {}).get("frame_id")
         # Dedup on the source's NATIVE id before re-stamping — one output per
         # underlying measurement even when the camera clock advances.
         src_key = (est.get("source"), est.get("frame_id"))
         if src_key == self._last_src_key:
-            return self._last_out
+            return self._present(self._last_out, cam_fid)
         self._last_src_key = src_key
         # Publish on the camera clock: yolo carries the (older) pose-packet
         # fid while anduril carries the camera fid, so raw fids REGRESS on
         # anduril->yolo flips — silently bypassing the EMA gap guard and the
         # guidance D-term guards (log-verified sawtooth).
-        cam_fid = (data.get("frame") or {}).get("frame_id")
         if cam_fid is not None:
             est["frame_id"] = cam_fid
         fid = est.get("frame_id")
@@ -393,7 +633,7 @@ class GateEstimateSmoother:
             and est.get("source") != "anduril"
         ):
             # Sticky YOLO only — Anduril already has its own EMA/pass-suppress.
-            return self._last_out
+            return self._present(self._last_out, cam_fid)
         vec = np.array(
             [est["body_x_m"], est["body_y_m"], est["body_z_m"]], dtype=np.float64
         )
@@ -412,7 +652,10 @@ class GateEstimateSmoother:
                 pbx, pby, pbz = self._ema[1], self._ema[2], self._ema[3]
                 prev_vec = np.array([pbx, pby, pbz], dtype=np.float64)
                 if not _same_target(vec, prev_vec):
-                    return self._on_target_break(est, vec, prev_vec, fid)
+                    return self._on_target_break(est, vec, prev_vec, fid, cam_fid)
+                # Same gate, different estimator: the snap below is right for
+                # the target but is a step for the controller. Ramp it instead.
+                self._start_blend(prev_vec, vec, cam_fid)
             est["track_break"] = True
             self._ema = None
             self._pending, self._pending_n = None, 0
@@ -420,7 +663,7 @@ class GateEstimateSmoother:
             prev_fid, pbx, pby, pbz = self._ema
             prev_vec = np.array([pbx, pby, pbz], dtype=np.float64)
             if not _same_target(vec, prev_vec):
-                return self._on_target_break(est, vec, prev_vec, fid)
+                return self._on_target_break(est, vec, prev_vec, fid, cam_fid)
             self._pending, self._pending_n = None, 0
             if fid is not None and 0 < fid - prev_fid <= EMA_MAX_FRAME_GAP:
                 a = GATE_EMA_ALPHA
@@ -429,10 +672,14 @@ class GateEstimateSmoother:
                 est["body_z_m"] = a * est["body_z_m"] + (1.0 - a) * pbz
         if fid is not None:
             self._ema = (fid, est["body_x_m"], est["body_y_m"], est["body_z_m"])
+        # _last_out / _ema track the TRUE new-source position; only the
+        # published copy carries the decaying switch offset, so the ramp never
+        # feeds back into the identity checks or the EMA history.
+        self._src = est.get("source")
         self._last_out = est
-        return est
+        return self._present(est, cam_fid)
 
-    def _on_target_break(self, est, vec, prev_vec, fid):
+    def _on_target_break(self, est, vec, prev_vec, fid, cam_fid=None):
         """A different gate showed up: hold the incumbent until the challenger
         persists BREAK_CONFIRM_N frames, then snap to it (never blend across
         identities). Alternating incumbent/challenger frames (two detectors on
@@ -443,7 +690,7 @@ class GateEstimateSmoother:
             self._pending = vec
             self._pending_n = 1
         if self._pending_n < BREAK_CONFIRM_N:
-            return self._last_out
+            return self._present(self._last_out, cam_fid)
         self._pending, self._pending_n = None, 0
         if (
             prev_vec[0] < HANDOFF_NEAR_BX_M
@@ -460,6 +707,11 @@ class GateEstimateSmoother:
             self._ema = (fid, est["body_x_m"], est["body_y_m"], est["body_z_m"])
         else:
             self._ema = None
+        # A different GATE, not a different view of the same one: there is no
+        # offset to bleed off, and carrying one over would drag the aim back
+        # toward the gate we just stopped tracking.
+        self._offset, self._offset_end = None, 0
+        self._src = est.get("source")
         self._last_out = est
         return est
 

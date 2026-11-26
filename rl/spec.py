@@ -48,8 +48,12 @@ CAM_TILT_DEG = 20.0  # camera pitched up from body-forward
 # PnP (Module 4) and mask projection (Module 2) must use the REAL size or range
 # estimates scale by the wrong factor and the pass-through lateral gate is off.
 # ----------------------------------------------------------------------------
-GATE_SIZE_M = 2.72
+GATE_SIZE_M = 2.72  # OUTER boundary (used for PnP corner geometry / projection)
 GATE_HALF = GATE_SIZE_M / 2.0
+# The flyable INNER opening (VADR-TS-003 §3.7) — the actual hole to thread. Use
+# THIS for pass-detection + centering reward; 2.72 (outer) makes the target
+# ~1.8x too loose so the policy "centers" but clips the frame at deploy.
+GATE_OPENING_M = 1.5
 
 # Gate-local frame: +x = through-gate normal (travel dir), +y = right (width),
 # +z = down (height). Corners ordered TL, TR, BR, BL with "top" = NED-up (-z).
@@ -85,7 +89,14 @@ ACTION_SCALE = np.array(
     [MAX_ROLL_RATE, MAX_PITCH_RATE, MAX_YAW_RATE, 1.0], dtype=np.float64
 )
 
-OBS_DIM = 24
+OBS_DIM = 24  # ONE observation frame (build_observation output)
+# The policy sees a short history (frame stack) so it can recover the
+# gate-relative DERIVATIVES the stateful GP expert used (bearing-rate,
+# elevation-rate) — a memoryless single-frame clone could not chain gates.
+# build_observation still returns ONE 24-D frame; the env stacks the last
+# OBS_STACK of them into the policy input.
+OBS_STACK = 3
+POLICY_OBS_DIM = OBS_DIM * OBS_STACK  # 72
 
 GRAVITY = 9.81
 

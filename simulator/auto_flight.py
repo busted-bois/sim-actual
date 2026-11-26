@@ -6,6 +6,7 @@ import os
 import signal
 import time
 
+from simulator import run_meta
 from simulator.lap_log import append_lap
 from simulator.preflight import (
     is_restart_arm_context,
@@ -140,6 +141,9 @@ def _retry_after_outcome(
 ) -> bool:
     """Reset sim after fail/success. Returns True if user cancelled."""
     active = int(shared_data.get("active_gate_index", 0) or 0)
+    # The only place a run's verdict exists -- the prints below are the whole
+    # record otherwise, and they die with the terminal.
+    run_meta.note_outcome(outcome, attempt=attempt, lap_s=lap_elapsed_s, active=active)
     if outcome == "success":
         best_str = (
             f" best={best_lap_s:.1f}s" if best_lap_s is not None else ""

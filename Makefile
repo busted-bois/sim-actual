@@ -1,4 +1,4 @@
-.PHONY: i install check test sim view auto auto-gp control-flight free-port probe est-selftest doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics capture dataset train-gatenet train-ppo fly-policy rl-test attitude-harness log-demos train-bc
+.PHONY: i install check test sim view auto auto-gp control-flight classical blue classical-blue free-port push-videos push-videos-dry videos-index videos-sync videos-get videos-frames gp-score bl-replay peek-replay probe est-selftest est-validate shadow-validate doc-context doc-validate doc-update capture-gates fly fly-vision fly-vision-est hover dynamics thrust-id capture dataset train-gatenet train-ppo fly-policy eval-policy rl-flight rl-test attitude-harness log-demos train-bc rl2-reset-bench rl2-log-demos rl2-run rl2-diff rl2-train-bc rl2-train rl2-eval rl2-log rl2-fly-gate rl2-gp-smoke rl2-list-demos rl2-reset-demos
 
 i install:
 	uv sync
@@ -19,7 +19,7 @@ doc-update: doc-context
 	node scripts/update-main-documentation.mjs
 
 test:
-	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector -v
+	uv run python -m unittest tests.test_preflight tests.test_pilot_gates_passed tests.test_race_monitor tests.test_auto_flight tests.test_gate_watchdog tests.test_fly2_course tests.test_vision_nav tests.test_vision_nav_pilot tests.test_vq2_pose tests.test_vq2_pilot tests.test_vision_rx_auto_logs tests.test_lap_log tests.test_gp_pilot tests.test_gp_signs tests.test_calibration tests.test_flightlab tests.test_flightlab_bus tests.test_mavlink_client tests.test_gp_expert tests.test_bc_pipeline tests.test_deploy_gate_map tests.test_gate_corners_cv tests.test_gate_pnp tests.test_gate_detector tests.test_blue_line_vision tests.test_display tests.test_gate_occlusion tests.test_run_id tests.test_run_meta tests.test_gp_score -v
 
 sim:
 	uv run main.py
@@ -41,6 +41,14 @@ control-flight:
 # Back-compat alias for the original AndurilGP-style entry name.
 auto-gp: control-flight
 
+# This branch's flight: the rl_failed101 classical GP control law + gate vision,
+# with the dual-cyan corridor feeding the no-gate fallback and the post-pass
+# SEARCH direction cue. Same target as control-flight -- the corridor detector
+# runs in vision_rx unconditionally, so this is a name, not a mode switch.
+# `classical` and `blue` are separate goals so `make classical blue` reads as
+# written; make runs the shared prerequisite once. `make classical-blue` too.
+classical blue classical-blue: control-flight
+
 # Passive live vision window (camera + YOLO gate detection). No MAVLink, no
 # arming -- works under the VQ2 telemetry block. Just watch the CNN detect.
 view:
@@ -54,6 +62,71 @@ else
 	bash scripts/free-mavlink-port.sh
 endif
 
+# --- Shared run recordings ----------------------------------------------------
+# Publish runs/videos/*.mp4 to the `videos` branch (Git LFS) so the whole team
+# has one archive to review and finetune against. Works from any branch: the
+# push happens in a throwaway worktree, so your tree is untouched. Re-running is
+# safe -- recordings already on the branch are skipped.
+push-videos:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1
+else
+	bash scripts/push-videos.sh
+endif
+
+# Read the shared archive WITHOUT checking out the videos branch -- your tree
+# and branch stay put. index/sync cost no LFS bandwidth (they read sidecars and
+# telemetry, never video payload); only videos-get downloads an mp4.
+#   make videos-index                     what runs exist, gates reached, outcome
+#   make videos-sync                      pull sidecars + telemetry into runs/archive/
+#   make videos-get RUN=<run>             fetch one recording (~65 MB)
+#   make videos-frames RUN=<run> AT=12.5  write frames at a time, or EVERY=<s>
+videos-index:
+	uv run scripts/videos_archive.py index
+
+videos-sync:
+	uv run scripts/videos_archive.py sync
+
+videos-get:
+	uv run scripts/videos_archive.py get $(RUN)
+
+videos-frames:
+	uv run scripts/video_frames.py runs/archive/videos/$(RUN).mp4 \
+		$(if $(AT),--at $(AT),) $(if $(EVERY),--every $(EVERY),) \
+		--out runs/archive/frames/$(RUN)
+
+# --- Did that change help? ----------------------------------------------------
+# All three score a change WITHOUT flying it again, and all three take
+# --json <f> to save a baseline and --baseline <f> to diff against one.
+#
+# gp-score reads the flight CSVs + sidecars for the PILOT. It splits the report
+# in two on purpose: gate counts (0-5, high variance, a handful of attempts) get
+# NO verdict, while per-tick metrics -- command saturation, inversion, blind
+# time -- are judged at 10^3-10^4 samples, where a difference is real.
+#   make gp-score                       every run, grouped by config
+#   make gp-score ARGS="--run 20260731_181602"
+#   make gp-score ARGS="--json before.json"   then later:  ARGS="--baseline before.json"
+gp-score:
+	uv run scripts/gp_score.py $(ARGS)
+
+# bl-replay scores the blue-line corridor DETECTOR off a recorded mp4. It has
+# already falsified two plausible-looking detector changes offline.
+#   make bl-replay ARGS="runs/videos/vision_<run>.mp4 --json before.json"
+bl-replay:
+	uv run scripts/bl_replay.py $(ARGS)
+
+# peek-replay does the same for the occlusion PEEK cue (gate-3 pillar dodge).
+peek-replay:
+	uv run scripts/peek_replay.py $(ARGS)
+
+# Same, but only prints what would be uploaded.
+push-videos-dry:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/push-videos.ps1 -DryRun
+else
+	bash scripts/push-videos.sh --dry-run
+endif
+
 # Passive MAVLink probe: per-message rates + IMU conventions. Run in Training
 # AND in VQ2 to see exactly what the event block removes.
 probe:
@@ -62,6 +135,21 @@ probe:
 # Offline selftest for the VQ2 state estimator (ESKF + tilt/mag/baro/landmarks).
 est-selftest:
 	uv run -m simulator.state_estimator --selftest
+
+# Validate the ecl/EKF2 estimator against VQ1 GROUND TRUTH. Run on the legacy
+# VQ1 sim (telemetry ON): flies the GP pilot, runs EclEkf as a live shadow fed
+# IMU + PnP vision velocity, and logs EKF-fused vs IMU-dead-reckon vs truth
+# (LOCAL_POSITION_NED/ATTITUDE). Ctrl+C to stop and print the RMSE report.
+# Re-report a saved log:  make est-validate ARGS="--report logs/ecl_validate_<boot>.jsonl"
+est-validate:
+	uv run -m simulator.ecl_validate $(ARGS)
+
+# SHADOW-MODE validation: run Abhay's known-good telemetry pilot (VQ1 sim)
+# UNMODIFIED while our VQ2 estimator observes IMU+camera only, then compare vs
+# ground truth. Set ABHAY_DIR if his repo isn't at the default Desktop path.
+# Re-report:  make shadow-validate ARGS="--report logs/shadow_<ts>.jsonl"
+shadow-validate:
+	uv run -m simulator.shadow_validate $(ARGS)
 
 # --- Fly the course (odometry + gate map, measured-dynamics controller) -------
 # Gate map is captured at race START as a one-shot burst. If rl/data/gate_map.json
@@ -88,8 +176,11 @@ fly-vision-est:
 hover:
 	uv run -m rl.fly2 --mode hover --seconds 8
 
-# Measure the sim's attitude/thrust response (open-loop characterization).
-dynamics:
+# Measure + FIT + persist translational dynamics (thrust_accel, hover, drag,
+# v_max) into flightlab/calibration.json so rl/env.py trains on the real thrust
+# curve and drag. Sim must be in a TRAINING session (odometry velocity needed).
+# `thrust-id` is an alias. --dry-run measures without writing.
+dynamics thrust-id:
 	uv run -m rl.dynamics_id
 
 # Attitude inner-loop harness (Spec B). Writes flightlab/calibration.json +
@@ -121,13 +212,93 @@ log-demos:
 train-bc:
 	uv run -m rl.train_bc
 
-# Module 8: train PPO policy over the curriculum -> rl/data/policy.pt
+# Module 8: train PPO over the curriculum -> rl/data/policy.pt. Uses the GPU
+# when available (--device cpu to force CPU); warm-starts from policy_bc.pt when
+# present; TensorBoard logs + best/checkpoint models under rl/data/{tb,best,ckpts}.
+#   tensorboard --logdir rl/data/tb
 train-ppo:
 	uv run -m rl.train_ppo
+
+# VQ2 vision-only RL flight: fly rl/data/policy.pt on the live sim using
+# YOLO+PnP gate pose + IMU state (NO gate map, NO odometry). Run the sim in a
+# TRAINING session on the VQ2 course. Live rate calibration via env vars:
+#   RL_RATE_SCALE=0.4 RL_SIGN_ROLL=-1 RL_SIGN_PITCH=1 RL_SIGN_YAW=-1 make rl-flight
+rl-flight:
+	uv run auto_rl.py
+
+# Evaluate the trained policy offline (gates chained + completion per stage).
+# Headless, no live sim. Prints reproducible per-stage metrics from policy.pt.
+eval-policy:
+	uv run -m rl.eval_policy
 
 # Module 8: fly the trained policy on the live sim.
 fly-policy:
 	uv run -m rl.deploy
+
+# --- VQ2 real-sim RL (rl/vq2/) --------------------------------------------
+# DE-RISK FIRST: benchmark automated episodic reset speed + re-align reliability
+# on the live VQ2 sim. If resets are slow/flaky, real-sim RL is not viable.
+rl2-reset-bench:
+	uv run -m rl.vq2.reset --cycles $(or $(CYCLES),10)
+
+# Collect BC demos by taping the proven GP pilot flying the real sim. Saves a
+# standalone replayable trajectory to rl/data/vq2/saves/<name>.npz AND appends to
+# the BC bootstrap (demos.npz). Name it:  make rl2-log-demos ARGS="--name run1"
+rl2-log-demos:
+	uv run -m rl.vq2.log_demos $(ARGS)
+
+# Replay a saved trajectory's ACTIONS open-loop (schedules on the SIM clock) AND
+# record the replay's own trace to <name>_replay.npz. Start/restart the race:
+#   make rl2-run ARGS="<name>"
+rl2-run:
+	uv run -m rl.vq2.run_traj $(ARGS)
+
+# Diff a replay trace vs its original to find WHERE/WHY the drone turned
+# differently (first diverging signal: command / sim-time / gyro / gate-pose).
+#   make rl2-diff ARGS="<name>"
+rl2-diff:
+	uv run -m rl.vq2.diff_traj $(ARGS)
+
+# Behaviour-clone a PPO policy on the demos -> rl/data/vq2/policy_bc.zip (no sim).
+rl2-train-bc:
+	uv run -m rl.vq2.train_bc $(ARGS)
+
+# Incremental closed-loop training in the REAL VQ2 sim. BC-inits the policy from
+# ALL accumulated successful segments (+ demos.npz), then flies PPO online; every
+# flight that reaches a NEW gate is saved to success/gate{N}/ as it happens.
+# Resume a checkpoint:  make rl2-train ARGS="--resume rl/data/vq2/vq2_ppo.zip"
+rl2-train:
+	uv run -m rl.vq2.train $(ARGS)
+
+# List accumulated successful trajectories per gate.
+rl2-list-demos:
+	uv run -m rl.vq2.success --list
+
+# Delete ALL stored demonstrations (successes + demos.npz) to rebuild from scratch.
+# Keep the expert bootstrap:  make rl2-reset-demos ARGS="--keep-demos"
+rl2-reset-demos:
+	uv run -m rl.vq2.success --reset $(ARGS)
+
+# Evaluate a trained VQ2 policy in the real sim.
+rl2-eval:
+	uv run -m rl.vq2.eval $(ARGS)
+
+# Read the training episode log: gate-pass rate + per-term reward breakdown.
+# Verifies the drone registers gate passes and the reward function is working.
+rl2-log:
+	uv run -m rl.vq2.read_log $(ARGS)
+
+# ISOLATION TEST: fly straight at the gate with a hand-coded vision servo (GP
+# steering law) through the RL env's command path -- NO neural net. If this
+# threads gate 1, the vision->control plumbing is sound and the RL failure is the
+# learned policy. Start the race, then run.
+rl2-fly-gate:
+	uv run -m rl.vq2.fly_to_gate $(ARGS)
+
+# RESIDUAL-RL STAGE 1: does the GP base fly through GPFlightInterface (the class
+# the RL env flies with), with NO residual? Should clear gates like control-flight.
+rl2-gp-smoke:
+	uv run -m rl.vq2.gp_smoke $(ARGS)
 
 # Offline self-tests for every module (no live sim needed).
 rl-test:

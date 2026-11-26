@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from pymavlink import mavutil
 
-from simulator.controller import _send_attitude_rates
+from simulator.controller import _send_attitude_quat, _send_attitude_rates
 from simulator.mavlink_rx import MAVLinkRX
 from simulator.state_estimator import StateEstimator, quat_mult
 from simulator.timesync import TimeSync
@@ -303,6 +303,20 @@ class SimInterface:
             roll_rate=float(roll_rate),
             pitch_rate=float(pitch_rate),
             yaw_rate=float(yaw_rate),
+            thrust=float(thrust),
+        )
+
+    def send_attitude_quat_deg(self, roll_deg, pitch_deg, yaw_deg, thrust):
+        # Absolute-attitude (euler->quaternion) channel -- the SAME wire the
+        # proven GP pilot flies on (Controller "attitude_quat" mode). Use this
+        # for the RL policy so its commands match the recorded demos.
+        self.estimator.thrust_cmd = float(thrust)
+        _send_attitude_quat(
+            self.conn,
+            self.system_boot_ms,
+            roll_deg=float(roll_deg),
+            pitch_deg=float(pitch_deg),
+            yaw_deg=float(yaw_deg),
             thrust=float(thrust),
         )
 

@@ -160,6 +160,9 @@ class Controller:
         self.data = data
         self.system_boot_ms = system_boot_ms
         self.control_mode = "motor"
+        # Optional StateEstimator; setup_components attaches one so the ESKF
+        # sees commanded thrust. None = no estimator (tests, harnesses).
+        self.estimator = None
         # Per-pilot command rate: spec VADR-TS-003 4.4 caps it below 100 Hz.
         # Default 90 (IBVS/others); GPPilot lowers it to the original 60.
         self.control_hz = CONTROL_HZ
@@ -190,6 +193,12 @@ class Controller:
 
             return GPPilot(self, self.data)
 
+        if pilot == "rl":
+            # VQ2 learned-policy pilot (vision-only, no gate map). make rl-flight.
+            from simulator.rl_pilot import RLPilot
+
+            return RLPilot(self, self.data)
+
         if auto_flight_enabled():
             # Default IBVS; AUTO_PILOT=vnav selects world-map navigator.
             if os.environ.get("AUTO_PILOT", "ibvs").strip().lower() == "vnav":
@@ -212,6 +221,24 @@ class Controller:
         self._yaw_rate = yaw_rate
         self._thrust = thrust
 
+    def send_attitude_rates(self, roll_rate, pitch_rate, yaw_rate, thrust):
+        """Send body-rate + thrust directly this tick (used by manual flight).
+
+        Manual flight drives its own control loop (manual.py) rather than
+        Controller.update(), so it commands the wire immediately instead of
+        latching values for update() to send.
+        """
+        if self.estimator is not None:
+            self.estimator.thrust_cmd = float(thrust)
+        _send_attitude_rates(
+            self.sim_conn,
+            self.system_boot_ms,
+            roll_rate=float(roll_rate),
+            pitch_rate=float(pitch_rate),
+            yaw_rate=float(yaw_rate),
+            thrust=float(thrust),
+        )
+
     def set_attitude_quat_deg(self, roll_deg, pitch_deg, yaw_deg, thrust):
         self._quat_roll_deg = roll_deg
         self._quat_pitch_deg = pitch_deg
@@ -233,6 +260,11 @@ class Controller:
                 self.arm()
         else:
             self._disarm_ticks = 0
+
+        # The ESKF integrates COMMANDED thrust (this sim's accelerometer is only
+        # trustworthy on the ground), so it must see every collective we send.
+        if self.estimator is not None:
+            self.estimator.thrust_cmd = float(self._thrust)
 
         if self.control_mode == "motor":
             update_motor_control(self.sim_conn, self.system_boot_ms)

@@ -151,6 +151,22 @@ class TestManualControl(unittest.TestCase):
         self.assertIsNone(mc._attitude())
         self.assertIsNone(mc._attitude_source())
 
+    def test_attitude_ignores_eskf_estimate(self):
+        # mavlink_rx may publish ESKF attitude into shared_data; manual must
+        # ignore it (same as manual_controls, which had no estimator).
+        data = {
+            "armed": True,
+            "state_source": "eskf",
+            "attitude": {
+                "roll": 0.5,
+                "pitch": -0.3,
+                "yaw": 1.0,
+            },
+        }
+        _, mc = self._mc([], data=data)
+        self.assertIsNone(mc._attitude())
+        self.assertIsNone(mc._attitude_source())
+
     def test_deadreckon_tracks_roll_command(self):
         # The pilot integrates its own roll commands: holding D (positive cmd,
         # banks right) accumulates positive dead-reckoned roll. The sim never
