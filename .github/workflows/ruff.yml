@@ -10,3 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
+        with:
+          # Pin: ruff-action otherwise floats >=dev pin to latest (0.16+) and
+          # fails on pre-existing style that 0.15.15 accepts.
+          version: "0.15.15"

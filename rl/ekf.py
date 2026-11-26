@@ -26,6 +26,7 @@ from rl.spec import quat_to_R
 GRAVITY = 9.81
 GRAVITY_SIGN = 1.0  # +1: g points +Z (down) in NED
 G_WORLD = np.array([0.0, 0.0, GRAVITY_SIGN * GRAVITY])
+CHI2_3 = 7.815  # 3-DOF Mahalanobis NIS gate at 95%
 
 
 # ---- quaternion helpers (w,x,y,z) ------------------------------------------
@@ -81,6 +82,7 @@ class ESKF:
         self.P = np.eye(9) * (p0_std**2)
         self.sa, self.sg = sigma_accel, sigma_gyro
         self.s_pos, self.s_att = sigma_pos, sigma_att
+        self.n_rejected = 0  # innovation-gate rejects (position NIS)
 
     def healthy(self) -> bool:
         """False once any state/covariance entry is non-finite (diverged)."""
@@ -123,35 +125,46 @@ class ESKF:
         self.P = F @ self.P @ F.T + Q
 
     # ---- generic update ----------------------------------------------------
-    def _update(self, H, r, Rm):
+    def _update(
+        self, H, r, Rm, gate: bool = False, chi2_thresh: float = CHI2_3
+    ) -> bool:
+        """Joseph-form update. If gate, reject when NIS r^T S^{-1} r >= chi2."""
         r = np.asarray(r, float)
         if not np.isfinite(r).all():
-            return  # reject non-finite measurements outright
+            return False
         S = H @ self.P @ H.T + Rm
         try:
+            if gate:
+                # nu = r^T S^{-1} r (Normalized Innovation Squared)
+                nu = float(r @ np.linalg.solve(S, r))
+                if not np.isfinite(nu) or nu >= chi2_thresh:
+                    self.n_rejected += 1
+                    return False
             Kk = self.P @ H.T @ np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            return
+            return False
         if not np.isfinite(Kk).all():
-            return
+            return False
         dx = Kk @ r
         self._inject(dx)
         I_KH = np.eye(9) - Kk @ H
         self.P = I_KH @ self.P @ I_KH.T + Kk @ Rm @ Kk.T  # Joseph form
+        return True
 
     def _inject(self, dx):
         self.p = self.p + dx[0:3]
         self.v = self.v + dx[3:6]
         self.q = quat_norm(quat_mult(self.q, quat_from_smallangle(dx[6:9])))
 
-    def update_position(self, p_meas, sigma=None):
+    def update_position(self, p_meas, sigma=None, gate: bool = True) -> bool:
+        """Position update. gate=True applies Mahalanobis NIS (camera/landmark)."""
         s = self.s_pos if sigma is None else sigma
         H = np.zeros((3, 9))
         H[:, 0:3] = np.eye(3)
         r = np.asarray(p_meas, float) - self.p
-        self._update(H, r, (s**2) * np.eye(3))
+        return self._update(H, r, (s**2) * np.eye(3), gate=gate)
 
-    def update_attitude(self, q_meas, sigma=None):
+    def update_attitude(self, q_meas, sigma=None) -> bool:
         s = self.s_att if sigma is None else sigma
         dq = quat_mult(quat_inv(self.q), quat_norm(np.asarray(q_meas, float)))
         if dq[0] < 0:
@@ -159,7 +172,7 @@ class ESKF:
         dtheta = 2.0 * dq[1:4]  # small-angle attitude error (body frame)
         H = np.zeros((3, 9))
         H[:, 6:9] = np.eye(3)
-        self._update(H, dtheta, (s**2) * np.eye(3))
+        return self._update(H, dtheta, (s**2) * np.eye(3), gate=False)
 
     def state(self):
         return {
