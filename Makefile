@@ -88,6 +88,10 @@ fly-vision-est:
 hover:
 	uv run -m rl.fly2 --mode hover --seconds 8
 
+# Vertical-axis flight harness (V1–V4). Start sim + TRAINING session first.
+vertical:
+	uv run python -m flightlab.run_vertical
+
 # Measure the sim's attitude/thrust response (open-loop characterization).
 dynamics:
 	uv run -m rl.dynamics_id
